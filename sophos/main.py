@@ -10,8 +10,13 @@ import aiohttp
 
 from sophos.config import settings
 from sophos.db import close_db, init_db
+from sophos.llm.context import build_chat_context
+from sophos.llm.openai_compat import OpenAICompatProvider
+from sophos.llm.tool_loop import run_tool_loop
 from sophos.message_store import MessageStore
 from sophos.onebot_api import OneBotAPI
+from sophos.tools.onebot import GetGroupMemberInfoTool, SendMessageTool
+from sophos.tools.registry import ToolRegistry
 
 logger = logging.getLogger("sophos")
 
@@ -70,6 +75,139 @@ async def handle_event(api: OneBotAPI, event: dict[str, Any], store: MessageStor
                 raw_message=[{"type": "text", "data": {"text": "pong"}}],
             )
 
+    elif text.startswith("咕喵咕喵"):
+        await _handle_llm_trigger(api, event, store)
+
+
+# ── LLM 触发处理（临时，后续由触发器替代）─────────────────
+
+# 模块级 provider 和 registry，避免每次请求重建
+_llm_provider: OpenAICompatProvider | None = None
+_tool_registry: ToolRegistry | None = None
+
+_SYSTEM_PROMPT = (
+    "你是 {nickname}，一个活跃在 QQ 群聊中的猫娘。\n"
+    "你有两类工具可以使用：\n"
+    "- 输入工具（获取信息）：如查询群成员信息\n"
+    "- 输出工具（执行操作）：如发送消息\n"
+    "你必须至少调用一个输出工具来完成回复。使用 send_message 工具发送你的回复。\n"
+    "回复时请自然、简洁，像一个真正的群聊成员。"
+)
+
+
+def _get_provider() -> OpenAICompatProvider:
+    """获取或创建 LLM provider 单例。"""
+    global _llm_provider
+    if _llm_provider is None:
+        _llm_provider = OpenAICompatProvider(
+            base_url=settings.llm_base_url,
+            api_key=settings.llm_api_key,
+            model=settings.llm_model,
+            default_temperature=settings.llm_temperature,
+            default_max_tokens=settings.llm_max_tokens,
+            request_timeout=settings.llm_request_timeout,
+        )
+    return _llm_provider
+
+
+def _get_registry() -> ToolRegistry:
+    """获取或创建 ToolRegistry 单例。"""
+    global _tool_registry
+    if _tool_registry is None:
+        _tool_registry = ToolRegistry()
+        _tool_registry.register(SendMessageTool())
+        _tool_registry.register(GetGroupMemberInfoTool())
+    return _tool_registry
+
+
+async def _handle_llm_trigger(
+    api: OneBotAPI,
+    event: dict[str, Any],
+    store: MessageStore,
+) -> None:
+    """处理 LLM 触发：构建上下文 → tool loop → LLM 通过 send_message tool 回复。
+
+    LLM 被要求通过调用 send_message 等输出工具来完成操作。
+    如果 LLM 没有调用 send_message（兜底），则提取最终 assistant content 发送。
+    """
+    msg_type = event.get("message_type", "private")
+    group_id = event.get("group_id")
+    user_id = event.get("user_id")
+    self_id = event.get("self_id")
+
+    provider = _get_provider()
+    registry = _get_registry()
+
+    # 构建上下文
+    nickname = settings.bot_nickname or "Sophos"
+    # 告诉 LLM 当前会话信息，以便调用 send_message 时知道发送目标
+    if msg_type == "group":
+        conversation_info = f"当前会话：群聊（group_id: {group_id}）"
+    else:
+        conversation_info = f"当前会话：私聊（user_id: {user_id}）"
+    system_prompt = _SYSTEM_PROMPT.format(nickname=nickname) + f"\n{conversation_info}"
+    messages = await build_chat_context(
+        store,
+        group_id=group_id,
+        user_id=user_id if msg_type == "private" else None,
+        system_prompt=system_prompt,
+    )
+
+    # tool 执行回调 — 追踪是否调用了输出工具
+    tool_context: dict[str, Any] = {"api": api, "store": store, "self_id": self_id}
+    sent_via_tool = False
+
+    async def tool_executor(name: str, params: dict[str, Any]) -> Any:
+        nonlocal sent_via_tool
+        result = await registry.execute(name, params, tool_context)
+        if name == "send_message":
+            sent_via_tool = True
+        return result
+
+    # 运行 tool loop
+    try:
+        result_messages = await run_tool_loop(
+            provider,
+            messages,
+            tools=registry.get_function_schemas(),
+            tool_executor=tool_executor,
+            max_rounds=settings.llm_max_tool_rounds,
+        )
+    except Exception:
+        logger.exception("LLM tool loop failed")
+        return
+
+    # 兜底：如果 LLM 没有通过 send_message tool 发送回复，提取最终 content 发送
+    if not sent_via_tool:
+        final_msg = result_messages[-1] if result_messages else None
+        reply_text = (final_msg.get("content") or "") if final_msg else ""
+        if not reply_text:
+            logger.warning("LLM returned empty response and didn't call send_message")
+            return
+
+        logger.info("LLM didn't call send_message, using fallback")
+        send_params: dict[str, Any] = {
+            "message_type": msg_type,
+            "message": [{"type": "text", "data": {"text": reply_text}}],
+        }
+        if msg_type == "group":
+            send_params["group_id"] = group_id
+        else:
+            send_params["user_id"] = user_id
+
+        result = await api.call("send_msg", send_params)
+        sent_message_id = result.get("message_id")
+        logger.info("Fallback reply sent (message_id=%s)", sent_message_id)
+
+        if sent_message_id is not None:
+            await store.save_self_message(
+                message_id=sent_message_id,
+                message_type=msg_type,
+                group_id=group_id if msg_type == "group" else None,
+                user_id=self_id or 0,
+                raw_message=[{"type": "text", "data": {"text": reply_text}}],
+            )
+
 
 async def ws_loop(store: MessageStore) -> None:
     """连接 NapCat WebSocket 并持续监听消息。"""
@@ -120,6 +258,8 @@ async def start() -> None:
     try:
         await ws_loop(store)
     finally:
+        if _llm_provider is not None:
+            await _llm_provider.close()
         await close_db()
 
 
