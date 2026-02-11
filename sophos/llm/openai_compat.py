@@ -16,6 +16,9 @@ from sophos.llm.provider import ChatResponse, LLMProvider, Message, UsageInfo
 
 logger = logging.getLogger(__name__)
 
+# 自定义 TRACE 级别（与 main.py 一致）
+TRACE = 5
+
 
 class OpenAICompatProvider(LLMProvider):
     """OpenAI 兼容 API 的 Provider。"""
@@ -28,6 +31,8 @@ class OpenAICompatProvider(LLMProvider):
         default_temperature: float = 0.7,
         default_max_tokens: int = 4096,
         request_timeout: int = 60,
+        stream: bool = True,
+        extra_body: dict[str, Any] | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
@@ -35,6 +40,8 @@ class OpenAICompatProvider(LLMProvider):
         self._default_temperature = default_temperature
         self._default_max_tokens = default_max_tokens
         self._request_timeout = request_timeout
+        self._stream = stream
+        self._extra_body = extra_body or {}
         self._session: aiohttp.ClientSession | None = None
 
     def _get_session(self) -> aiohttp.ClientSession:
@@ -55,7 +62,12 @@ class OpenAICompatProvider(LLMProvider):
         temperature: float | None = None,
         max_tokens: int | None = None,
     ) -> ChatResponse:
-        """调用 OpenAI 兼容的 chat/completions 端点。"""
+        """调用 OpenAI 兼容的 chat/completions 端点。
+
+        stream=True 时使用 SSE streaming 避免长时间等待导致的超时，
+        内部累积所有 delta 后返回完整 ChatResponse，对上层透明。
+        stream=False 时使用传统的一次性请求（兼容不支持流式的 provider）。
+        """
         url = f"{self._base_url}/chat/completions"
         payload: dict[str, Any] = {
             "model": self._model,
@@ -65,18 +77,149 @@ class OpenAICompatProvider(LLMProvider):
         }
         if tools:
             payload["tools"] = tools
+        if self._extra_body:
+            payload.update(self._extra_body)
 
         session = self._get_session()
-        logger.debug("LLM request: model=%s, messages=%d, tools=%s", self._model, len(messages), len(tools) if tools else 0)
+        logger.log(TRACE, "LLM payload:\n%s", json.dumps(payload, ensure_ascii=False, indent=2))
 
-        timeout = aiohttp.ClientTimeout(total=self._request_timeout)
-        async with session.post(url, json=payload, timeout=timeout) as resp:
-            if resp.status != 200:
-                body = await resp.text()
-                raise RuntimeError(f"LLM API error {resp.status}: {body}")
-            data = await resp.json()
+        if self._stream:
+            payload["stream"] = True
+            logger.debug(
+                "LLM request (stream): model=%s, messages=%d, tools=%s",
+                self._model, len(messages), len(tools) if tools else 0,
+            )
+            # sock_read = request_timeout：TTFT / 两个 chunk 之间的最大等待
+            # total = sock_read × 5：宽松总超时，防止无限挂起
+            timeout = aiohttp.ClientTimeout(
+                total=self._request_timeout * 5,
+                sock_read=float(self._request_timeout),
+            )
+            async with session.post(url, json=payload, timeout=timeout) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    raise RuntimeError(f"LLM API error {resp.status}: {body}")
+                return await self._consume_stream(resp)
+        else:
+            logger.debug(
+                "LLM request: model=%s, messages=%d, tools=%s",
+                self._model, len(messages), len(tools) if tools else 0,
+            )
+            timeout = aiohttp.ClientTimeout(total=self._request_timeout)
+            async with session.post(url, json=payload, timeout=timeout) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    raise RuntimeError(f"LLM API error {resp.status}: {body}")
+                data = await resp.json()
+            return self._parse_response(data)
 
-        return self._parse_response(data)
+    async def _consume_stream(self, resp: aiohttp.ClientResponse) -> ChatResponse:
+        """读取 SSE stream，累积 delta 为完整的 ChatResponse。"""
+        role = "assistant"
+        content_parts: list[str] = []
+        tool_calls_map: dict[int, dict[str, Any]] = {}  # index → accumulated tool call
+        extra_fields: dict[str, Any] = {}  # provider 特有字段（如 Gemini 的额外字段）
+        finish_reason = "stop"
+        usage: dict[str, Any] | None = None
+        chunk_count = 0
+
+        while True:
+            line_bytes = await resp.content.readline()
+            if not line_bytes:
+                break
+            line = line_bytes.decode("utf-8").strip()
+            if not line or not line.startswith("data: "):
+                continue
+            data_str = line[6:]
+            if data_str == "[DONE]":
+                logger.debug("Stream done, received %d chunks", chunk_count)
+                break
+
+            try:
+                chunk = json.loads(data_str)
+            except json.JSONDecodeError:
+                logger.warning("Malformed SSE chunk: %s", data_str[:200])
+                continue
+
+            chunk_count += 1
+            choices = chunk.get("choices")
+            if not choices:
+                if chunk.get("usage"):
+                    usage = chunk["usage"]
+                continue
+
+            choice = choices[0]
+            delta = choice.get("delta", {})
+
+            if "role" in delta:
+                role = delta["role"]
+            if delta.get("content"):
+                content_parts.append(delta["content"])
+            # 透传 provider 特有的顶层字段（如 Gemini 的额外字段）
+            for key, value in delta.items():
+                if key not in ("role", "content", "tool_calls"):
+                    extra_fields[key] = value
+            if "tool_calls" in delta:
+                for tc_delta in delta["tool_calls"]:
+                    idx = tc_delta.get("index", 0)
+                    if idx not in tool_calls_map:
+                        tool_calls_map[idx] = {
+                            "id": tc_delta.get("id", ""),
+                            "type": tc_delta.get("type", "function"),
+                            "function": {
+                                "name": tc_delta.get("function", {}).get("name", ""),
+                                "arguments": "",
+                            },
+                        }
+                    else:
+                        if tc_delta.get("id"):
+                            tool_calls_map[idx]["id"] = tc_delta["id"]
+                        fn = tc_delta.get("function", {})
+                        if fn.get("name"):
+                            tool_calls_map[idx]["function"]["name"] = fn["name"]
+                    args_piece = tc_delta.get("function", {}).get("arguments", "")
+                    if args_piece:
+                        tool_calls_map[idx]["function"]["arguments"] += args_piece
+                    # 保留 tool_call 中的 provider 特有字段（如 thought_signature）
+                    for key, value in tc_delta.items():
+                        if key not in ("index", "id", "type", "function"):
+                            tool_calls_map[idx][key] = value
+
+            if choice.get("finish_reason"):
+                finish_reason = choice["finish_reason"]
+            if chunk.get("usage"):
+                usage = chunk["usage"]
+
+        # 组装最终 message
+        message: Message = {"role": role}  # type: ignore[typeddict-item]
+        content = "".join(content_parts)
+        if content:
+            message["content"] = content
+        if tool_calls_map:
+            message["tool_calls"] = [tool_calls_map[i] for i in sorted(tool_calls_map)]
+        # 透传 provider 特有字段（如 Gemini 的额外字段）
+        for key, value in extra_fields.items():
+            message[key] = value  # type: ignore[literal-required]
+
+        # finish_reason 标准化
+        if finish_reason in ("function_call",):
+            finish_reason = "tool_calls"
+
+        usage_info: UsageInfo | None = None
+        if usage:
+            usage_info = {
+                "prompt_tokens": usage.get("prompt_tokens", 0),
+                "completion_tokens": usage.get("completion_tokens", 0),
+                "total_tokens": usage.get("total_tokens", 0),
+            }
+
+        logger.debug(
+            "Stream complete: %d chunks, content_len=%d, tool_calls=%d, finish=%s",
+            chunk_count, len(content), len(tool_calls_map), finish_reason,
+        )
+        result: ChatResponse = {"message": message, "usage": usage_info, "finish_reason": finish_reason}
+        logger.log(TRACE, "LLM response:\n%s", json.dumps(result, ensure_ascii=False, indent=2, default=str))
+        return result
 
     @staticmethod
     def _parse_response(data: dict[str, Any]) -> ChatResponse:
@@ -117,7 +260,9 @@ class OpenAICompatProvider(LLMProvider):
         elif finish in ("function_call",):
             finish = "tool_calls"  # 旧版 API 兼容
 
-        return {"message": message, "usage": usage, "finish_reason": finish}
+        result: ChatResponse = {"message": message, "usage": usage, "finish_reason": finish}
+        logger.log(TRACE, "LLM response:\n%s", json.dumps(result, ensure_ascii=False, indent=2, default=str))
+        return result
 
     async def close(self) -> None:
         """关闭 HTTP session。"""

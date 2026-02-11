@@ -57,11 +57,16 @@ class Settings(BaseSettings):
     llm_request_timeout: int = 60
     # Tool calling 最大循环轮次
     llm_max_tool_rounds: int = 10
+    # 是否使用流式请求（避免超时，但部分 provider 可能不兼容）
+    llm_stream: bool = True
+    # 额外请求体参数（JSON 字符串），会合并到每次 LLM 请求的 payload 中
+    # 例如 Gemini 关闭 thinking：{"reasoning_effort":"none"}
+    llm_extra_body: str = ""
     # 用户消息格式模板（多轮和拍平模式都使用）
-    # 可用占位符：{{time}} {{name}} {{uid}} {{message}}
-    llm_user_schema: str = "[{{time}}] {{name}}({{uid}})：{{message}}"
+    # 可用占位符：{{time}} {{mid}} {{name}} {{uid}} {{message}}
+    llm_user_schema: str = "[{{time}}] #{{mid}} {{name}}({{uid}})：{{message}}"
     # Bot 消息格式模板（仅拍平模式使用，多轮模式下 assistant role 自带身份）
-    llm_bot_schema: str = "[{{time}}] {{name}}：{{message}}"
+    llm_bot_schema: str = "[{{time}}] #{{mid}} {{name}}：{{message}}"
 
 
 # 全局单例，import 后直接使用

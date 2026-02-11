@@ -59,6 +59,7 @@ def _build_multi_turn(
             content = _apply_schema(
                 settings.llm_user_schema,
                 time=_format_timestamp(row),
+                mid=str(row.get("message_id", "")),
                 name=_get_display_name(row),
                 uid=str(row.get("user_id", "")),
                 message=row.get("plain_text", ""),
@@ -80,6 +81,7 @@ def _build_flat(
             line = _apply_schema(
                 settings.llm_bot_schema,
                 time=_format_timestamp(row),
+                mid=str(row.get("message_id", "")),
                 name=bot_name,
                 uid="",
                 message=row.get("plain_text", ""),
@@ -88,6 +90,7 @@ def _build_flat(
             line = _apply_schema(
                 settings.llm_user_schema,
                 time=_format_timestamp(row),
+                mid=str(row.get("message_id", "")),
                 name=_get_display_name(row),
                 uid=str(row.get("user_id", "")),
                 message=row.get("plain_text", ""),
@@ -108,6 +111,7 @@ def _apply_schema(
     schema: str,
     *,
     time: str = "",
+    mid: str = "",
     name: str = "",
     uid: str = "",
     message: str = "",
@@ -116,9 +120,17 @@ def _apply_schema(
     return (
         schema
         .replace("{{time}}", time)
+        .replace("{{mid}}", mid)
         .replace("{{name}}", name)
         .replace("{{uid}}", uid)
         .replace("{{message}}", message)
+    )
+
+
+def describe_schema(schema: str) -> str:
+    """将 schema 模板转为人类可读的格式说明（给 LLM 看）。"""
+    return _apply_schema(
+        schema, time="时间", mid="消息ID", name="昵称", uid="QQ号", message="内容",
     )
 
 

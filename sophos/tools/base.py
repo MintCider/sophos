@@ -12,7 +12,19 @@ class Tool(ABC):
     - description: 一句话描述（给 LLM 看的，帮它决定什么时候用这个工具）
     - parameters:  参数的 JSON Schema（告诉 LLM 要传什么参数、什么类型）
     - execute():   实际执行逻辑
+
+    可选覆盖：
+    - category:    工具类别，"input"（查询）或 "output"（操作），默认 "input"
     """
+
+    @property
+    def category(self) -> str:
+        """工具类别："input"（查询信息）或 "output"（执行操作）。
+
+        默认 "input"（安全默认值，只读无副作用）。
+        输出工具需覆盖此属性返回 "output"。
+        """
+        return "input"
 
     @property
     @abstractmethod

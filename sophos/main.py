@@ -10,12 +10,12 @@ import aiohttp
 
 from sophos.config import settings
 from sophos.db import close_db, init_db
-from sophos.llm.context import build_chat_context
+from sophos.llm.context import build_chat_context, describe_schema
 from sophos.llm.openai_compat import OpenAICompatProvider
 from sophos.llm.tool_loop import run_tool_loop
 from sophos.message_store import MessageStore
 from sophos.onebot_api import OneBotAPI
-from sophos.tools.onebot import GetGroupMemberInfoTool, SendMessageTool
+from sophos.tools.onebot import ALL_TOOLS
 from sophos.tools.registry import ToolRegistry
 
 logger = logging.getLogger("sophos")
@@ -90,7 +90,7 @@ _SYSTEM_PROMPT = (
     "你有两类工具可以使用：\n"
     "- 输入工具（获取信息）：如查询群成员信息\n"
     "- 输出工具（执行操作）：如发送消息\n"
-    "你必须至少调用一个输出工具来完成回复。使用 send_message 工具发送你的回复。\n"
+    "你至少应调用 send_msg 工具发送你的回复。\n"
     "回复时请自然、简洁，像一个真正的群聊成员。"
 )
 
@@ -99,6 +99,13 @@ def _get_provider() -> OpenAICompatProvider:
     """获取或创建 LLM provider 单例。"""
     global _llm_provider
     if _llm_provider is None:
+        # 解析 extra_body JSON
+        extra_body = None
+        if settings.llm_extra_body:
+            try:
+                extra_body = json.loads(settings.llm_extra_body)
+            except json.JSONDecodeError:
+                logger.warning("Invalid LLM_EXTRA_BODY JSON: %s", settings.llm_extra_body)
         _llm_provider = OpenAICompatProvider(
             base_url=settings.llm_base_url,
             api_key=settings.llm_api_key,
@@ -106,6 +113,8 @@ def _get_provider() -> OpenAICompatProvider:
             default_temperature=settings.llm_temperature,
             default_max_tokens=settings.llm_max_tokens,
             request_timeout=settings.llm_request_timeout,
+            stream=settings.llm_stream,
+            extra_body=extra_body,
         )
     return _llm_provider
 
@@ -115,8 +124,8 @@ def _get_registry() -> ToolRegistry:
     global _tool_registry
     if _tool_registry is None:
         _tool_registry = ToolRegistry()
-        _tool_registry.register(SendMessageTool())
-        _tool_registry.register(GetGroupMemberInfoTool())
+        for tool in ALL_TOOLS:
+            _tool_registry.register(tool)
     return _tool_registry
 
 
@@ -125,10 +134,10 @@ async def _handle_llm_trigger(
     event: dict[str, Any],
     store: MessageStore,
 ) -> None:
-    """处理 LLM 触发：构建上下文 → tool loop → LLM 通过 send_message tool 回复。
+    """处理 LLM 触发：构建上下文 → tool loop → LLM 通过 send_msg tool 回复。
 
-    LLM 被要求通过调用 send_message 等输出工具来完成操作。
-    如果 LLM 没有调用 send_message（兜底），则提取最终 assistant content 发送。
+    LLM 被要求通过调用 send_msg 等输出工具来完成操作。
+    如果 LLM 没有调用 send_msg（兜底），则提取最终 assistant content 发送。
     """
     msg_type = event.get("message_type", "private")
     group_id = event.get("group_id")
@@ -140,12 +149,21 @@ async def _handle_llm_trigger(
 
     # 构建上下文
     nickname = settings.bot_nickname or "Sophos"
-    # 告诉 LLM 当前会话信息，以便调用 send_message 时知道发送目标
+    # 会话 metadata：告诉 LLM 当前环境信息
+    fmt_desc = describe_schema(settings.llm_user_schema)
     if msg_type == "group":
-        conversation_info = f"当前会话：群聊（group_id: {group_id}）"
+        meta = (
+            f"\n---\n"
+            f"当前会话：群聊 | 群号: {group_id} | 你的QQ: {self_id}\n"
+            f"消息格式：{fmt_desc}"
+        )
     else:
-        conversation_info = f"当前会话：私聊（user_id: {user_id}）"
-    system_prompt = _SYSTEM_PROMPT.format(nickname=nickname) + f"\n{conversation_info}"
+        meta = (
+            f"\n---\n"
+            f"当前会话：私聊 | 对方QQ: {user_id} | 你的QQ: {self_id}\n"
+            f"消息格式：{fmt_desc}"
+        )
+    system_prompt = _SYSTEM_PROMPT.format(nickname=nickname) + meta
     messages = await build_chat_context(
         store,
         group_id=group_id,
@@ -160,7 +178,7 @@ async def _handle_llm_trigger(
     async def tool_executor(name: str, params: dict[str, Any]) -> Any:
         nonlocal sent_via_tool
         result = await registry.execute(name, params, tool_context)
-        if name == "send_message":
+        if name == "send_msg":
             sent_via_tool = True
         return result
 
@@ -177,15 +195,15 @@ async def _handle_llm_trigger(
         logger.exception("LLM tool loop failed")
         return
 
-    # 兜底：如果 LLM 没有通过 send_message tool 发送回复，提取最终 content 发送
+    # 兜底：如果 LLM 没有通过 send_msg tool 发送回复，提取最终 content 发送
     if not sent_via_tool:
         final_msg = result_messages[-1] if result_messages else None
         reply_text = (final_msg.get("content") or "") if final_msg else ""
         if not reply_text:
-            logger.warning("LLM returned empty response and didn't call send_message")
+            logger.warning("LLM returned empty response and didn't call send_msg")
             return
 
-        logger.info("LLM didn't call send_message, using fallback")
+        logger.info("LLM didn't call send_msg, using fallback")
         send_params: dict[str, Any] = {
             "message_type": msg_type,
             "message": [{"type": "text", "data": {"text": reply_text}}],
@@ -266,12 +284,16 @@ async def start() -> None:
 def main() -> None:
     """CLI entry point."""
     # ── 日志配置 ──────────────────────────────────────────
+    # 自定义 TRACE 级别（比 DEBUG 更低，记录完整 prompt/response）
+    TRACE = 5
+    logging.addLevelName(TRACE, "TRACE")
+
     # 控制台：INFO 级别，人类可读
-    # 文件：  DEBUG 级别，包含 WS 原始消息等细节
+    # 文件：  TRACE 级别，包含完整 LLM 请求/响应
     log_fmt = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
 
     root_logger = logging.getLogger()
-    root_logger.setLevel(logging.DEBUG)
+    root_logger.setLevel(TRACE)
 
     # 控制台 handler
     console_handler = logging.StreamHandler()
@@ -283,7 +305,7 @@ def main() -> None:
     log_dir = Path("logs")
     log_dir.mkdir(exist_ok=True)
     file_handler = logging.FileHandler(log_dir / "sophos.log", encoding="utf-8")
-    file_handler.setLevel(logging.DEBUG)
+    file_handler.setLevel(TRACE)
     file_handler.setFormatter(logging.Formatter(log_fmt))
     root_logger.addHandler(file_handler)
     try:
