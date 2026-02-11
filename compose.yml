@@ -1,0 +1,39 @@
+# ============================================================
+# Sophos — 开发环境
+# ============================================================
+# 只启动基础设施（PostgreSQL + NapCat），Sophos 在主机上用 uv run 跑。
+# 用法：
+#   cp .env.example .env   # 然后编辑 .env 填入你的配置
+#   docker compose up -d
+#   uv run python -m sophos.main
+# ============================================================
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: sophos-postgres
+    env_file: .env
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sophos}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  napcat:
+    image: mlikiowa/napcat-docker:latest
+    container_name: sophos-napcat
+    environment:
+      - NAPCAT_UID=${NAPCAT_UID}
+      - NAPCAT_GID=${NAPCAT_GID}
+      - ACCOUNT=${NAPCAT_ACCOUNT:-}
+    ports:
+      - "3001:3001"   # OneBot WebSocket — Sophos 从主机连这个
+      - "6099:6099"   # NapCat WebUI — 浏览器管理/登录
+    volumes:
+      - ./data/napcat/config:/app/napcat/config   # NapCat 配置持久化
+      - ./data/napcat/qq:/app/.config/QQ          # QQ 登录态持久化
+    restart: unless-stopped
