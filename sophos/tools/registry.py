@@ -51,13 +51,22 @@ class ToolRegistry:
             raise ValueError(f"Unknown tool: {name}")
         return await tool.execute(params, context)
 
-    def get_function_schemas(self, *, category: str | None = None) -> list[dict[str, Any]]:
+    def get_function_schemas(
+        self,
+        *,
+        category: str | None = None,
+        scope: str | None = None,
+    ) -> list[dict[str, Any]]:
         """导出工具的 schema，用于传给 LLM 的 tools 字段。
 
         Args:
             category: 按类别过滤，"input" 或 "output"。None 表示全部。
+            scope: 按适用场景过滤，"group" 或 "private"。
+                   None 表示全部；指定后会包含该 scope 和 "all" 的工具。
         """
-        tools = self._tools.values()
+        tools: list[Tool] = list(self._tools.values())
         if category is not None:
             tools = [t for t in tools if t.category == category]
+        if scope is not None:
+            tools = [t for t in tools if t.scope in (scope, "all")]
         return [tool.to_function_schema() for tool in tools]

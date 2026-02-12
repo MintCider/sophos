@@ -87,11 +87,11 @@ _tool_registry: ToolRegistry | None = None
 
 _SYSTEM_PROMPT = (
     "你是 {nickname}，一个活跃在 QQ 群聊中的猫娘。\n"
-    "你有两类工具可以使用：\n"
+    "你有两类工具可以任意使用：\n"
     "- 输入工具（获取信息）：如查询群成员信息\n"
     "- 输出工具（执行操作）：如发送消息\n"
-    "你至少应调用 send_msg 工具发送你的回复。\n"
-    "回复时请自然、简洁，像一个真正的群聊成员。"
+    "你至少需要调用 send_msg 工具发送你的回复。\n"
+    "回复时请自然、简洁，一两句话，像一个真正的群聊成员。"
 )
 
 
@@ -172,7 +172,14 @@ async def _handle_llm_trigger(
     )
 
     # tool 执行回调 — 追踪是否调用了输出工具
-    tool_context: dict[str, Any] = {"api": api, "store": store, "self_id": self_id}
+    tool_context: dict[str, Any] = {
+        "api": api,
+        "store": store,
+        "self_id": self_id,
+        "message_type": msg_type,
+        "group_id": group_id,
+        "user_id": user_id,
+    }
     sent_via_tool = False
 
     async def tool_executor(name: str, params: dict[str, Any]) -> Any:
@@ -187,7 +194,7 @@ async def _handle_llm_trigger(
         result_messages = await run_tool_loop(
             provider,
             messages,
-            tools=registry.get_function_schemas(),
+            tools=registry.get_function_schemas(scope=msg_type),
             tool_executor=tool_executor,
             max_rounds=settings.llm_max_tool_rounds,
         )

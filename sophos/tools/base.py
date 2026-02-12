@@ -15,6 +15,7 @@ class Tool(ABC):
 
     可选覆盖：
     - category:    工具类别，"input"（查询）或 "output"（操作），默认 "input"
+    - scope:       适用场景，"all" / "group" / "private"，默认 "all"
     """
 
     @property
@@ -25,6 +26,14 @@ class Tool(ABC):
         输出工具需覆盖此属性返回 "output"。
         """
         return "input"
+
+    @property
+    def scope(self) -> str:
+        """适用场景："all"（通用）、"group"（仅群聊）、"private"（仅私聊）。
+
+        默认 "all"。群管理工具应覆盖为 "group"。
+        """
+        return "all"
 
     @property
     @abstractmethod

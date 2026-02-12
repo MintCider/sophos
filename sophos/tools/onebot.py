@@ -19,7 +19,10 @@ from sophos.tools.base import Tool
 
 
 class OneBotTool(Tool):
-    """通用 OneBot API 工具：直接将参数转发给 api.call()。"""
+    """通用 OneBot API 工具：直接将参数转发给 api.call()。
+
+    自动从 context 补全 group_id（如果 schema 中声明了但调用时未提供）。
+    """
 
     def __init__(
         self,
@@ -29,16 +32,22 @@ class OneBotTool(Tool):
         description: str,
         parameters: dict[str, Any],
         category: str = "input",
+        scope: str = "all",
     ) -> None:
         self._action = action
         self._name = name
         self._description = description
         self._parameters = parameters
         self._category = category
+        self._scope = scope
 
     @property
     def category(self) -> str:
         return self._category
+
+    @property
+    def scope(self) -> str:
+        return self._scope
 
     @property
     def name(self) -> str:
@@ -54,6 +63,10 @@ class OneBotTool(Tool):
 
     async def execute(self, params: dict[str, Any], context: dict[str, Any]) -> Any:
         api: OneBotAPI = context["api"]
+        # 自动注入 group_id：schema 中有此字段但调用时未提供，从 context 补全
+        if "group_id" not in params and "group_id" in context:
+            if "group_id" in self._parameters.get("properties", {}):
+                params["group_id"] = context["group_id"]
         return await api.call(self._action, params)
 
 
@@ -80,18 +93,18 @@ class SendMessageTool(Tool):
         return {
             "type": "object",
             "properties": {
-                "message_type": {
-                    "type": "string",
-                    "enum": ["group", "private"],
-                    "description": "消息类型：group=群聊, private=私聊",
-                },
-                "target_id": {
-                    "type": "integer",
-                    "description": "目标 ID（群号或用户 QQ 号）",
-                },
                 "text": {
                     "type": "string",
                     "description": "要发送的文本内容",
+                },
+                "message_type": {
+                    "type": "string",
+                    "enum": ["group", "private"],
+                    "description": "消息类型（可选，默认当前会话类型）",
+                },
+                "target_id": {
+                    "type": "integer",
+                    "description": "目标 ID（可选，默认当前会话；跨群/跨私聊时需指定）",
                 },
                 "reply_to": {
                     "type": "integer",
@@ -103,14 +116,18 @@ class SendMessageTool(Tool):
                     "description": "要 @的用户 QQ 号列表（可选）",
                 },
             },
-            "required": ["message_type", "target_id", "text"],
+            "required": ["text"],
         }
 
     async def execute(self, params: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
         api: OneBotAPI = context["api"]
         store: MessageStore = context["store"]
 
-        msg_type = params["message_type"]
+        # 从 context 补全 message_type 和 target_id
+        msg_type = params.get("message_type") or context.get("message_type", "group")
+        target_id: int = params.get("target_id") or (
+            context.get("group_id") if msg_type == "group" else context.get("user_id")
+        ) or 0
 
         # 构建消息段：reply → at → text
         segments: list[dict[str, Any]] = []
@@ -126,7 +143,6 @@ class SendMessageTool(Tool):
             "message": segments,
         }
 
-        target_id = params["target_id"]
         if msg_type == "group":
             api_params["group_id"] = target_id
         else:
@@ -147,7 +163,7 @@ class SendMessageTool(Tool):
         return {"status": "ok", "message_id": message_id}
 
 
-# ── 输出工具（声明式）─────────────────────────────────────
+# ── 输出工具 ─────────────────────────────────────────────
 
 _delete_msg = OneBotTool(
     action="delete_msg",
@@ -163,114 +179,105 @@ _delete_msg = OneBotTool(
     },
 )
 
-_set_group_kick = OneBotTool(
-    action="set_group_kick",
-    name="set_group_kick",
-    description="将指定用户踢出群聊",
-    category="output",
-    parameters={
-        "type": "object",
-        "properties": {
-            "group_id": {"type": "integer", "description": "群号"},
-            "user_id": {"type": "integer", "description": "要踢的用户 QQ 号"},
-            "reject_add_request": {"type": "boolean", "description": "是否拒绝此人的加群请求，默认 false"},
-        },
-        "required": ["group_id", "user_id"],
-    },
-)
 
-_set_group_ban = OneBotTool(
-    action="set_group_ban",
-    name="set_group_ban",
-    description="禁言群聊中的指定用户",
-    category="output",
-    parameters={
-        "type": "object",
-        "properties": {
-            "group_id": {"type": "integer", "description": "群号"},
-            "user_id": {"type": "integer", "description": "要禁言的用户 QQ 号"},
-            "duration": {"type": "integer", "description": "禁言时长（秒），0 表示取消禁言，默认 1800"},
-        },
-        "required": ["group_id", "user_id"],
-    },
-)
+class GroupAdminTool(Tool):
+    """群管理操作合集：踢人、禁言、设置群名片、改群名、退群、设置头衔。
 
-_set_group_whole_ban = OneBotTool(
-    action="set_group_whole_ban",
-    name="set_group_whole_ban",
-    description="开启或关闭群聊全员禁言",
-    category="output",
-    parameters={
-        "type": "object",
-        "properties": {
-            "group_id": {"type": "integer", "description": "群号"},
-            "enable": {"type": "boolean", "description": "是否开启全员禁言，默认 true"},
-        },
-        "required": ["group_id"],
-    },
-)
+    合并 7 个 set_group_* API 为一个工具，减少 tool 数量。
+    group_id 可从 context 自动注入。
+    """
 
-_set_group_card = OneBotTool(
-    action="set_group_card",
-    name="set_group_card",
-    description="设置指定用户的群名片（群备注）",
-    category="output",
-    parameters={
-        "type": "object",
-        "properties": {
-            "group_id": {"type": "integer", "description": "群号"},
-            "user_id": {"type": "integer", "description": "要设置的用户 QQ 号"},
-            "card": {"type": "string", "description": "群名片内容，空字符串表示删除群名片"},
-        },
-        "required": ["group_id", "user_id"],
-    },
-)
+    # action → OneBot API action 名
+    _ACTION_MAP: dict[str, str] = {
+        "kick": "set_group_kick",
+        "ban": "set_group_ban",
+        "whole_ban": "set_group_whole_ban",
+        "card": "set_group_card",
+        "name": "set_group_name",
+        "leave": "set_group_leave",
+        "special_title": "set_group_special_title",
+    }
 
-_set_group_name = OneBotTool(
-    action="set_group_name",
-    name="set_group_name",
-    description="修改群聊名称",
-    category="output",
-    parameters={
-        "type": "object",
-        "properties": {
-            "group_id": {"type": "integer", "description": "群号"},
-            "group_name": {"type": "string", "description": "新群名"},
-        },
-        "required": ["group_id", "group_name"],
-    },
-)
+    @property
+    def category(self) -> str:
+        return "output"
 
-_set_group_leave = OneBotTool(
-    action="set_group_leave",
-    name="set_group_leave",
-    description="退出指定群聊（群主可选择解散）",
-    category="output",
-    parameters={
-        "type": "object",
-        "properties": {
-            "group_id": {"type": "integer", "description": "群号"},
-            "is_dismiss": {"type": "boolean", "description": "是否解散群（仅群主有效），默认 false"},
-        },
-        "required": ["group_id"],
-    },
-)
+    @property
+    def scope(self) -> str:
+        return "group"
 
-_set_group_special_title = OneBotTool(
-    action="set_group_special_title",
-    name="set_group_special_title",
-    description="设置群成员的专属头衔",
-    category="output",
-    parameters={
-        "type": "object",
-        "properties": {
-            "group_id": {"type": "integer", "description": "群号"},
-            "user_id": {"type": "integer", "description": "要设置的用户 QQ 号"},
-            "special_title": {"type": "string", "description": "专属头衔，空字符串表示删除"},
-        },
-        "required": ["group_id", "user_id"],
-    },
-)
+    @property
+    def name(self) -> str:
+        return "group_admin"
+
+    @property
+    def description(self) -> str:
+        return (
+            "群管理操作。action: kick=踢人, ban=禁言(duration秒,0解禁), "
+            "whole_ban=全员禁言, card=设群名片, name=改群名, "
+            "leave=退群, special_title=设头衔"
+        )
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": list(self._ACTION_MAP.keys()),
+                    "description": "操作类型",
+                },
+                "group_id": {
+                    "type": "integer",
+                    "description": "群号（可选，默认当前群）",
+                },
+                "user_id": {
+                    "type": "integer",
+                    "description": "目标用户 QQ 号（kick/ban/card/special_title 需要）",
+                },
+                "duration": {
+                    "type": "integer",
+                    "description": "禁言时长秒，0=解禁，默认1800（ban 用）",
+                },
+                "enable": {
+                    "type": "boolean",
+                    "description": "是否开启全员禁言，默认 true（whole_ban 用）",
+                },
+                "card": {
+                    "type": "string",
+                    "description": "群名片内容，空串=删除（card 用）",
+                },
+                "group_name": {
+                    "type": "string",
+                    "description": "新群名（name 用）",
+                },
+                "special_title": {
+                    "type": "string",
+                    "description": "专属头衔，空串=删除（special_title 用）",
+                },
+                "reject_add_request": {
+                    "type": "boolean",
+                    "description": "踢人后拒绝加群，默认 false（kick 用）",
+                },
+                "is_dismiss": {
+                    "type": "boolean",
+                    "description": "是否解散群，默认 false（leave 用，仅群主）",
+                },
+            },
+            "required": ["action"],
+        }
+
+    async def execute(self, params: dict[str, Any], context: dict[str, Any]) -> Any:
+        api: OneBotAPI = context["api"]
+        action = params.pop("action")
+        onebot_action = self._ACTION_MAP.get(action)
+        if onebot_action is None:
+            return {"error": f"unknown action: {action}"}
+        # 自动注入 group_id
+        if "group_id" not in params and "group_id" in context:
+            params["group_id"] = context["group_id"]
+        return await api.call(onebot_action, params)
 
 
 # ── 输入工具（声明式）─────────────────────────────────────
@@ -356,19 +363,13 @@ ALL_TOOLS: list[Tool] = [
     # 输出工具
     SendMessageTool(),
     _delete_msg,
-    _set_group_kick,
-    _set_group_ban,
-    _set_group_whole_ban,
-    _set_group_card,
-    _set_group_name,
-    _set_group_leave,
-    _set_group_special_title,
+    GroupAdminTool(),
     # 输入工具
-    _get_login_info,
+    #_get_login_info,
     _get_stranger_info,
-    _get_friend_list,
+    #_get_friend_list,
     _get_group_info,
-    _get_group_list,
+    #_get_group_list,
     _get_group_member_info,
     _get_group_member_list,
 ]
