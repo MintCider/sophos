@@ -68,6 +68,13 @@ class Settings(BaseSettings):
     # Bot 消息格式模板（仅拍平模式使用，多轮模式下 assistant role 自带身份）
     llm_bot_schema: str = "[{{time}}] #{{mid}} {{name}}：{{message}}"
 
+    # ── 跨 Context ─────────────────────────────────────────
+    # 跨 context 背景注入模式：
+    #   "system"  — 最近一条 cross_context 背景追加到 system prompt
+    #   "inline"  — 每条带 background 的消息都附带背景信息
+    #   "off"     — 不注入
+    cross_context_mode: str = "system"
+
 
 # 全局单例，import 后直接使用
 settings = Settings()

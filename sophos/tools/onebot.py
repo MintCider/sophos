@@ -8,8 +8,11 @@
 有特殊逻辑的工具（如 send_msg 需要存储消息）用独立类。
 """
 
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from sophos.config import settings
+from sophos.llm.context import apply_schema, format_timestamp, get_display_name
 from sophos.message_store import MessageStore
 from sophos.onebot_api import OneBotAPI
 from sophos.tools.base import Tool
@@ -115,6 +118,10 @@ class SendMessageTool(Tool):
                     "items": {"type": "integer"},
                     "description": "要 @的用户 QQ 号列表（可选）",
                 },
+                "background": {
+                    "type": "string",
+                    "description": "跨 context 发消息时的背景摘要（几句话概括来龙去脉，跨群/跨私聊时必填）",
+                },
             },
             "required": ["text"],
         }
@@ -128,6 +135,21 @@ class SendMessageTool(Tool):
         target_id: int = params.get("target_id") or (
             context.get("group_id") if msg_type == "group" else context.get("user_id")
         ) or 0
+
+        # 跨 context 检测：目标与当前会话不同时，必须提供 background
+        is_cross = False
+        if msg_type != context.get("message_type"):
+            is_cross = True
+        elif msg_type == "group" and target_id != context.get("group_id"):
+            is_cross = True
+        elif msg_type == "private" and target_id != context.get("user_id"):
+            is_cross = True
+
+        if is_cross and not params.get("background"):
+            return {
+                "error": "跨 context 发消息必须提供 background 参数，"
+                         "简要说明对话背景（来源、原因、关键信息）"
+            }
 
         # 构建消息段：reply → at → text
         segments: list[dict[str, Any]] = []
@@ -151,6 +173,17 @@ class SendMessageTool(Tool):
         result = await api.call("send_msg", api_params)
         message_id = result.get("message_id")
 
+        # 构建 extra（跨 context 背景）
+        extra = None
+        if bg := params.get("background"):
+            extra = {
+                "cross_context": {
+                    "summary": bg,
+                    "source_type": context.get("message_type", "group"),
+                    "source_id": context.get("group_id") or context.get("user_id"),
+                }
+            }
+
         if message_id is not None:
             await store.save_self_message(
                 message_id=message_id,
@@ -158,6 +191,7 @@ class SendMessageTool(Tool):
                 group_id=target_id if msg_type == "group" else None,
                 user_id=target_id if msg_type == "private" else context.get("self_id", 0),
                 raw_message=segments,
+                extra=extra,
             )
 
         return {"status": "ok", "message_id": message_id}
@@ -280,6 +314,112 @@ class GroupAdminTool(Tool):
         return await api.call(onebot_action, params)
 
 
+class QueryMessagesTool(Tool):
+    """查询指定会话在某个时间点附近的聊天记录。
+
+    用于跨 context 场景：LLM 看到背景摘要后，可以用此工具回溯原始对话。
+    也可用于一般性的历史消息查询。
+    """
+
+    @property
+    def name(self) -> str:
+        return "query_messages"
+
+    @property
+    def description(self) -> str:
+        return "查询指定会话在某个时间点附近的聊天记录"
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "message_type": {
+                    "type": "string",
+                    "enum": ["group", "private"],
+                    "description": "会话类型",
+                },
+                "target_id": {
+                    "type": "integer",
+                    "description": "目标 ID（群号或用户 QQ 号）",
+                },
+                "anchor_time": {
+                    "type": "string",
+                    "description": "锚点时间，格式 YYYY-MM-DD HH:MM",
+                },
+                "before_minutes": {
+                    "type": "integer",
+                    "description": "锚点前多少分钟（默认 5）",
+                },
+                "after_minutes": {
+                    "type": "integer",
+                    "description": "锚点后多少分钟（默认 0）",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "最大返回条数（默认 30）",
+                },
+            },
+            "required": ["message_type", "target_id", "anchor_time"],
+        }
+
+    async def execute(self, params: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+        store: MessageStore = context["store"]
+
+        # 解析锚点时间（本地时间 → UTC）
+        anchor_str = params["anchor_time"]
+        try:
+            local_tz = timezone(timedelta(hours=settings.timezone_offset))
+            local_dt = datetime.strptime(anchor_str, "%Y-%m-%d %H:%M").replace(tzinfo=local_tz)
+            anchor_utc = local_dt.astimezone(timezone.utc)
+        except ValueError:
+            return {"error": f"时间格式错误，应为 YYYY-MM-DD HH:MM，收到: {anchor_str}"}
+
+        before = params.get("before_minutes", 5)
+        after = params.get("after_minutes", 0)
+        limit = params.get("limit", 30)
+
+        start = anchor_utc - timedelta(minutes=before)
+        end = anchor_utc + timedelta(minutes=after)
+
+        rows = await store.query_by_time_range(
+            message_type=params["message_type"],
+            target_id=params["target_id"],
+            start=start,
+            end=end,
+            limit=limit,
+        )
+
+        if not rows:
+            return {"messages": "(无记录)", "count": 0}
+
+        # 用与上下文相同的 schema 格式化
+        bot_name = settings.bot_nickname or "Sophos"
+        lines: list[str] = []
+        for row in rows:
+            if row.get("source") == "sophos":
+                line = apply_schema(
+                    settings.llm_bot_schema,
+                    time=format_timestamp(row),
+                    mid=str(row.get("message_id", "")),
+                    name=bot_name,
+                    uid="",
+                    message=row.get("plain_text", ""),
+                )
+            else:
+                line = apply_schema(
+                    settings.llm_user_schema,
+                    time=format_timestamp(row),
+                    mid=str(row.get("message_id", "")),
+                    name=get_display_name(row),
+                    uid=str(row.get("user_id", "")),
+                    message=row.get("plain_text", ""),
+                )
+            lines.append(line)
+
+        return {"messages": "\n".join(lines), "count": len(lines)}
+
+
 # ── 输入工具（声明式）─────────────────────────────────────
 
 _get_login_info = OneBotTool(
@@ -365,6 +505,7 @@ ALL_TOOLS: list[Tool] = [
     _delete_msg,
     GroupAdminTool(),
     # 输入工具
+    QueryMessagesTool(),
     #_get_login_info,
     _get_stranger_info,
     #_get_friend_list,

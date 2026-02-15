@@ -96,6 +96,7 @@ class MessageStore:
         user_id: int,
         raw_message: list[dict[str, Any]],
         timestamp: datetime | None = None,
+        extra: dict[str, Any] | None = None,
     ) -> int | None:
         """Sophos 发送消息后主动存储，标记 source='sophos'。
 
@@ -109,30 +110,31 @@ class MessageStore:
                 if isinstance(seg, dict) and seg.get("type") == "text"
             )
             ts = timestamp or datetime.now(tz=UTC)
+            extra_json = json.dumps(extra, ensure_ascii=False) if extra else None
 
             if group_id is not None:
                 conflict_clause = """
                     ON CONFLICT (group_id, message_id) WHERE group_id IS NOT NULL
-                    DO UPDATE SET source = 'sophos'
+                    DO UPDATE SET source = 'sophos', extra = EXCLUDED.extra
                 """
             else:
                 conflict_clause = """
                     ON CONFLICT (user_id, message_id) WHERE group_id IS NULL
-                    DO UPDATE SET source = 'sophos'
+                    DO UPDATE SET source = 'sophos', extra = EXCLUDED.extra
                 """
 
             row_id = await self._pool.fetchval(
                 f"""
                 INSERT INTO messages
                     (message_id, message_type, group_id, user_id,
-                     nickname, card, source, raw_message, plain_text, timestamp)
-                VALUES ($1, $2, $3, $4, '', '', 'sophos', $5::jsonb, $6, $7)
+                     nickname, card, source, raw_message, plain_text, timestamp, extra)
+                VALUES ($1, $2, $3, $4, '', '', 'sophos', $5::jsonb, $6, $7, $8::jsonb)
                 {conflict_clause}
                 RETURNING id
                 """,
                 message_id, message_type, group_id, user_id,
                 json.dumps(raw_message, ensure_ascii=False),
-                plain_text, ts,
+                plain_text, ts, extra_json,
             )
             logger.debug("Saved self message id=%s (message_id=%s)", row_id, message_id)
             return row_id
@@ -198,6 +200,90 @@ class MessageStore:
             "SELECT * FROM messages WHERE message_id = $1",
             message_id,
         )
+        return dict(row) if row else None
+
+    # ── 按时间范围查询 ────────────────────────────────────
+
+    async def query_by_time_range(
+        self,
+        *,
+        message_type: str,
+        target_id: int,
+        start: datetime,
+        end: datetime,
+        limit: int = 30,
+    ) -> list[dict[str, Any]]:
+        """按时间范围查询指定会话的消息。
+
+        Args:
+            message_type: "group" 或 "private"
+            target_id:    群号（group）或用户 QQ 号（private）
+            start:        时间窗口起点（UTC）
+            end:          时间窗口终点（UTC）
+            limit:        最大返回条数
+
+        Returns:
+            按时间正序排列的消息列表
+        """
+        if message_type == "group":
+            where = "group_id = $1"
+        else:
+            where = "user_id = $1 AND group_id IS NULL"
+
+        rows = await self._pool.fetch(
+            f"""
+            SELECT * FROM messages
+            WHERE {where} AND timestamp BETWEEN $2 AND $3
+            ORDER BY timestamp ASC
+            LIMIT $4
+            """,
+            target_id, start, end, limit,
+        )
+        return [dict(r) for r in rows]
+
+    # ── 跨 context 背景查询 ───────────────────────────────
+
+    async def get_cross_context_background(
+        self,
+        *,
+        group_id: int | None = None,
+        user_id: int | None = None,
+    ) -> dict[str, Any] | None:
+        """查找当前会话中最近一条带 cross_context 背景的 Sophos 消息。
+
+        用于 system 模式的背景注入：找到最近一次跨 context 发来的消息，
+        将其背景摘要注入到 system prompt 中。
+
+        Returns:
+            整行 dict（含 timestamp、extra 等），供格式化用。无则 None。
+        """
+        if group_id is not None:
+            row = await self._pool.fetchrow(
+                """
+                SELECT * FROM messages
+                WHERE group_id = $1
+                  AND source = 'sophos'
+                  AND extra->'cross_context' IS NOT NULL
+                ORDER BY timestamp DESC
+                LIMIT 1
+                """,
+                group_id,
+            )
+        elif user_id is not None:
+            row = await self._pool.fetchrow(
+                """
+                SELECT * FROM messages
+                WHERE user_id = $1 AND group_id IS NULL
+                  AND source = 'sophos'
+                  AND extra->'cross_context' IS NOT NULL
+                ORDER BY timestamp DESC
+                LIMIT 1
+                """,
+                user_id,
+            )
+        else:
+            return None
+
         return dict(row) if row else None
 
     # ── 内部工具 ──────────────────────────────────────────
