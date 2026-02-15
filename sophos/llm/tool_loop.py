@@ -72,20 +72,30 @@ async def run_tool_loop(
             raw_args = func.get("arguments", "{}")
             if isinstance(raw_args, dict):
                 params: dict[str, Any] = raw_args
+                parse_error = False
             else:
                 try:
                     params = json.loads(raw_args)
+                    parse_error = False
                 except (json.JSONDecodeError, TypeError):
                     logger.warning("Invalid tool call arguments: %s", raw_args)
                     params = {}
+                    parse_error = True
 
-            logger.info("Calling tool: %s(%s)", tool_name, json.dumps(params, ensure_ascii=False))
-            try:
-                result = await tool_executor(tool_name, params)
-                result_str = json.dumps(result, ensure_ascii=False, default=str)
-            except Exception as e:
-                logger.exception("Tool %s failed", tool_name)
-                result_str = json.dumps({"error": str(e)}, ensure_ascii=False)
+            if parse_error:
+                # 参数解析失败 → 不调用工具，直接告诉 LLM 参数格式有误
+                result_str = json.dumps(
+                    {"error": f"参数 JSON 格式错误，请检查后重试。收到: {raw_args[:200]}"},
+                    ensure_ascii=False,
+                )
+            else:
+                logger.info("Calling tool: %s(%s)", tool_name, json.dumps(params, ensure_ascii=False))
+                try:
+                    result = await tool_executor(tool_name, params)
+                    result_str = json.dumps(result, ensure_ascii=False, default=str)
+                except Exception as e:
+                    logger.exception("Tool %s failed", tool_name)
+                    result_str = json.dumps({"error": str(e)}, ensure_ascii=False)
 
             # 兼容：有些 provider 不返回 tool_call id
             tc_id = tc.get("id") or f"call_{round_num}_{i}"

@@ -8,10 +8,11 @@ from typing import Any
 
 import aiohttp
 
+from sophos.commands import handle_llm_command
 from sophos.config import settings
 from sophos.db import close_db, init_db
 from sophos.llm.context import build_chat_context, describe_schema
-from sophos.llm.openai_compat import OpenAICompatProvider
+from sophos.llm.provider_manager import ProviderManager
 from sophos.llm.tool_loop import run_tool_loop
 from sophos.message_store import MessageStore
 from sophos.onebot_api import OneBotAPI
@@ -21,7 +22,12 @@ from sophos.tools.registry import ToolRegistry
 logger = logging.getLogger("sophos")
 
 
-async def handle_event(api: OneBotAPI, event: dict[str, Any], store: MessageStore) -> None:
+async def handle_event(
+    api: OneBotAPI,
+    event: dict[str, Any],
+    store: MessageStore,
+    provider_mgr: ProviderManager,
+) -> None:
     """处理一个 OneBot 事件上报。
 
     流程：
@@ -75,14 +81,18 @@ async def handle_event(api: OneBotAPI, event: dict[str, Any], store: MessageStor
                 raw_message=[{"type": "text", "data": {"text": "pong"}}],
             )
 
+    elif text.startswith(".llm"):
+        await handle_llm_command(
+            text, api=api, event=event, provider_mgr=provider_mgr,
+        )
+
     elif text.startswith("咕喵咕喵"):
-        await _handle_llm_trigger(api, event, store)
+        await _handle_llm_trigger(api, event, store, provider_mgr)
 
 
 # ── LLM 触发处理（临时，后续由触发器替代）─────────────────
 
-# 模块级 provider 和 registry，避免每次请求重建
-_llm_provider: OpenAICompatProvider | None = None
+# 模块级 registry，避免每次请求重建
 _tool_registry: ToolRegistry | None = None
 
 _SYSTEM_PROMPT = (
@@ -94,30 +104,6 @@ _SYSTEM_PROMPT = (
     "向其他群或私聊发消息时，必须在 send_msg 的 background 参数中提供背景摘要。\n"
     "回复时请自然、简洁，一两句话，像一个真正的群聊成员。"
 )
-
-
-def _get_provider() -> OpenAICompatProvider:
-    """获取或创建 LLM provider 单例。"""
-    global _llm_provider
-    if _llm_provider is None:
-        # 解析 extra_body JSON
-        extra_body = None
-        if settings.llm_extra_body:
-            try:
-                extra_body = json.loads(settings.llm_extra_body)
-            except json.JSONDecodeError:
-                logger.warning("Invalid LLM_EXTRA_BODY JSON: %s", settings.llm_extra_body)
-        _llm_provider = OpenAICompatProvider(
-            base_url=settings.llm_base_url,
-            api_key=settings.llm_api_key,
-            model=settings.llm_model,
-            default_temperature=settings.llm_temperature,
-            default_max_tokens=settings.llm_max_tokens,
-            request_timeout=settings.llm_request_timeout,
-            stream=settings.llm_stream,
-            extra_body=extra_body,
-        )
-    return _llm_provider
 
 
 def _get_registry() -> ToolRegistry:
@@ -134,6 +120,7 @@ async def _handle_llm_trigger(
     api: OneBotAPI,
     event: dict[str, Any],
     store: MessageStore,
+    provider_mgr: ProviderManager,
 ) -> None:
     """处理 LLM 触发：构建上下文 → tool loop → LLM 通过 send_msg tool 回复。
 
@@ -145,7 +132,7 @@ async def _handle_llm_trigger(
     user_id = event.get("user_id")
     self_id = event.get("self_id")
 
-    provider = _get_provider()
+    provider = provider_mgr.get_provider()
     registry = _get_registry()
 
     # 构建上下文
@@ -235,7 +222,7 @@ async def _handle_llm_trigger(
             )
 
 
-async def ws_loop(store: MessageStore) -> None:
+async def ws_loop(store: MessageStore, provider_mgr: ProviderManager) -> None:
     """连接 NapCat WebSocket 并持续监听消息。"""
     ws_url = settings.onebot_ws_url
     ws_token = settings.onebot_ws_token
@@ -259,7 +246,7 @@ async def ws_loop(store: MessageStore) -> None:
                             event = api.dispatch(data)
                             if event is not None:
                                 # 事件处理放到独立 Task，不阻塞 WS 读取循环
-                                asyncio.create_task(handle_event(api, event, store))
+                                asyncio.create_task(handle_event(api, event, store, provider_mgr))
 
                         elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
                             logger.warning("WebSocket closed or error: %s", msg.data)
@@ -281,11 +268,14 @@ async def start() -> None:
     pool = await init_db()
     store = MessageStore(pool)
 
+    # 初始化 LLM provider 管理器
+    provider_mgr = ProviderManager(pool)
+    await provider_mgr.init()
+
     try:
-        await ws_loop(store)
+        await ws_loop(store, provider_mgr)
     finally:
-        if _llm_provider is not None:
-            await _llm_provider.close()
+        await provider_mgr.close()
         await close_db()
 
 

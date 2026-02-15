@@ -366,6 +366,11 @@ class QueryMessagesTool(Tool):
     async def execute(self, params: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
         store: MessageStore = context["store"]
 
+        # 校验必填参数
+        for key in ("message_type", "target_id", "anchor_time"):
+            if key not in params:
+                return {"error": f"缺少必填参数: {key}"}
+
         # 解析锚点时间（本地时间 → UTC）
         anchor_str = params["anchor_time"]
         try:

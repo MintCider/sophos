@@ -40,28 +40,32 @@ class Settings(BaseSettings):
     # 喂给 LLM 时转换时间戳用的 UTC 偏移（小时）
     timezone_offset: int = 8
 
-    # ── LLM ──────────────────────────────────────────────
+    # ── LLM（首次启动 seed 用，之后以 DB 为准）──────────────
+    # 以下 6 项仅在 DB 无 provider 时用于 seed "default" provider，
+    # 之后通过 .llm 命令或 WebUI 管理，不再读取 .env。
     # OpenAI 兼容 API 地址（如 https://api.openai.com/v1）
     llm_base_url: str = ""
     # API Key
     llm_api_key: str = ""
     # 模型名（如 gpt-4o, deepseek-chat）
     llm_model: str = ""
+    # 是否使用流式请求（避免超时，但部分 provider 可能不兼容）
+    llm_stream: bool = True
+    # 额外请求体参数（JSON 字符串），会合并到每次 LLM 请求的 payload 中
+    # 例如 Gemini 关闭 thinking：{"reasoning_effort":"none"}
+    llm_extra_body: str = ""
+    # HTTP 请求超时（秒）
+    llm_request_timeout: int = 60
+
+    # ── LLM 全局行为参数（始终从 .env 读取）─────────────────
     # 生成温度
     llm_temperature: float = 0.7
     # 最大生成 token 数
     llm_max_tokens: int = 4096
     # 上下文降级：开启后将多轮消息合并为单条 user message，兼容不支持连续 user message 的模型
     llm_flatten_context: bool = False
-    # HTTP 请求超时（秒）
-    llm_request_timeout: int = 60
     # Tool calling 最大循环轮次
     llm_max_tool_rounds: int = 10
-    # 是否使用流式请求（避免超时，但部分 provider 可能不兼容）
-    llm_stream: bool = True
-    # 额外请求体参数（JSON 字符串），会合并到每次 LLM 请求的 payload 中
-    # 例如 Gemini 关闭 thinking：{"reasoning_effort":"none"}
-    llm_extra_body: str = ""
     # 用户消息格式模板（多轮和拍平模式都使用）
     # 可用占位符：{{time}} {{mid}} {{name}} {{uid}} {{message}}
     llm_user_schema: str = "[{{time}}] #{{mid}} {{name}}({{uid}})：{{message}}"

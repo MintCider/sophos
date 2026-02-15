@@ -90,6 +90,29 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 """
 
+_CREATE_LLM_PROVIDERS_TABLE = """\
+CREATE TABLE IF NOT EXISTS llm_providers (
+    id              SERIAL          PRIMARY KEY,
+    alias           TEXT            UNIQUE NOT NULL,
+    base_url        TEXT            NOT NULL,
+    api_key         TEXT            NOT NULL,
+    models          JSONB           DEFAULT '[]'::jsonb,
+    extra_body      JSONB,
+    stream          BOOLEAN         DEFAULT true,
+    request_timeout INTEGER         DEFAULT 60,
+    created_at      TIMESTAMPTZ     DEFAULT now()
+);
+"""
+
+_CREATE_LLM_ACTIVE_TABLE = """\
+CREATE TABLE IF NOT EXISTS llm_active (
+    key             TEXT            PRIMARY KEY DEFAULT 'default',
+    provider_id     INTEGER         REFERENCES llm_providers(id) ON DELETE SET NULL,
+    model           TEXT            NOT NULL,
+    updated_at      TIMESTAMPTZ     DEFAULT now()
+);
+"""
+
 _CREATE_INDEXES = [
     # 按群聊查最近消息（最常用）
     """\
@@ -127,5 +150,7 @@ async def _init_schema(pool: asyncpg.Pool) -> None:
     """幂等创建所有表和索引。"""
     async with pool.acquire() as conn:
         await conn.execute(_CREATE_MESSAGES_TABLE)
+        await conn.execute(_CREATE_LLM_PROVIDERS_TABLE)
+        await conn.execute(_CREATE_LLM_ACTIVE_TABLE)
         for ddl in _CREATE_INDEXES:
             await conn.execute(ddl)
