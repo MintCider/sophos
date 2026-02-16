@@ -113,6 +113,20 @@ CREATE TABLE IF NOT EXISTS llm_active (
 );
 """
 
+_CREATE_TRIGGER_CONFIG_TABLE = """\
+CREATE TABLE IF NOT EXISTS trigger_config (
+    id          INTEGER     PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+    base_rate   REAL        NOT NULL DEFAULT 0.05,
+    at_always   BOOLEAN     NOT NULL DEFAULT true,
+    keywords    JSONB       NOT NULL DEFAULT '[]'::jsonb,
+    updated_at  TIMESTAMPTZ DEFAULT now()
+);
+"""
+
+_SEED_TRIGGER_CONFIG = """\
+INSERT INTO trigger_config (id) VALUES (1) ON CONFLICT DO NOTHING;
+"""
+
 _CREATE_IMAGE_CACHE_TABLE = """\
 CREATE TABLE IF NOT EXISTS image_cache (
     hash                TEXT            PRIMARY KEY,
@@ -165,5 +179,7 @@ async def _init_schema(pool: asyncpg.Pool) -> None:
         await conn.execute(_CREATE_LLM_PROVIDERS_TABLE)
         await conn.execute(_CREATE_LLM_ACTIVE_TABLE)
         await conn.execute(_CREATE_IMAGE_CACHE_TABLE)
+        await conn.execute(_CREATE_TRIGGER_CONFIG_TABLE)
+        await conn.execute(_SEED_TRIGGER_CONFIG)
         for ddl in _CREATE_INDEXES:
             await conn.execute(ddl)

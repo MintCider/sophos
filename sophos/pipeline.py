@@ -5,6 +5,7 @@ Stage 通过 next() 回调串联，不调用 next() 即终止后续 stage。
 
 import asyncio
 import logging
+import random
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -12,8 +13,9 @@ from typing import Any
 
 import aiohttp
 
-from sophos.commands import handle_llm_command
+from sophos.commands import handle_llm_command, handle_trigger_command
 from sophos.config import settings
+from sophos.db import get_pool
 from sophos.llm.context import build_chat_context, describe_schema
 from sophos.llm.provider_manager import ProviderManager
 from sophos.llm.tool_loop import run_tool_loop
@@ -21,6 +23,7 @@ from sophos.message_store import MessageStore
 from sophos.onebot_api import OneBotAPI
 from sophos.tools.onebot import ALL_TOOLS
 from sophos.tools.registry import ToolRegistry
+from sophos import trigger
 from sophos.vision import process_message_images
 
 logger = logging.getLogger("sophos")
@@ -387,6 +390,11 @@ class HandleCommandStage(Stage):
                 ctx.text, api=ctx.api, event=ctx.event, provider_mgr=ctx.provider_mgr,
             )
             return
+        if ctx.text.startswith(".trigger"):
+            await handle_trigger_command(
+                ctx.text, api=ctx.api, event=ctx.event, pool=get_pool(),
+            )
+            return
         await next()
 
     async def _handle_ping(self, ctx: PipelineContext) -> None:
@@ -414,7 +422,7 @@ class HandleCommandStage(Stage):
 
 
 class TriggerLLMStage(Stage):
-    """咕喵咕喵 触发 LLM 对话（临时）。"""
+    """概率触发 LLM 对话。"""
 
     @property
     def name(self) -> str:
@@ -422,12 +430,50 @@ class TriggerLLMStage(Stage):
 
     @property
     def description(self) -> str:
-        return "咕喵咕喵 触发 LLM 对话（临时）"
+        return "概率触发 LLM 对话"
+
+    def _is_at_bot(self, ctx: PipelineContext) -> bool:
+        self_qq = str(ctx.self_id)
+        return any(
+            seg.get("type") == "at" and str(seg.get("data", {}).get("qq")) == self_qq
+            for seg in ctx.segments
+        )
 
     async def execute(self, ctx: PipelineContext, next: NextFn) -> None:
-        if ctx.text.startswith("咕喵咕喵"):
+        pool = get_pool()
+        cfg = await trigger.load(pool)
+
+        # 私聊始终触发
+        if ctx.message_type == "private":
+            rate = 1.0
+            reason = "private"
+        # 被 @ 且开启 at_always
+        elif cfg.at_always and self._is_at_bot(ctx):
+            rate = 1.0
+            reason = "@bot"
+        else:
+            # 关键词匹配：取最大 boost
+            max_boost = 0.0
+            matched = ""
+            for kw in cfg.keywords:
+                if kw.word in ctx.text:
+                    if kw.boost > max_boost:
+                        max_boost = kw.boost
+                        matched = kw.word
+            rate = min(1.0, cfg.base_rate + max_boost)
+            reason = f"keyword '{matched}'" if matched else "base"
+
+        roll = random.random()
+        if roll < rate:
+            logger.debug(
+                "Trigger fired: reason=%s rate=%.3f roll=%.3f", reason, rate, roll,
+            )
             await _handle_llm_trigger(ctx)
             return
+
+        logger.debug(
+            "Trigger skipped: reason=%s rate=%.3f roll=%.3f", reason, rate, roll,
+        )
         await next()
 
 

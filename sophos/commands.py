@@ -6,8 +6,11 @@
 import logging
 from typing import Any
 
+import asyncpg
+
 from sophos.llm.provider_manager import ProviderManager
 from sophos.onebot_api import OneBotAPI
+from sophos import trigger
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +111,87 @@ async def handle_llm_command(
             "  .llm models <alias>\n"
             "  .llm switch <alias>/<model>\n"
             "  .llm vision  — vision 模型管理"
+        )
+
+    await _reply(api, event, reply)
+    return True
+
+
+async def handle_trigger_command(
+    text: str,
+    *,
+    api: OneBotAPI,
+    event: dict[str, Any],
+    pool: asyncpg.Pool,
+) -> bool:
+    """处理 .trigger 命令。返回 True 表示已处理。"""
+    parts = text.split()
+    sub = parts[1] if len(parts) > 1 else ""
+
+    if sub == "":
+        cfg = await trigger.load(pool)
+        kw_lines = [f"  {k.word} (+{k.boost})" for k in cfg.keywords]
+        reply = (
+            f"触发配置:\n"
+            f"  基础概率: {cfg.base_rate}\n"
+            f"  @必回: {'开' if cfg.at_always else '关'}\n"
+            f"  关键词 ({len(cfg.keywords)}):\n"
+            + ("\n".join(kw_lines) if kw_lines else "    (无)")
+        )
+
+    elif sub == "rate":
+        if len(parts) < 3:
+            reply = "用法: .trigger rate <0~1>"
+        else:
+            try:
+                rate = float(parts[2])
+            except ValueError:
+                reply = "概率必须是数字"
+            else:
+                if not 0 <= rate <= 1:
+                    reply = "概率范围 0~1"
+                else:
+                    await trigger.set_base_rate(pool, rate)
+                    reply = f"基础概率已设为 {rate}"
+
+    elif sub == "at":
+        if len(parts) < 3 or parts[2] not in ("on", "off"):
+            reply = "用法: .trigger at <on|off>"
+        else:
+            value = parts[2] == "on"
+            await trigger.set_at_always(pool, value)
+            reply = f"@必回已{'开启' if value else '关闭'}"
+
+    elif sub == "add":
+        if len(parts) < 4:
+            reply = "用法: .trigger add <关键词> <boost>"
+        else:
+            try:
+                boost = float(parts[3])
+            except ValueError:
+                reply = "boost 必须是数字"
+            else:
+                if not 0 < boost <= 1:
+                    reply = "boost 范围 (0, 1]"
+                else:
+                    await trigger.add_keyword(pool, parts[2], boost)
+                    reply = f"关键词 '{parts[2]}' 已添加 (boost={boost})"
+
+    elif sub == "remove":
+        if len(parts) < 3:
+            reply = "用法: .trigger remove <关键词>"
+        else:
+            removed = await trigger.remove_keyword(pool, parts[2])
+            reply = f"关键词 '{parts[2]}' 已删除" if removed else f"关键词 '{parts[2]}' 不存在"
+
+    else:
+        reply = (
+            "用法:\n"
+            "  .trigger              — 当前配置\n"
+            "  .trigger rate <0~1>   — 基础概率\n"
+            "  .trigger at <on|off>  — @必回开关\n"
+            "  .trigger add <词> <boost>\n"
+            "  .trigger remove <词>"
         )
 
     await _reply(api, event, reply)
