@@ -12,6 +12,7 @@ dependencies = [
     "aiohttp>=3.9",            # WebSocket 客户端，连接 NapCat OneBot WS
     "asyncpg>=0.30",           # 异步 PostgreSQL 驱动
     "pydantic-settings>=2.7",  # 从 .env 加载类型安全的配置
+    "imagehash>=4.3",          # 感知哈希（含 Pillow）
 ]
 
 [build-system]

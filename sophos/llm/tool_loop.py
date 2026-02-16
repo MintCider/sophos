@@ -17,6 +17,31 @@ from sophos.llm.provider import ChatResponse, LLMProvider, Message
 logger = logging.getLogger(__name__)
 
 
+def _make_error_result(error: str) -> str:
+    """统一构造 tool 错误反馈 JSON。"""
+    return json.dumps({"error": error}, ensure_ascii=False)
+
+
+def _sanitize_tool_calls(assistant_msg: Message) -> None:
+    """清理 assistant message 中畸形的 tool_calls arguments。
+
+    某些 LLM 会生成非法 JSON arguments（如多个 JSON 对象拼接），
+    导致下一轮发回 API 时被拒绝。此函数将非法 arguments 替换为 "{}"，
+    确保对话历史始终合法，错误信息通过 tool result message 反馈给 LLM。
+    """
+    tool_calls = assistant_msg.get("tool_calls")
+    if not tool_calls:
+        return
+    for tc in tool_calls:
+        func = tc.get("function", {})
+        raw = func.get("arguments", "{}")
+        if isinstance(raw, str):
+            try:
+                json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                func["arguments"] = "{}"
+
+
 async def run_tool_loop(
     provider: LLMProvider,
     messages: list[Message],
@@ -46,14 +71,31 @@ async def run_tool_loop(
     messages = list(messages)
 
     for round_num in range(1, max_rounds + 1):
-        response: ChatResponse = await provider.chat(
-            messages,
-            tools=tools,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
+        try:
+            response: ChatResponse = await provider.chat(
+                messages,
+                tools=tools,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+        except Exception as e:
+            # 上一轮的 assistant message 可能包含畸形 tool_calls，
+            # 导致 API 拒绝整个请求。回滚畸形消息后不带 tools 做最终调用。
+            logger.warning("LLM API error in tool loop round %d, attempting recovery: %s", round_num, e)
+            while messages and messages[-1].get("role") == "tool":
+                messages.pop()
+            if messages and messages[-1].get("role") == "assistant" and messages[-1].get("tool_calls"):
+                messages.pop()
+            try:
+                response = await provider.chat(messages, temperature=temperature, max_tokens=max_tokens)
+                messages.append(response["message"])
+            except Exception:
+                logger.exception("Recovery call also failed")
+            return messages
 
         assistant_msg = response["message"]
+        # 清理畸形 arguments，确保对话历史合法
+        _sanitize_tool_calls(assistant_msg)
         messages.append(assistant_msg)
 
         # 如果模型没有调用工具，循环结束
@@ -68,7 +110,7 @@ async def run_tool_loop(
             func = tc["function"]
             tool_name = func["name"]
 
-            # 兼容：arguments 可能是 JSON string 或已解析的 dict
+            # 解析参数
             raw_args = func.get("arguments", "{}")
             if isinstance(raw_args, dict):
                 params: dict[str, Any] = raw_args
@@ -78,26 +120,24 @@ async def run_tool_loop(
                     params = json.loads(raw_args)
                     parse_error = False
                 except (json.JSONDecodeError, TypeError):
-                    logger.warning("Invalid tool call arguments: %s", raw_args)
+                    logger.warning("Invalid tool call arguments for %s: %s", tool_name, raw_args[:200])
                     params = {}
                     parse_error = True
 
+            # 统一错误处理：解析失败或执行失败都反馈给 LLM
             if parse_error:
-                # 参数解析失败 → 不调用工具，直接告诉 LLM 参数格式有误
-                result_str = json.dumps(
-                    {"error": f"参数 JSON 格式错误，请检查后重试。收到: {raw_args[:200]}"},
-                    ensure_ascii=False,
+                result_str = _make_error_result(
+                    f"工具 {tool_name} 的参数 JSON 格式错误，无法解析。请检查参数格式后重试。"
                 )
             else:
-                logger.info("Calling tool: %s(%s)", tool_name, json.dumps(params, ensure_ascii=False))
                 try:
+                    logger.info("Calling tool: %s(%s)", tool_name, json.dumps(params, ensure_ascii=False))
                     result = await tool_executor(tool_name, params)
                     result_str = json.dumps(result, ensure_ascii=False, default=str)
                 except Exception as e:
-                    logger.exception("Tool %s failed", tool_name)
-                    result_str = json.dumps({"error": str(e)}, ensure_ascii=False)
+                    logger.exception("Tool %s execution failed", tool_name)
+                    result_str = _make_error_result(f"工具 {tool_name} 执行失败: {e}")
 
-            # 兼容：有些 provider 不返回 tool_call id
             tc_id = tc.get("id") or f"call_{round_num}_{i}"
             tool_msg: Message = {
                 "role": "tool",

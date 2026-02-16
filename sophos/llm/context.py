@@ -66,10 +66,13 @@ def _build_multi_turn(
     messages: list[Message] = [{"role": "system", "content": system_prompt}]
 
     for row in rows:
+        img_text = _format_image_descriptions(row)
         if row.get("source") == "sophos":
             content = row.get("plain_text", "")
             if inline_bg:
                 content = _maybe_append_inline_bg(content, row)
+            if img_text:
+                content = f"{content} {img_text}" if content else img_text
             messages.append({"role": "assistant", "content": content})
         else:
             content = apply_schema(
@@ -80,6 +83,8 @@ def _build_multi_turn(
                 uid=str(row.get("user_id", "")),
                 message=row.get("plain_text", ""),
             )
+            if img_text:
+                content = f"{content} {img_text}" if content else img_text
             messages.append({"role": "user", "content": content})
 
     return messages
@@ -93,6 +98,7 @@ def _build_flat(
     bot_name = settings.bot_nickname or "Sophos"
 
     for row in rows:
+        img_text = _format_image_descriptions(row)
         if row.get("source") == "sophos":
             line = apply_schema(
                 settings.llm_bot_schema,
@@ -113,6 +119,8 @@ def _build_flat(
                 uid=str(row.get("user_id", "")),
                 message=row.get("plain_text", ""),
             )
+        if img_text:
+            line = f"{line} {img_text}" if line else img_text
         lines.append(line)
 
     chat_log = "\n".join(lines)
@@ -171,6 +179,27 @@ def get_display_name(row: dict[str, Any]) -> str:
 
 
 # ── 跨 context 背景格式化 ─────────────────────────────────
+
+
+def _format_image_descriptions(row: dict[str, Any]) -> str:
+    """从 extra.images 提取图片描述，格式化为 [图片(hash): desc]。"""
+    extra = row.get("extra")
+    if not extra:
+        return ""
+    if isinstance(extra, str):
+        extra = json.loads(extra)
+    images = extra.get("images")
+    if not images:
+        return ""
+    parts = []
+    for img in images:
+        h = img.get("hash", "")
+        desc = img.get("description", "")
+        if desc:
+            parts.append(f"[图片({h}): {desc}]")
+        else:
+            parts.append(f"[图片({h})]")
+    return " ".join(parts)
 
 
 def _format_bg_for_system(bg_row: dict[str, Any]) -> str:

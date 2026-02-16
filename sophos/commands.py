@@ -74,6 +74,30 @@ async def handle_llm_command(
             alias, _, model = parts[2].partition("/")
             reply = await provider_mgr.switch(alias, model)
 
+    elif sub == "vision":
+        vision_sub = parts[2] if len(parts) > 2 else ""
+        if vision_sub == "":
+            info = provider_mgr.current_info()
+            if info.get("vision_alias"):
+                reply = f"Vision 模型: {info['vision_alias']} / {info['vision_model']}"
+            else:
+                reply = "Vision 未配置"
+        elif vision_sub == "switch":
+            if len(parts) < 4 or "/" not in parts[3]:
+                reply = "用法: .llm vision switch <alias>/<model>"
+            else:
+                alias, _, model = parts[3].partition("/")
+                reply = await provider_mgr.switch_vision(alias, model)
+        elif vision_sub == "off":
+            reply = await provider_mgr.disable_vision()
+        else:
+            reply = (
+                "用法:\n"
+                "  .llm vision              — 当前 vision 模型\n"
+                "  .llm vision switch <alias>/<model>\n"
+                "  .llm vision off          — 关闭 vision"
+            )
+
     else:
         reply = (
             "用法:\n"
@@ -82,7 +106,8 @@ async def handle_llm_command(
             "  .llm add <alias> <url> <key>\n"
             "  .llm remove <alias>\n"
             "  .llm models <alias>\n"
-            "  .llm switch <alias>/<model>"
+            "  .llm switch <alias>/<model>\n"
+            "  .llm vision  — vision 模型管理"
         )
 
     await _reply(api, event, reply)

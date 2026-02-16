@@ -79,6 +79,42 @@ class Settings(BaseSettings):
     #   "off"     — 不注入
     cross_context_mode: str = "system"
 
+    # ── Vision（首次启动 seed 用，之后以 DB 为准）────────────
+    # 以下 6 项仅在 DB 无 'vision' slot 时用于 seed，
+    # 之后通过 .llm vision 命令管理，不再读取 .env。
+    vision_base_url: str = ""
+    vision_api_key: str = ""
+    vision_model: str = ""
+    vision_stream: bool = False
+    vision_extra_body: str = ""
+    vision_request_timeout: int = 30
+
+    # ── Vision 全局行为参数（始终从 .env 读取）────────────────
+    vision_system_prompt: str = (
+        "以下是出现在群聊中的一张图片。"
+        "请用简练的中文概括图像内容，尽可能覆盖值得注意的特征。"
+        "首先给出图片类型（如：照片、表情包、梗图、截图、漫画、二次元人物等），然后描述内容。"
+        "如果是表情包或梗图，描述其含义和情感。"
+        "如果有文字，转录文字内容。"
+        "如果图片是多帧网格（多张小图拼成的网格），说明原图是动图/GIF，请描述动画内容和变化过程。"
+        "你只需要进行描述，不要做出任何进一步的补充、解释、推断或反馈。"
+    )
+    vision_refine_prompt: str = (
+        "之前对这张图片的描述是：{prev_description}\n"
+        "请重新审视图片，如果描述准确则保持不变，如果有遗漏或错误请修正。"
+        "同样只需描述，不要做进一步补充。"
+    )
+    # 喂给 VLM 的最近聊天消息数
+    vision_context_messages: int = 5
+    # ε-greedy 衰减参数
+    vision_epsilon_init: float = 1.0
+    vision_epsilon_min: float = 0.0
+    vision_epsilon_decay: float = 0.7
+    # VLM 最大生成 token 数
+    vision_max_tokens: int = 1024
+    # imagehash average_hash 的 hash_size 参数
+    vision_hash_size: int = 15
+
 
 # 全局单例，import 后直接使用
 settings = Settings()

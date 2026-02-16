@@ -113,6 +113,18 @@ CREATE TABLE IF NOT EXISTS llm_active (
 );
 """
 
+_CREATE_IMAGE_CACHE_TABLE = """\
+CREATE TABLE IF NOT EXISTS image_cache (
+    hash                TEXT            PRIMARY KEY,
+    description         TEXT            NOT NULL DEFAULT '',
+    hit_count           INTEGER         NOT NULL DEFAULT 0,
+    correction_hint     TEXT,
+    pending_correction  BOOLEAN         NOT NULL DEFAULT false,
+    first_seen          TIMESTAMPTZ     NOT NULL DEFAULT now(),
+    last_seen           TIMESTAMPTZ     NOT NULL DEFAULT now()
+);
+"""
+
 _CREATE_INDEXES = [
     # 按群聊查最近消息（最常用）
     """\
@@ -152,5 +164,6 @@ async def _init_schema(pool: asyncpg.Pool) -> None:
         await conn.execute(_CREATE_MESSAGES_TABLE)
         await conn.execute(_CREATE_LLM_PROVIDERS_TABLE)
         await conn.execute(_CREATE_LLM_ACTIVE_TABLE)
+        await conn.execute(_CREATE_IMAGE_CACHE_TABLE)
         for ddl in _CREATE_INDEXES:
             await conn.execute(ddl)

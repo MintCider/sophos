@@ -18,6 +18,7 @@ from sophos.message_store import MessageStore
 from sophos.onebot_api import OneBotAPI
 from sophos.tools.onebot import ALL_TOOLS
 from sophos.tools.registry import ToolRegistry
+from sophos.vision import process_message_images
 
 logger = logging.getLogger("sophos")
 
@@ -27,12 +28,14 @@ async def handle_event(
     event: dict[str, Any],
     store: MessageStore,
     provider_mgr: ProviderManager,
+    session: aiohttp.ClientSession,
 ) -> None:
     """处理一个 OneBot 事件上报。
 
     流程：
       1. 如果是消息事件 → 先存入数据库
-      2. 再做业务处理（目前仅 .ping 命令）
+      2. 处理图片段（VLM 识别）
+      3. 再做业务处理（命令、LLM 触发）
 
     NapCat 对自身发出的消息使用 post_type="message_sent" 而非 "message"，
     两者都需要处理。
@@ -45,13 +48,18 @@ async def handle_event(
     self_id = event.get("self_id")
     await store.save_event_message(event, self_id=self_id)
 
+    # ── 图片处理（异步，不阻塞后续业务逻辑）──────────────
+    segments: list[dict[str, Any]] = event.get("message", [])
+    asyncio.create_task(
+        _process_event_images(segments, event, store, provider_mgr, session)
+    )
+
     # ── 业务处理（仅处理他人消息，跳过 bot 自身发出的消息）──
     user_id = event.get("user_id")
     if user_id == self_id:
         return
 
     # ── 业务处理 ──────────────────────────────────────────
-    segments: list[dict[str, Any]] = event.get("message", [])
     text = "".join(
         seg["data"]["text"] for seg in segments if seg.get("type") == "text"
     ).strip()
@@ -88,6 +96,66 @@ async def handle_event(
 
     elif text.startswith("咕喵咕喵"):
         await _handle_llm_trigger(api, event, store, provider_mgr)
+
+
+# ── 图片处理 ──────────────────────────────────────────────
+
+
+async def _process_event_images(
+    segments: list[dict[str, Any]],
+    event: dict[str, Any],
+    store: MessageStore,
+    provider_mgr: ProviderManager,
+    session: aiohttp.ClientSession,
+) -> None:
+    """处理消息中的图片段：下载 → 哈希 → VLM 识别 → 写入 extra。
+
+    作为独立 task 运行，不阻塞消息的业务处理。
+    """
+    # 快速检查：有图片段才继续
+    if not any(seg.get("type") == "image" for seg in segments):
+        return
+
+    vision_provider = provider_mgr.get_vision_provider()
+    pool = store.pool
+
+    # 获取最近聊天消息作为 VLM 上下文
+    context_messages: list[dict[str, Any]] | None = None
+    if settings.vision_context_messages > 0:
+        group_id = event.get("group_id")
+        user_id = event.get("user_id")
+        msg_type = event.get("message_type", "private")
+        rows = await store.get_context(
+            group_id=group_id,
+            user_id=user_id if msg_type == "private" else None,
+            limit=settings.vision_context_messages,
+        )
+        if rows:
+            context_messages = [
+                {"role": "user", "content": r.get("plain_text", "")}
+                for r in rows if r.get("plain_text")
+            ]
+
+    try:
+        image_infos = await process_message_images(
+            segments,
+            pool=pool,
+            session=session,
+            vision_provider=vision_provider,
+            context_messages=context_messages,
+        )
+    except Exception:
+        logger.exception("Image processing failed for event message_id=%s", event.get("message_id"))
+        return
+
+    if image_infos:
+        message_id = event.get("message_id")
+        if message_id is not None:
+            await store.update_image_extra(message_id, image_infos)
+            logger.info(
+                "Stored %d image description(s) for message_id=%s",
+                len(image_infos), message_id,
+            )
 
 
 # ── LLM 触发处理（临时，后续由触发器替代）─────────────────
@@ -246,7 +314,7 @@ async def ws_loop(store: MessageStore, provider_mgr: ProviderManager) -> None:
                             event = api.dispatch(data)
                             if event is not None:
                                 # 事件处理放到独立 Task，不阻塞 WS 读取循环
-                                asyncio.create_task(handle_event(api, event, store, provider_mgr))
+                                asyncio.create_task(handle_event(api, event, store, provider_mgr, session))
 
                         elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
                             logger.warning("WebSocket closed or error: %s", msg.data)

@@ -30,6 +30,11 @@ class MessageStore:
     def __init__(self, pool: asyncpg.Pool):
         self._pool = pool
 
+    @property
+    def pool(self) -> asyncpg.Pool:
+        """公开数据库连接池，供外部模块（如 vision）使用。"""
+        return self._pool
+
     # ── 从 WS 事件存入 ───────────────────────────────────
 
     async def save_event_message(self, event: dict[str, Any], self_id: int | None = None) -> int | None:
@@ -201,6 +206,25 @@ class MessageStore:
             message_id,
         )
         return dict(row) if row else None
+
+    # ── 图片描述更新 ────────────────────────────────────────
+
+    async def update_image_extra(
+        self, message_id: int, image_infos: list[dict[str, str]],
+    ) -> None:
+        """将图片描述写入消息的 extra.images 字段。
+
+        与现有 extra 字段（如 cross_context）合并，互不干扰。
+        """
+        images_json = json.dumps(image_infos, ensure_ascii=False)
+        await self._pool.execute(
+            """
+            UPDATE messages
+            SET extra = COALESCE(extra, '{}'::jsonb) || jsonb_build_object('images', $2::jsonb)
+            WHERE message_id = $1
+            """,
+            message_id, images_json,
+        )
 
     # ── 按时间范围查询 ────────────────────────────────────
 
