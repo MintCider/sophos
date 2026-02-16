@@ -45,10 +45,19 @@ class ToolRegistry:
         """按名称调用工具。
 
         这是代码直接调用工具的入口，也是 LLM tool calling 的执行入口。
+        调用前自动校验 required 参数是否齐全。
         """
         tool = self._tools.get(name)
         if tool is None:
             raise ValueError(f"Unknown tool: {name}")
+
+        # 轻量参数校验：检查 required 字段是否齐全
+        schema = tool.parameters
+        required = schema.get("required", [])
+        missing = [r for r in required if r not in params]
+        if missing:
+            return {"error": f"缺少必填参数: {', '.join(missing)}"}
+
         return await tool.execute(params, context)
 
     def get_function_schemas(

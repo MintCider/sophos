@@ -127,7 +127,8 @@ async def run_tool_loop(
             # 统一错误处理：解析失败或执行失败都反馈给 LLM
             if parse_error:
                 result_str = _make_error_result(
-                    f"工具 {tool_name} 的参数 JSON 格式错误，无法解析。请检查参数格式后重试。"
+                    f"工具 {tool_name} 的参数不是合法 JSON（可能是多个 JSON 对象拼接），"
+                    f"原始参数已被丢弃。请重新调用此工具，确保参数是单个合法 JSON 对象。"
                 )
             else:
                 try:
