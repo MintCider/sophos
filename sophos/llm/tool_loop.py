@@ -22,26 +22,6 @@ def _make_error_result(error: str) -> str:
     return json.dumps({"error": error}, ensure_ascii=False)
 
 
-def _sanitize_tool_calls(assistant_msg: Message) -> None:
-    """清理 assistant message 中畸形的 tool_calls arguments。
-
-    某些 LLM 会生成非法 JSON arguments（如多个 JSON 对象拼接），
-    导致下一轮发回 API 时被拒绝。此函数将非法 arguments 替换为 "{}"，
-    确保对话历史始终合法，错误信息通过 tool result message 反馈给 LLM。
-    """
-    tool_calls = assistant_msg.get("tool_calls")
-    if not tool_calls:
-        return
-    for tc in tool_calls:
-        func = tc.get("function", {})
-        raw = func.get("arguments", "{}")
-        if isinstance(raw, str):
-            try:
-                json.loads(raw)
-            except (json.JSONDecodeError, TypeError):
-                func["arguments"] = "{}"
-
-
 async def run_tool_loop(
     provider: LLMProvider,
     messages: list[Message],
@@ -94,8 +74,6 @@ async def run_tool_loop(
             return messages
 
         assistant_msg = response["message"]
-        # 清理畸形 arguments，确保对话历史合法
-        _sanitize_tool_calls(assistant_msg)
         messages.append(assistant_msg)
 
         # 如果模型没有调用工具，循环结束
@@ -110,7 +88,7 @@ async def run_tool_loop(
             func = tc["function"]
             tool_name = func["name"]
 
-            # 解析参数
+            # 解析参数 — 同时做 sanitize（修复 assistant message 中的畸形 JSON）
             raw_args = func.get("arguments", "{}")
             if isinstance(raw_args, dict):
                 params: dict[str, Any] = raw_args
@@ -120,7 +98,12 @@ async def run_tool_loop(
                     params = json.loads(raw_args)
                     parse_error = False
                 except (json.JSONDecodeError, TypeError):
-                    logger.warning("Invalid tool call arguments for %s: %s", tool_name, raw_args[:200])
+                    logger.warning(
+                        "Malformed tool call arguments for %s, raw: %s",
+                        tool_name, raw_args[:500],
+                    )
+                    # 修复 assistant message 中的畸形 arguments，确保对话历史合法
+                    func["arguments"] = "{}"
                     params = {}
                     parse_error = True
 
