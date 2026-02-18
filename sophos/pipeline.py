@@ -13,14 +13,17 @@ from typing import Any
 
 import aiohttp
 
-from sophos.commands import handle_llm_command, handle_trigger_command
+from sophos.commands import handle_llm_command, handle_memory_command, handle_trigger_command
 from sophos.config import settings
 from sophos.db import get_pool
 from sophos.llm.context import build_chat_context, describe_schema
 from sophos.llm.provider_manager import ProviderManager
 from sophos.llm.tool_loop import run_tool_loop
+from sophos.memory.association import auto_retrieve, format_association_block
+from sophos.memory.profile import build_profile_block
 from sophos.message_store import MessageStore
 from sophos.onebot_api import OneBotAPI
+from sophos.tools.memory import MEMORY_TOOLS
 from sophos.tools.onebot import ALL_TOOLS
 from sophos.tools.registry import ToolRegistry
 from sophos import trigger
@@ -225,7 +228,7 @@ def _get_registry() -> ToolRegistry:
     global _tool_registry
     if _tool_registry is None:
         _tool_registry = ToolRegistry()
-        for tool in ALL_TOOLS:
+        for tool in ALL_TOOLS + MEMORY_TOOLS:
             _tool_registry.register(tool)
     return _tool_registry
 
@@ -249,7 +252,56 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
             f"当前会话：私聊 | 对方QQ: {ctx.user_id} | 你的QQ: {ctx.self_id}\n"
             f"消息格式：{fmt_desc}"
         )
-    system_prompt = _SYSTEM_PROMPT.format(nickname=nickname) + meta
+    system_prompt = _SYSTEM_PROMPT.format(nickname=nickname)
+
+    # ── 记忆注入 ──
+    memory_store = ctx.state.get("memory_store")
+    if memory_store:
+        # 保持 embedding provider 同步
+        memory_store.update_embedding_provider(ctx.provider_mgr.get_embedding_provider())
+
+        scope_type = "group" if ctx.message_type == "group" else "private"
+        scope_id: int = ctx.group_id if ctx.message_type == "group" else ctx.user_id  # type: ignore[assignment]
+        if scope_id is None:
+            scope_id = ctx.user_id
+
+        # 获取最近消息用于档案和联想
+        recent_rows = await ctx.store.get_context(
+            group_id=ctx.group_id,
+            user_id=ctx.user_id if ctx.message_type == "private" else None,
+        )
+        context_user_ids = list({r["user_id"] for r in recent_rows if r.get("user_id")})
+        context_text = "\n".join(r.get("plain_text", "") for r in recent_rows if r.get("plain_text"))
+
+        # 档案块
+        try:
+            profile_block = await build_profile_block(
+                memory_store,
+                scope_type=scope_type,
+                scope_id=scope_id,
+                context_user_ids=context_user_ids,
+                context_text=context_text,
+            )
+            if profile_block:
+                system_prompt += f"\n---\n{profile_block}"
+        except Exception:
+            logger.warning("Failed to build profile block", exc_info=True)
+
+        # 联想块（迁移期间跳过）
+        embed_provider = ctx.provider_mgr.get_embedding_provider()
+        if embed_provider:
+            pool = get_pool()
+            cfg = await pool.fetchrow("SELECT migration_status FROM embedding_config WHERE id = 1")
+            is_migrating = cfg and cfg["migration_status"] == "running"
+            if not is_migrating:
+                try:
+                    assoc_memories = await auto_retrieve(memory_store, embed_provider, recent_rows)
+                    if assoc_memories:
+                        system_prompt += f"\n---\n{format_association_block(assoc_memories)}"
+                except Exception:
+                    logger.warning("Failed to retrieve associations", exc_info=True)
+
+    system_prompt += meta
     messages = await build_chat_context(
         ctx.store,
         group_id=ctx.group_id,
@@ -265,6 +317,9 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
         "group_id": ctx.group_id,
         "user_id": ctx.user_id,
     }
+    if memory_store:
+        tool_context["memory_store"] = memory_store
+        tool_context["embedding_provider"] = ctx.provider_mgr.get_embedding_provider()
     sent_via_tool = False
 
     async def tool_executor(name: str, params: dict[str, Any]) -> Any:
@@ -393,6 +448,12 @@ class HandleCommandStage(Stage):
         if ctx.text.startswith(".trigger"):
             await handle_trigger_command(
                 ctx.text, api=ctx.api, event=ctx.event, pool=get_pool(),
+            )
+            return
+        if ctx.text.startswith(".memory"):
+            await handle_memory_command(
+                ctx.text, api=ctx.api, event=ctx.event,
+                provider_mgr=ctx.provider_mgr, pool=get_pool(),
             )
             return
         await next()

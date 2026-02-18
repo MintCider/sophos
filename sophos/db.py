@@ -160,6 +160,38 @@ _SEED_EMBEDDING_CONFIG = """\
 INSERT INTO embedding_config (id) VALUES (1) ON CONFLICT DO NOTHING;
 """
 
+_CREATE_MEMORY_PROFILE_CONTEXT_TABLE = """\
+CREATE TABLE IF NOT EXISTS memory_profile_context (
+    scope_type  VARCHAR(16) NOT NULL,
+    scope_id    BIGINT      NOT NULL,
+    content     TEXT        NOT NULL,
+    updated_at  TIMESTAMPTZ DEFAULT now(),
+    PRIMARY KEY (scope_type, scope_id)
+);
+"""
+
+_CREATE_MEMORY_PROFILE_USER_TABLE = """\
+CREATE TABLE IF NOT EXISTS memory_profile_user (
+    user_id     BIGINT      PRIMARY KEY,
+    content     TEXT        NOT NULL,
+    keywords    JSONB       DEFAULT '[]'::jsonb,
+    updated_at  TIMESTAMPTZ DEFAULT now()
+);
+"""
+
+_CREATE_MEMORIES_TABLE = """\
+CREATE TABLE IF NOT EXISTS memories (
+    id          BIGSERIAL       PRIMARY KEY,
+    content     TEXT            NOT NULL,
+    embedding   vector,
+    source_scope VARCHAR(16),
+    source_id   BIGINT,
+    created_at  TIMESTAMPTZ     DEFAULT now(),
+    last_hit    TIMESTAMPTZ,
+    hit_count   INTEGER         DEFAULT 0
+);
+"""
+
 _CREATE_INDEXES = [
     # 按群聊查最近消息（最常用）
     """\
@@ -190,12 +222,19 @@ _CREATE_INDEXES = [
     ON messages (user_id, message_id)
     WHERE group_id IS NULL;
     """,
+    # memories 全文搜索索引
+    """\
+    CREATE INDEX IF NOT EXISTS idx_memories_tsv
+    ON memories USING gin(tsv);
+    """,
 ]
 
 
 async def _init_schema(pool: asyncpg.Pool) -> None:
     """幂等创建所有表和索引。"""
     async with pool.acquire() as conn:
+        # pgvector 扩展（必须在使用 vector 类型之前）
+        await conn.execute("CREATE EXTENSION IF NOT EXISTS vector;")
         await conn.execute(_CREATE_MESSAGES_TABLE)
         await conn.execute(_CREATE_LLM_PROVIDERS_TABLE)
         await conn.execute(_CREATE_LLM_ACTIVE_TABLE)
@@ -204,6 +243,18 @@ async def _init_schema(pool: asyncpg.Pool) -> None:
         await conn.execute(_SEED_TRIGGER_CONFIG)
         await conn.execute(_CREATE_EMBEDDING_CONFIG_TABLE)
         await conn.execute(_SEED_EMBEDDING_CONFIG)
+        # 记忆系统
+        await conn.execute(_CREATE_MEMORY_PROFILE_CONTEXT_TABLE)
+        await conn.execute(_CREATE_MEMORY_PROFILE_USER_TABLE)
+        await conn.execute(_CREATE_MEMORIES_TABLE)
+        # tsvector 生成列（ALTER 幂等：列已存在时报错，忽略即可）
+        try:
+            await conn.execute(
+                "ALTER TABLE memories ADD COLUMN tsv tsvector "
+                "GENERATED ALWAYS AS (to_tsvector('simple', content)) STORED;"
+            )
+        except asyncpg.DuplicateColumnError:
+            pass
         # llm_active 新列（向后兼容已有 DB）
         try:
             await conn.execute(

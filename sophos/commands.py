@@ -210,6 +210,119 @@ async def handle_trigger_command(
     return True
 
 
+async def handle_memory_command(
+    text: str,
+    *,
+    api: OneBotAPI,
+    event: dict[str, Any],
+    provider_mgr: ProviderManager,
+    pool: asyncpg.Pool,
+) -> bool:
+    """处理 .memory 命令。返回 True 表示已处理。"""
+    parts = text.split()
+    sub = parts[1] if len(parts) > 1 else ""
+
+    if sub == "":
+        # 统计 + 当前模型
+        from sophos.memory.store import MemoryStore
+
+        store = MemoryStore(pool, None)
+        stats = await store.get_memory_stats()
+        info = provider_mgr.current_info()
+        embed_model = info.get("embedding_model", "未配置")
+        embed_alias = info.get("embedding_alias", "")
+        cfg = await pool.fetchrow("SELECT dimension, endpoint, extra_body, migration_status FROM embedding_config WHERE id = 1")
+        dim = cfg["dimension"] if cfg else 0
+        ep = cfg["endpoint"] if cfg and cfg["endpoint"] else "/embeddings"
+        eb = cfg["extra_body"] if cfg and cfg["extra_body"] else None
+        mig = cfg["migration_status"] if cfg else "none"
+        reply = (
+            f"记忆系统:\n"
+            f"  嵌入模型: {embed_alias}/{embed_model} (维度: {dim})\n"
+            f"  Endpoint: {ep}\n"
+            f"  Extra body: {eb}\n"
+            f"  迁移状态: {mig}\n"
+            f"  会话档案: {stats['profile_context']} 条\n"
+            f"  用户档案: {stats['profile_user']} 条\n"
+            f"  记忆: {stats['memories']} 条"
+        )
+
+    elif sub == "model":
+        sub2 = parts[2] if len(parts) > 2 else ""
+        if sub2 == "switch":
+            if len(parts) < 4 or "/" not in parts[3]:
+                reply = "用法: .memory model switch <alias>/<model>"
+            else:
+                alias, model = parts[3].split("/", 1)
+                reply = await provider_mgr.switch_embedding(alias, model)
+        else:
+            info = provider_mgr.current_info()
+            embed_model = info.get("embedding_model", "未配置")
+            embed_alias = info.get("embedding_alias", "")
+            cfg = await pool.fetchrow("SELECT dimension FROM embedding_config WHERE id = 1")
+            dim = cfg["dimension"] if cfg else 0
+            reply = f"嵌入模型: {embed_alias}/{embed_model}\n维度: {dim}"
+
+    elif sub == "endpoint":
+        sub2 = parts[2] if len(parts) > 2 else ""
+        if sub2 == "":
+            cfg = await pool.fetchrow("SELECT endpoint FROM embedding_config WHERE id = 1")
+            ep = cfg["endpoint"] if cfg and cfg["endpoint"] else "/embeddings"
+            reply = f"当前 endpoint: {ep}"
+        else:
+            reply = await provider_mgr.set_embedding_endpoint(sub2)
+
+    elif sub == "extra_body":
+        arg = " ".join(parts[2:]) if len(parts) > 2 else ""
+        if arg == "":
+            cfg = await pool.fetchrow("SELECT extra_body FROM embedding_config WHERE id = 1")
+            eb = cfg["extra_body"] if cfg and cfg["extra_body"] else None
+            reply = f"当前 extra_body: {eb}"
+        elif arg == "clear":
+            reply = await provider_mgr.set_embedding_extra_body("")
+        else:
+            reply = await provider_mgr.set_embedding_extra_body(arg)
+
+    elif sub == "migrate":
+        sub2 = parts[2] if len(parts) > 2 else ""
+        if sub2 == "status":
+            cfg = await pool.fetchrow("SELECT migration_status, pending_model, pending_dimension FROM embedding_config WHERE id = 1")
+            if not cfg:
+                reply = "embedding 未配置"
+            else:
+                reply = (
+                    f"迁移状态: {cfg['migration_status']}\n"
+                    f"待迁移模型: {cfg['pending_model'] or '无'}\n"
+                    f"待迁移维度: {cfg['pending_dimension'] or '无'}"
+                )
+        elif sub2 == "rollback":
+            reply = await provider_mgr.rollback_embedding_migration()
+        else:
+            try:
+                reply = await provider_mgr.run_embedding_migration()
+            except Exception as e:
+                reply = f"迁移失败: {e}"
+
+    else:
+        reply = (
+            "用法:\n"
+            "  .memory                              — 记忆统计\n"
+            "  .memory model                        — 嵌入模型详情\n"
+            "  .memory model switch <alias>/<model>  — 切换嵌入模型\n"
+            "  .memory endpoint                     — 查看 API endpoint\n"
+            "  .memory endpoint <path>              — 切换 endpoint\n"
+            "  .memory extra_body                   — 查看 extra_body\n"
+            "  .memory extra_body <json>            — 设置 extra_body\n"
+            "  .memory extra_body clear             — 清除 extra_body\n"
+            "  .memory migrate                      — 执行迁移\n"
+            "  .memory migrate status               — 迁移状态\n"
+            "  .memory migrate rollback             — 回滚迁移"
+        )
+
+    await _reply(api, event, reply)
+    return True
+
+
 async def _reply(api: OneBotAPI, event: dict[str, Any], text: str) -> None:
     """向来源会话发送回复。"""
     msg_type = event.get("message_type", "private")

@@ -11,6 +11,7 @@ import aiohttp
 from sophos.config import settings
 from sophos.db import close_db, init_db
 from sophos.llm.provider_manager import ProviderManager
+from sophos.memory.store import MemoryStore
 from sophos.message_store import MessageStore
 from sophos.onebot_api import OneBotAPI
 from sophos.pipeline import DEFAULT_STAGES, Pipeline, PipelineContext
@@ -26,15 +27,22 @@ async def handle_event(
     store: MessageStore,
     provider_mgr: ProviderManager,
     session: aiohttp.ClientSession,
+    memory_store: MemoryStore | None = None,
 ) -> None:
     """处理一个 OneBot 事件上报。"""
     ctx = PipelineContext.from_event(event, api, store, provider_mgr, session)
     if ctx is None:
         return
+    if memory_store is not None:
+        ctx.state["memory_store"] = memory_store
     await _pipeline.run(ctx)
 
 
-async def ws_loop(store: MessageStore, provider_mgr: ProviderManager) -> None:
+async def ws_loop(
+    store: MessageStore,
+    provider_mgr: ProviderManager,
+    memory_store: MemoryStore | None = None,
+) -> None:
     """连接 NapCat WebSocket 并持续监听消息。"""
     ws_url = settings.onebot_ws_url
     ws_token = settings.onebot_ws_token
@@ -58,7 +66,10 @@ async def ws_loop(store: MessageStore, provider_mgr: ProviderManager) -> None:
                             event = api.dispatch(data)
                             if event is not None:
                                 # 事件处理放到独立 Task，不阻塞 WS 读取循环
-                                asyncio.create_task(handle_event(api, event, store, provider_mgr, session))
+                                asyncio.create_task(handle_event(
+                                    api, event, store, provider_mgr, session,
+                                    memory_store=memory_store,
+                                ))
 
                         elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
                             logger.warning("WebSocket closed or error: %s", msg.data)
@@ -84,8 +95,11 @@ async def start() -> None:
     provider_mgr = ProviderManager(pool)
     await provider_mgr.init()
 
+    # 初始化记忆存储
+    memory_store = MemoryStore(pool, provider_mgr.get_embedding_provider())
+
     try:
-        await ws_loop(store, provider_mgr)
+        await ws_loop(store, provider_mgr, memory_store=memory_store)
     finally:
         await provider_mgr.close()
         await close_db()
