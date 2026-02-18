@@ -17,7 +17,7 @@ from typing import Any
 
 import aiohttp
 
-from sophos.commands import handle_config_command, handle_llm_command, handle_memory_command, handle_trigger_command
+from sophos.commands import handle_config_command, handle_llm_command, handle_memory_command, handle_prompt_command, handle_trigger_command
 from sophos.config import settings
 from sophos.db import get_pool
 from sophos.llm.context import build_chat_context, describe_schema, format_timestamp, get_display_name
@@ -220,19 +220,40 @@ _tool_registry: ToolRegistry | None = None
 
 _SYSTEM_PROMPT_FILE = Path(__file__).resolve().parent.parent / "system_prompt.md"
 _system_prompt_cache: str | None = None
+_system_prompt_mtime: float = 0.0
 
 
 def _load_system_prompt() -> str:
-    """加载 system_prompt.md，带模块级缓存。"""
-    global _system_prompt_cache
-    if _system_prompt_cache is None:
-        try:
-            _system_prompt_cache = _SYSTEM_PROMPT_FILE.read_text(encoding="utf-8").strip()
-            logger.info("Loaded system prompt from %s", _SYSTEM_PROMPT_FILE)
-        except FileNotFoundError:
+    """加载 system prompt。优先 runtime_config（webUI），其次文件（mtime 缓存）。"""
+    global _system_prompt_cache, _system_prompt_mtime
+
+    # webUI 接口：runtime_config 中有 system_prompt 则优先使用
+    db_prompt = runtime_config.get("system_prompt")
+    if db_prompt is not None:
+        return db_prompt
+
+    # 文件模式：mtime 变化时自动重载
+    try:
+        current_mtime = _SYSTEM_PROMPT_FILE.stat().st_mtime
+    except FileNotFoundError:
+        if _system_prompt_cache is None:
             logger.warning("system_prompt.md not found, using fallback")
             _system_prompt_cache = "你是 {nickname}，一个活跃在 QQ 群聊中的猫娘。回复时请自然、简洁。"
+        return _system_prompt_cache
+
+    if _system_prompt_cache is None or current_mtime != _system_prompt_mtime:
+        _system_prompt_cache = _SYSTEM_PROMPT_FILE.read_text(encoding="utf-8").strip()
+        _system_prompt_mtime = current_mtime
+        logger.info("Loaded system prompt from %s (mtime=%.0f)", _SYSTEM_PROMPT_FILE, current_mtime)
+
     return _system_prompt_cache
+
+
+def clear_system_prompt_cache() -> None:
+    """清除 system prompt 缓存，下次触发时重新读取。"""
+    global _system_prompt_cache, _system_prompt_mtime
+    _system_prompt_cache = None
+    _system_prompt_mtime = 0.0
 
 
 # ── 最近动态 ──────────────────────────────────────────────
@@ -586,6 +607,11 @@ class HandleCommandStage(Stage):
             return
         if ctx.text.startswith(".config"):
             await handle_config_command(
+                ctx.text, api=ctx.api, event=ctx.event,
+            )
+            return
+        if ctx.text.startswith(".prompt"):
+            await handle_prompt_command(
                 ctx.text, api=ctx.api, event=ctx.event,
             )
             return

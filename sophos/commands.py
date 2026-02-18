@@ -417,6 +417,45 @@ def _parse_value(raw: str, key: str) -> Any:
     return raw
 
 
+async def handle_prompt_command(
+    text: str,
+    *,
+    api: OneBotAPI,
+    event: dict[str, Any],
+) -> bool:
+    """处理 .prompt 命令。返回 True 表示已处理。"""
+    from sophos.pipeline import _load_system_prompt, clear_system_prompt_cache
+
+    parts = text.split()
+    sub = parts[1] if len(parts) > 1 else ""
+
+    if sub == "":
+        prompt = _load_system_prompt()
+        if len(prompt) > 500:
+            reply = prompt[:500] + f"\n... (共 {len(prompt)} 字，用 .prompt full 查看完整)"
+        else:
+            reply = prompt
+
+    elif sub == "full":
+        reply = _load_system_prompt()
+
+    elif sub == "reload":
+        clear_system_prompt_cache()
+        prompt = _load_system_prompt()
+        reply = f"System prompt 已重载 ({len(prompt)} 字)"
+
+    else:
+        reply = (
+            "用法:\n"
+            "  .prompt          — 查看当前 prompt（截断 500 字）\n"
+            "  .prompt full     — 完整显示\n"
+            "  .prompt reload   — 重新加载文件"
+        )
+
+    await _reply(api, event, reply)
+    return True
+
+
 async def _reply(api: OneBotAPI, event: dict[str, Any], text: str) -> None:
     """向来源会话发送回复。"""
     msg_type = event.get("message_type", "private")
