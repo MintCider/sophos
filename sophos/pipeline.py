@@ -26,6 +26,7 @@ from sophos.onebot_api import OneBotAPI
 from sophos.tools.memory import MEMORY_TOOLS
 from sophos.tools.onebot import ALL_TOOLS
 from sophos.tools.registry import ToolRegistry
+from sophos.tools.vision import VISION_TOOLS
 from sophos import trigger
 from sophos.vision import process_message_images
 
@@ -228,7 +229,7 @@ def _get_registry() -> ToolRegistry:
     global _tool_registry
     if _tool_registry is None:
         _tool_registry = ToolRegistry()
-        for tool in ALL_TOOLS + MEMORY_TOOLS:
+        for tool in ALL_TOOLS + MEMORY_TOOLS + VISION_TOOLS:
             _tool_registry.register(tool)
     return _tool_registry
 
