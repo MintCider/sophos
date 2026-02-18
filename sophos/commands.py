@@ -403,18 +403,49 @@ def _parse_value(raw: str, key: str) -> Any:
             return True
         if raw.lower() in ("false", "0", "off", "否"):
             return False
-        raise ValueError(f"布尔值请输入 true/false")
+        raise ValueError("布尔值请输入 true/false")
     if isinstance(default, int):
         try:
-            return int(raw)
+            v = int(raw)
         except ValueError:
-            raise ValueError(f"请输入整数")
+            raise ValueError("请输入整数")
+        _validate(key, v)
+        return v
     if isinstance(default, float):
         try:
-            return float(raw)
+            v = float(raw)
         except ValueError:
-            raise ValueError(f"请输入数字")
+            raise ValueError("请输入数字")
+        _validate(key, v)
+        return v
+    # str
+    _validate(key, raw)
     return raw
+
+
+# 每个 key 的合法性规则：(校验函数, 错误提示)
+_VALIDATORS: dict[str, tuple[Any, str]] = {
+    "llm_temperature":    (lambda v: 0 <= v <= 2,        "范围 0~2"),
+    "llm_max_tokens":     (lambda v: v > 0,              "必须 > 0"),
+    "llm_max_tool_rounds":(lambda v: v > 0,              "必须 > 0"),
+    "max_context_messages":(lambda v: v > 0,             "必须 > 0"),
+    "recent_global_limit":(lambda v: v >= 0,             "必须 >= 0"),
+    "recent_global_min_self":(lambda v: v >= 0,          "必须 >= 0"),
+    "cross_context_mode": (lambda v: v in ("system", "inline", "off"),
+                           "可选值: system / inline / off"),
+    "llm_user_schema":    (lambda v: "{{message}}" in v, "必须包含 {{message}} 占位符"),
+    "llm_bot_schema":     (lambda v: "{{message}}" in v, "必须包含 {{message}} 占位符"),
+}
+
+
+def _validate(key: str, value: Any) -> None:
+    """校验配置值合法性，不合法则 raise ValueError。"""
+    rule = _VALIDATORS.get(key)
+    if rule is None:
+        return
+    check, msg = rule
+    if not check(value):
+        raise ValueError(f"{key}: {msg}")
 
 
 async def handle_prompt_command(
