@@ -194,7 +194,7 @@ class SendMessageTool(Tool):
                 extra=extra,
             )
 
-        return {"status": "ok", "message_id": message_id}
+        return {"status": "ok", "message_id": message_id, "message_text": params["text"]}
 
 
 # ── 输出工具 ─────────────────────────────────────────────

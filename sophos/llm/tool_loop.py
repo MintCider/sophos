@@ -71,6 +71,7 @@ async def run_tool_loop(
                 messages.append(response["message"])
             except Exception:
                 logger.exception("Recovery call also failed")
+                raise
             return messages
 
         assistant_msg = response["message"]

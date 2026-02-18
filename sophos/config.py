@@ -32,7 +32,7 @@ class Settings(BaseSettings):
 
     # ── 消息上下文 ────────────────────────────────────────
     # 每个会话（群聊/私聊）查询时返回的最大消息条数
-    max_context_messages: int = 50
+    max_context_messages: int = 100
     # 构建 LLM 上下文时，是否包含同账号其他来源的消息（其他 bot、手动发的等）
     include_co_account_in_context: bool = True
 

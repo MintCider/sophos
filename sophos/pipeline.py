@@ -4,8 +4,10 @@ Stage 通过 next() 回调串联，不调用 next() 即终止后续 stage。
 """
 
 import asyncio
+import json
 import logging
 import random
+import re
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -241,6 +243,52 @@ def _get_registry() -> ToolRegistry:
     return _tool_registry
 
 
+_RAW_TOOL_CALL_RE = re.compile(
+    r"^(send_msg|set_profile_context|set_profile_user|write_memory|"
+    r"search_memory|delete_memory|correct_image_description|"
+    r"query_messages|set_group_name)\s*[\(\{]",
+)
+
+
+def _sanitize_fallback_reply(text: str) -> str | None:
+    """如果 fallback 文本像 raw tool call，尝试提取实际回复；无法提取则返回 None。
+
+    Gemini 有时会把工具调用以文本形式输出而非使用 function calling 机制。
+    """
+    stripped = text.strip()
+
+    # 以工具名开头 → 大概率是 raw tool call
+    m = _RAW_TOOL_CALL_RE.match(stripped)
+    if m:
+        tool_name = m.group(1)
+        if tool_name == "send_msg":
+            json_m = re.search(r"\{.*\}", stripped, re.DOTALL)
+            if json_m:
+                try:
+                    data = json.loads(json_m.group())
+                    if isinstance(data, dict) and isinstance(data.get("text"), str):
+                        logger.info("Extracted reply text from raw send_msg call")
+                        return data["text"]
+                except (json.JSONDecodeError, TypeError):
+                    pass
+        logger.warning("Fallback content looks like raw tool call (%s), skipping", m.group(1))
+        return None
+
+    # 纯 JSON 对象 → 可能是 send_msg 参数
+    if stripped.startswith("{") and stripped.endswith("}"):
+        try:
+            data = json.loads(stripped)
+            if isinstance(data, dict) and isinstance(data.get("text"), str):
+                logger.info("Extracted reply text from JSON fallback content")
+                return data["text"]
+        except (json.JSONDecodeError, TypeError):
+            pass
+        logger.warning("Fallback content is raw JSON, skipping")
+        return None
+
+    return text
+
+
 async def _handle_llm_trigger(ctx: PipelineContext) -> None:
     """构建上下文 → tool loop → LLM 通过 send_msg tool 回复。"""
     provider = ctx.provider_mgr.get_provider()
@@ -355,6 +403,10 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
         reply_text = (final_msg.get("content") or "") if final_msg else ""
         if not reply_text:
             logger.warning("LLM returned empty response and didn't call send_msg")
+            return
+
+        reply_text = _sanitize_fallback_reply(reply_text)
+        if not reply_text:
             return
 
         logger.info("LLM didn't call send_msg, using fallback")
