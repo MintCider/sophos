@@ -10,7 +10,7 @@ import asyncpg
 
 from sophos.llm.provider_manager import ProviderManager
 from sophos.onebot_api import OneBotAPI
-from sophos import trigger
+from sophos import runtime_config, trigger
 
 logger = logging.getLogger(__name__)
 
@@ -321,6 +321,100 @@ async def handle_memory_command(
 
     await _reply(api, event, reply)
     return True
+
+
+async def handle_config_command(
+    text: str,
+    *,
+    api: OneBotAPI,
+    event: dict[str, Any],
+) -> bool:
+    """处理 .config 命令。返回 True 表示已处理。"""
+    parts = text.split(maxsplit=2)
+    sub = parts[1] if len(parts) > 1 else ""
+
+    if sub == "":
+        # 列出所有配置
+        all_cfg = runtime_config.get_all()
+        defaults = runtime_config.get_defaults()
+        lines = []
+        for k, v in sorted(all_cfg.items()):
+            marker = " *" if k in runtime_config._cache else ""
+            lines.append(f"  {k}: {_format_value(v)}{marker}")
+        reply = "运行时配置 (* = 已自定义):\n" + "\n".join(lines)
+
+    elif sub == "reset":
+        key = parts[2] if len(parts) > 2 else ""
+        if not key:
+            reply = "用法: .config reset <key>"
+        elif key not in runtime_config.get_defaults():
+            reply = f"未知配置项: {key}"
+        else:
+            existed = await runtime_config.delete(key)
+            default_val = runtime_config.get_defaults().get(key)
+            reply = f"{key} 已恢复默认值: {_format_value(default_val)}" if existed else f"{key} 未自定义"
+
+    elif sub in runtime_config.get_defaults():
+        # .config <key> 或 .config <key> <value>
+        key = sub
+        if len(parts) <= 2:
+            val = runtime_config.get(key)
+            default = runtime_config.get_defaults().get(key)
+            is_custom = key in runtime_config._cache
+            reply = f"{key}: {_format_value(val)}"
+            if is_custom:
+                reply += f"\n默认值: {_format_value(default)}"
+        else:
+            raw_value = parts[2]
+            try:
+                parsed = _parse_value(raw_value, key)
+            except ValueError as e:
+                reply = str(e)
+            else:
+                await runtime_config.set(key, parsed)
+                reply = f"{key} = {_format_value(parsed)}"
+
+    else:
+        reply = (
+            "用法:\n"
+            "  .config              — 列出所有配置\n"
+            "  .config <key>        — 查看某项\n"
+            "  .config <key> <val>  — 修改\n"
+            "  .config reset <key>  — 恢复默认值"
+        )
+
+    await _reply(api, event, reply)
+    return True
+
+
+def _format_value(v: Any) -> str:
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, str):
+        return v if len(v) <= 60 else v[:57] + "..."
+    return str(v)
+
+
+def _parse_value(raw: str, key: str) -> Any:
+    """根据默认值类型推断并解析用户输入。"""
+    default = runtime_config.get_defaults().get(key)
+    if isinstance(default, bool):
+        if raw.lower() in ("true", "1", "on", "是"):
+            return True
+        if raw.lower() in ("false", "0", "off", "否"):
+            return False
+        raise ValueError(f"布尔值请输入 true/false")
+    if isinstance(default, int):
+        try:
+            return int(raw)
+        except ValueError:
+            raise ValueError(f"请输入整数")
+    if isinstance(default, float):
+        try:
+            return float(raw)
+        except ValueError:
+            raise ValueError(f"请输入数字")
+    return raw
 
 
 async def _reply(api: OneBotAPI, event: dict[str, Any], text: str) -> None:

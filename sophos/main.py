@@ -15,6 +15,7 @@ from sophos.memory.store import MemoryStore
 from sophos.message_store import MessageStore
 from sophos.onebot_api import OneBotAPI
 from sophos.pipeline import DEFAULT_STAGES, Pipeline, PipelineContext
+from sophos import runtime_config
 
 logger = logging.getLogger("sophos")
 
@@ -90,6 +91,9 @@ async def start() -> None:
     # 初始化数据库（建表 + 连接池）
     pool = await init_db()
     store = MessageStore(pool)
+
+    # 初始化运行时配置
+    await runtime_config.init(pool)
 
     # 初始化 LLM provider 管理器
     provider_mgr = ProviderManager(pool)

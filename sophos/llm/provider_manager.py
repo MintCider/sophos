@@ -19,6 +19,7 @@ from sophos.llm.embedding import EmbeddingProvider
 from sophos.llm.gemini import GeminiProvider
 from sophos.llm.openai_compat import OpenAICompatProvider
 from sophos.llm.provider import LLMProvider
+from sophos import runtime_config
 
 logger = logging.getLogger(__name__)
 
@@ -745,8 +746,8 @@ class ProviderManager:
             "base_url": row["base_url"],
             "api_key": row["api_key"],
             "model": row["model"],
-            "default_temperature": settings.llm_temperature,
-            "default_max_tokens": settings.llm_max_tokens,
+            "default_temperature": runtime_config.get("llm_temperature"),
+            "default_max_tokens": runtime_config.get("llm_max_tokens"),
             "request_timeout": row.get("request_timeout", 60) or 60,
             "stream": row.get("stream", True) if row.get("stream") is not None else True,
             "extra_body": extra_body,
@@ -800,8 +801,8 @@ class ProviderManager:
             "base_url": settings.llm_base_url,
             "api_key": settings.llm_api_key,
             "model": settings.llm_model,
-            "default_temperature": settings.llm_temperature,
-            "default_max_tokens": settings.llm_max_tokens,
+            "default_temperature": runtime_config.get("llm_temperature"),
+            "default_max_tokens": runtime_config.get("llm_max_tokens"),
             "request_timeout": settings.llm_request_timeout,
             "stream": settings.llm_stream,
             "extra_body": extra_body,

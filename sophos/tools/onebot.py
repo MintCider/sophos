@@ -16,6 +16,7 @@ from sophos.llm.context import apply_schema, format_timestamp, get_display_name
 from sophos.message_store import MessageStore
 from sophos.onebot_api import OneBotAPI
 from sophos.tools.base import Tool
+from sophos import runtime_config
 
 
 # ── 通用 OneBot 工具类 ──────────────────────────────────────
@@ -399,7 +400,7 @@ class QueryMessagesTool(Tool):
         for row in rows:
             if row.get("source") == "sophos":
                 line = apply_schema(
-                    settings.llm_bot_schema,
+                    runtime_config.get("llm_bot_schema"),
                     time=format_timestamp(row),
                     mid=str(row.get("message_id", "")),
                     name=bot_name,
@@ -408,7 +409,7 @@ class QueryMessagesTool(Tool):
                 )
             else:
                 line = apply_schema(
-                    settings.llm_user_schema,
+                    runtime_config.get("llm_user_schema"),
                     time=format_timestamp(row),
                     mid=str(row.get("message_id", "")),
                     name=get_display_name(row),

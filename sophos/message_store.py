@@ -19,7 +19,7 @@ from typing import Any
 
 import asyncpg
 
-from sophos.config import settings
+from sophos import runtime_config
 
 logger = logging.getLogger(__name__)
 
@@ -166,7 +166,7 @@ class MessageStore:
 
         返回按时间正序排列的消息列表（最旧在前），方便直接拼接给 LLM。
         """
-        max_messages = limit or settings.max_context_messages
+        max_messages = limit or runtime_config.get("max_context_messages")
 
         # 根据配置决定是否过滤 co_account
         source_filter = "" if include_co_account else "AND source != 'co_account'"

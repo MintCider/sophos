@@ -19,6 +19,7 @@ from typing import Any
 from sophos.config import settings
 from sophos.llm.provider import Message
 from sophos.message_store import MessageStore
+from sophos import runtime_config
 
 
 async def build_chat_context(
@@ -42,11 +43,11 @@ async def build_chat_context(
     rows = await store.get_context(
         group_id=group_id,
         user_id=user_id,
-        include_co_account=settings.include_co_account_in_context,
+        include_co_account=runtime_config.get("include_co_account_in_context"),
     )
 
     # system 模式：查询最近一条 cross_context 背景，追加到 system prompt
-    mode = settings.cross_context_mode
+    mode = runtime_config.get("cross_context_mode")
     if mode == "system":
         bg_row = await store.get_cross_context_background(
             group_id=group_id, user_id=user_id,
@@ -54,7 +55,7 @@ async def build_chat_context(
         if bg_row is not None:
             system_prompt = system_prompt + _format_bg_for_system(bg_row)
 
-    if settings.llm_flatten_context:
+    if runtime_config.get("llm_flatten_context"):
         return _build_flat(rows, system_prompt, inline_bg=(mode == "inline"))
     return _build_multi_turn(rows, system_prompt, inline_bg=(mode == "inline"))
 
@@ -76,7 +77,7 @@ def _build_multi_turn(
             messages.append({"role": "assistant", "content": content})
         else:
             content = apply_schema(
-                settings.llm_user_schema,
+                runtime_config.get("llm_user_schema"),
                 time=format_timestamp(row),
                 mid=str(row.get("message_id", "")),
                 name=get_display_name(row),
@@ -101,7 +102,7 @@ def _build_flat(
         img_text = _format_image_descriptions(row)
         if row.get("source") == "sophos":
             line = apply_schema(
-                settings.llm_bot_schema,
+                runtime_config.get("llm_bot_schema"),
                 time=format_timestamp(row),
                 mid=str(row.get("message_id", "")),
                 name=bot_name,
@@ -112,7 +113,7 @@ def _build_flat(
                 line = _maybe_append_inline_bg(line, row)
         else:
             line = apply_schema(
-                settings.llm_user_schema,
+                runtime_config.get("llm_user_schema"),
                 time=format_timestamp(row),
                 mid=str(row.get("message_id", "")),
                 name=get_display_name(row),

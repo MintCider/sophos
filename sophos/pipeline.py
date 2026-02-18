@@ -17,7 +17,7 @@ from typing import Any
 
 import aiohttp
 
-from sophos.commands import handle_llm_command, handle_memory_command, handle_trigger_command
+from sophos.commands import handle_config_command, handle_llm_command, handle_memory_command, handle_trigger_command
 from sophos.config import settings
 from sophos.db import get_pool
 from sophos.llm.context import build_chat_context, describe_schema, format_timestamp, get_display_name
@@ -27,6 +27,7 @@ from sophos.memory.association import auto_retrieve, format_association_block
 from sophos.memory.profile import build_profile_block
 from sophos.message_store import MessageStore
 from sophos.onebot_api import OneBotAPI
+from sophos import runtime_config
 from sophos.tools.memory import MEMORY_TOOLS
 from sophos.tools.onebot import ALL_TOOLS
 from sophos.tools.registry import ToolRegistry
@@ -236,9 +237,6 @@ def _load_system_prompt() -> str:
 
 # ── 最近动态 ──────────────────────────────────────────────
 
-RECENT_GLOBAL_LIMIT = 50
-RECENT_GLOBAL_MIN_SELF = 5
-
 
 def _format_recent_global_block(
     rows: list[dict[str, Any]],
@@ -346,7 +344,7 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
     registry = _get_registry()
 
     nickname = settings.bot_nickname or "Sophos"
-    fmt_desc = describe_schema(settings.llm_user_schema)
+    fmt_desc = describe_schema(runtime_config.get("llm_user_schema"))
     tz = timezone(timedelta(hours=settings.timezone_offset))
     now_str = datetime.now(tz).strftime("%Y-%m-%d %H:%M")
     tz_label = f"UTC+{settings.timezone_offset}" if settings.timezone_offset >= 0 else f"UTC{settings.timezone_offset}"
@@ -418,8 +416,8 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
         recent_global = await ctx.store.get_recent_global(
             exclude_group_id=ctx.group_id if ctx.message_type == "group" else None,
             exclude_private_user_id=ctx.user_id if ctx.message_type == "private" else None,
-            limit=RECENT_GLOBAL_LIMIT,
-            min_self_messages=RECENT_GLOBAL_MIN_SELF,
+            limit=runtime_config.get("recent_global_limit"),
+            min_self_messages=runtime_config.get("recent_global_min_self"),
         )
         if recent_global:
             block = _format_recent_global_block(recent_global, nickname)
@@ -461,7 +459,7 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
             messages,
             tools=registry.get_function_schemas(scope=ctx.message_type),
             tool_executor=tool_executor,
-            max_rounds=settings.llm_max_tool_rounds,
+            max_rounds=runtime_config.get("llm_max_tool_rounds"),
         )
     except Exception:
         logger.exception("LLM tool loop failed")
@@ -584,6 +582,11 @@ class HandleCommandStage(Stage):
             await handle_memory_command(
                 ctx.text, api=ctx.api, event=ctx.event,
                 provider_mgr=ctx.provider_mgr, pool=get_pool(),
+            )
+            return
+        if ctx.text.startswith(".config"):
+            await handle_config_command(
+                ctx.text, api=ctx.api, event=ctx.event,
             )
             return
         await next()
