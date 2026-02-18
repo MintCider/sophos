@@ -9,6 +9,7 @@ import random
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import aiohttp
@@ -213,15 +214,21 @@ async def _process_event_images(
 
 _tool_registry: ToolRegistry | None = None
 
-_SYSTEM_PROMPT = (
-    "你是 {nickname}，一个活跃在 QQ 群聊中的猫娘。\n"
-    "你有两类工具可以任意使用：\n"
-    "- 输入工具（获取信息）：如查询群成员信息、查询聊天记录\n"
-    "- 输出工具（执行操作）：如发送消息\n"
-    "发送回复时，调用 send_msg 工具。\n"
-    "向其他群或私聊发消息时，必须在 send_msg 的 background 参数中提供背景摘要。\n"
-    "回复时请自然、简洁，一两句话，像一个真正的群聊成员。"
-)
+_SYSTEM_PROMPT_FILE = Path(__file__).resolve().parent.parent / "system_prompt.md"
+_system_prompt_cache: str | None = None
+
+
+def _load_system_prompt() -> str:
+    """加载 system_prompt.md，带模块级缓存。"""
+    global _system_prompt_cache
+    if _system_prompt_cache is None:
+        try:
+            _system_prompt_cache = _SYSTEM_PROMPT_FILE.read_text(encoding="utf-8").strip()
+            logger.info("Loaded system prompt from %s", _SYSTEM_PROMPT_FILE)
+        except FileNotFoundError:
+            logger.warning("system_prompt.md not found, using fallback")
+            _system_prompt_cache = "你是 {nickname}，一个活跃在 QQ 群聊中的猫娘。回复时请自然、简洁。"
+    return _system_prompt_cache
 
 
 def _get_registry() -> ToolRegistry:
@@ -253,7 +260,7 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
             f"当前会话：私聊 | 对方QQ: {ctx.user_id} | 你的QQ: {ctx.self_id}\n"
             f"消息格式：{fmt_desc}"
         )
-    system_prompt = _SYSTEM_PROMPT.format(nickname=nickname)
+    system_prompt = _load_system_prompt().replace("{nickname}", nickname)
 
     # ── 记忆注入 ──
     memory_store = ctx.state.get("memory_store")
