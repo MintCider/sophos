@@ -9,6 +9,7 @@ import logging
 import random
 import re
 from abc import ABC, abstractmethod
+from datetime import datetime, timezone, timedelta
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -296,15 +297,20 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
 
     nickname = settings.bot_nickname or "Sophos"
     fmt_desc = describe_schema(settings.llm_user_schema)
+    tz = timezone(timedelta(hours=settings.timezone_offset))
+    now_str = datetime.now(tz).strftime("%Y-%m-%d %H:%M")
+    tz_label = f"UTC+{settings.timezone_offset}" if settings.timezone_offset >= 0 else f"UTC{settings.timezone_offset}"
     if ctx.message_type == "group":
         meta = (
             f"\n---\n"
+            f"当前时间：{now_str} ({tz_label})\n"
             f"当前会话：群聊 | 群号: {ctx.group_id} | 你的QQ: {ctx.self_id}\n"
             f"消息格式：{fmt_desc}"
         )
     else:
         meta = (
             f"\n---\n"
+            f"当前时间：{now_str} ({tz_label})\n"
             f"当前会话：私聊 | 对方QQ: {ctx.user_id} | 你的QQ: {ctx.self_id}\n"
             f"消息格式：{fmt_desc}"
         )
