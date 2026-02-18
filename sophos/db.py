@@ -109,6 +109,7 @@ CREATE TABLE IF NOT EXISTS llm_active (
     key             TEXT            PRIMARY KEY DEFAULT 'default',
     provider_id     INTEGER         REFERENCES llm_providers(id) ON DELETE SET NULL,
     model           TEXT            NOT NULL,
+    api_type        TEXT            DEFAULT 'openai',
     updated_at      TIMESTAMPTZ     DEFAULT now()
 );
 """
@@ -137,6 +138,26 @@ CREATE TABLE IF NOT EXISTS image_cache (
     first_seen          TIMESTAMPTZ     NOT NULL DEFAULT now(),
     last_seen           TIMESTAMPTZ     NOT NULL DEFAULT now()
 );
+"""
+
+# ── 记忆系统 ──────────────────────────────────────────────
+
+_CREATE_EMBEDDING_CONFIG_TABLE = """\
+CREATE TABLE IF NOT EXISTS embedding_config (
+    id                  INTEGER     PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+    dimension           INTEGER     NOT NULL DEFAULT 0,
+    endpoint            VARCHAR(128) DEFAULT '/embeddings',
+    extra_body          JSONB,
+    pending_provider_id INTEGER     REFERENCES llm_providers(id) ON DELETE SET NULL,
+    pending_model       TEXT,
+    pending_dimension   INTEGER,
+    migration_status    TEXT        DEFAULT 'none',
+    updated_at          TIMESTAMPTZ DEFAULT now()
+);
+"""
+
+_SEED_EMBEDDING_CONFIG = """\
+INSERT INTO embedding_config (id) VALUES (1) ON CONFLICT DO NOTHING;
 """
 
 _CREATE_INDEXES = [
@@ -181,5 +202,27 @@ async def _init_schema(pool: asyncpg.Pool) -> None:
         await conn.execute(_CREATE_IMAGE_CACHE_TABLE)
         await conn.execute(_CREATE_TRIGGER_CONFIG_TABLE)
         await conn.execute(_SEED_TRIGGER_CONFIG)
+        await conn.execute(_CREATE_EMBEDDING_CONFIG_TABLE)
+        await conn.execute(_SEED_EMBEDDING_CONFIG)
+        # llm_active 新列（向后兼容已有 DB）
+        try:
+            await conn.execute(
+                "ALTER TABLE llm_active ADD COLUMN api_type TEXT DEFAULT 'openai';"
+            )
+        except asyncpg.DuplicateColumnError:
+            pass
+        # embedding_config 新列（向后兼容已有 DB）
+        try:
+            await conn.execute(
+                "ALTER TABLE embedding_config ADD COLUMN endpoint VARCHAR(128) DEFAULT '/embeddings';"
+            )
+        except asyncpg.DuplicateColumnError:
+            pass
+        try:
+            await conn.execute(
+                "ALTER TABLE embedding_config ADD COLUMN extra_body JSONB;"
+            )
+        except asyncpg.DuplicateColumnError:
+            pass
         for ddl in _CREATE_INDEXES:
             await conn.execute(ddl)

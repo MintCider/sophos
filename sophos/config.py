@@ -56,6 +56,8 @@ class Settings(BaseSettings):
     llm_extra_body: str = ""
     # HTTP 请求超时（秒）
     llm_request_timeout: int = 60
+    # API 类型：'openai' | 'gemini'（seed 时写入 llm_active.api_type）
+    llm_api_type: str = "openai"
 
     # ── LLM 全局行为参数（始终从 .env 读取）─────────────────
     # 生成温度
@@ -88,6 +90,16 @@ class Settings(BaseSettings):
     vision_stream: bool = False
     vision_extra_body: str = ""
     vision_request_timeout: int = 30
+    # API 类型：'openai' | 'gemini'（seed 时写入 llm_active.api_type）
+    vision_api_type: str = "openai"
+
+    # ── Embedding（首次启动 seed 用，之后以 DB 为准）──────────
+    embedding_base_url: str = ""
+    embedding_api_key: str = ""
+    embedding_model: str = ""
+    embedding_endpoint: str = "/embeddings"
+    embedding_extra_body: str = ""
+    embedding_request_timeout: int = 30
 
     # ── Vision 全局行为参数（始终从 .env 读取）────────────────
     vision_system_prompt: str = (

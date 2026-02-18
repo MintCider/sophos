@@ -15,6 +15,14 @@ from sophos import trigger
 logger = logging.getLogger(__name__)
 
 
+def _extract_type_flag(args: list[str]) -> str:
+    """从参数列表中提取 --type 值，默认 'openai'。"""
+    for i, arg in enumerate(args):
+        if arg == "--type" and i + 1 < len(args):
+            return args[i + 1]
+    return "openai"
+
+
 async def handle_llm_command(
     text: str,
     *,
@@ -28,7 +36,8 @@ async def handle_llm_command(
 
     if sub == "":
         info = provider_mgr.current_info()
-        reply = f"当前模型: {info['alias']} / {info['model']}"
+        api_type_str = f" ({info['api_type']})" if info.get("api_type", "openai") != "openai" else ""
+        reply = f"当前模型: {info['alias']} / {info['model']}{api_type_str}"
 
     elif sub == "list":
         providers = await provider_mgr.list_providers()
@@ -72,25 +81,28 @@ async def handle_llm_command(
 
     elif sub == "switch":
         if len(parts) < 3 or "/" not in parts[2]:
-            reply = "用法: .llm switch <alias>/<model>"
+            reply = "用法: .llm switch <alias>/<model> [--type gemini]"
         else:
             alias, _, model = parts[2].partition("/")
-            reply = await provider_mgr.switch(alias, model)
+            api_type = _extract_type_flag(parts[3:])
+            reply = await provider_mgr.switch(alias, model, api_type=api_type)
 
     elif sub == "vision":
         vision_sub = parts[2] if len(parts) > 2 else ""
         if vision_sub == "":
             info = provider_mgr.current_info()
             if info.get("vision_alias"):
-                reply = f"Vision 模型: {info['vision_alias']} / {info['vision_model']}"
+                vtype = f" ({info['vision_api_type']})" if info.get("vision_api_type", "openai") != "openai" else ""
+                reply = f"Vision 模型: {info['vision_alias']} / {info['vision_model']}{vtype}"
             else:
                 reply = "Vision 未配置"
         elif vision_sub == "switch":
             if len(parts) < 4 or "/" not in parts[3]:
-                reply = "用法: .llm vision switch <alias>/<model>"
+                reply = "用法: .llm vision switch <alias>/<model> [--type gemini]"
             else:
                 alias, _, model = parts[3].partition("/")
-                reply = await provider_mgr.switch_vision(alias, model)
+                api_type = _extract_type_flag(parts[4:])
+                reply = await provider_mgr.switch_vision(alias, model, api_type=api_type)
         elif vision_sub == "off":
             reply = await provider_mgr.disable_vision()
         else:
@@ -109,7 +121,7 @@ async def handle_llm_command(
             "  .llm add <alias> <url> <key>\n"
             "  .llm remove <alias>\n"
             "  .llm models <alias>\n"
-            "  .llm switch <alias>/<model>\n"
+            "  .llm switch <alias>/<model> [--type gemini]\n"
             "  .llm vision  — vision 模型管理"
         )
 
