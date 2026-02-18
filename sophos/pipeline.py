@@ -20,7 +20,7 @@ import aiohttp
 from sophos.commands import handle_llm_command, handle_memory_command, handle_trigger_command
 from sophos.config import settings
 from sophos.db import get_pool
-from sophos.llm.context import build_chat_context, describe_schema
+from sophos.llm.context import build_chat_context, describe_schema, format_timestamp, get_display_name
 from sophos.llm.provider_manager import ProviderManager
 from sophos.llm.tool_loop import run_tool_loop
 from sophos.memory.association import auto_retrieve, format_association_block
@@ -234,6 +234,56 @@ def _load_system_prompt() -> str:
     return _system_prompt_cache
 
 
+# ── 最近动态 ──────────────────────────────────────────────
+
+RECENT_GLOBAL_LIMIT = 50
+RECENT_GLOBAL_MIN_SELF = 5
+
+
+def _format_recent_global_block(
+    rows: list[dict[str, Any]],
+    nickname: str,
+) -> str:
+    """将跨上下文最近消息格式化为 [最近动态] 块。
+
+    按 (message_type, group_id/user_id) 分组，每组内时间正序。
+    """
+    from collections import defaultdict
+
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for r in rows:
+        if r.get("message_type") == "group":
+            key = f"group:{r.get('group_id', 0)}"
+        else:
+            key = f"private:{r.get('user_id', 0)}"
+        groups[key].append(r)
+
+    sections: list[str] = []
+    for key, msgs in groups.items():
+        kind, id_str = key.split(":", 1)
+        if kind == "group":
+            header = f"## 群聊 {id_str}"
+        else:
+            header = f"## 私聊 {id_str}"
+
+        lines: list[str] = [header]
+        for m in msgs:
+            ts = format_timestamp(m)
+            if m.get("source") == "sophos":
+                name = nickname
+            else:
+                name = get_display_name(m)
+            uid = m.get("user_id", "")
+            text = m.get("plain_text", "")
+            if m.get("source") == "sophos":
+                lines.append(f"[{ts}] {name}：{text}")
+            else:
+                lines.append(f"[{ts}] {name}({uid})：{text}")
+        sections.append("\n".join(lines))
+
+    return "[最近动态]\n" + "\n\n".join(sections)
+
+
 def _get_registry() -> ToolRegistry:
     """获取或创建 ToolRegistry 单例。"""
     global _tool_registry
@@ -362,6 +412,20 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
                         system_prompt += f"\n---\n{format_association_block(assoc_memories)}"
                 except Exception:
                     logger.warning("Failed to retrieve associations", exc_info=True)
+
+    # ── 最近动态注入 ──
+    try:
+        recent_global = await ctx.store.get_recent_global(
+            exclude_group_id=ctx.group_id if ctx.message_type == "group" else None,
+            exclude_private_user_id=ctx.user_id if ctx.message_type == "private" else None,
+            limit=RECENT_GLOBAL_LIMIT,
+            min_self_messages=RECENT_GLOBAL_MIN_SELF,
+        )
+        if recent_global:
+            block = _format_recent_global_block(recent_global, nickname)
+            system_prompt += f"\n---\n{block}"
+    except Exception:
+        logger.warning("Failed to build recent global block", exc_info=True)
 
     system_prompt += meta
     messages = await build_chat_context(

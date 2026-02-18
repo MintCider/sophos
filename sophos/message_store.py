@@ -310,6 +310,102 @@ class MessageStore:
 
         return dict(row) if row else None
 
+    # ── 最近全局消息（跨上下文）──────────────────────────
+
+    async def get_recent_global(
+        self,
+        *,
+        exclude_group_id: int | None = None,
+        exclude_private_user_id: int | None = None,
+        limit: int = 50,
+        min_self_messages: int = 5,
+    ) -> list[dict[str, Any]]:
+        """获取其他上下文的最近消息，确保至少包含 min_self_messages 条 sophos 消息。
+
+        Args:
+            exclude_group_id:        当前群聊 ID（排除）
+            exclude_private_user_id: 当前私聊用户 ID（排除）
+            limit:                   最大消息条数
+            min_self_messages:       sophos 消息最少条数
+
+        Returns:
+            按时间正序排列的消息列表
+        """
+        # 构建排除条件
+        exclude_parts: list[str] = []
+        params: list[Any] = []
+        idx = 1
+
+        if exclude_group_id is not None:
+            exclude_parts.append(f"NOT (group_id = ${idx})")
+            params.append(exclude_group_id)
+            idx += 1
+        if exclude_private_user_id is not None:
+            exclude_parts.append(f"NOT (group_id IS NULL AND user_id = ${idx})")
+            params.append(exclude_private_user_id)
+            idx += 1
+
+        where = " AND ".join(exclude_parts) if exclude_parts else "TRUE"
+
+        # Query 1: 最近 limit 条非当前上下文消息
+        params.append(limit)
+        rows = await self._pool.fetch(
+            f"""
+            SELECT * FROM messages
+            WHERE {where}
+            ORDER BY timestamp DESC
+            LIMIT ${idx}
+            """,
+            *params,
+        )
+        rows = [dict(r) for r in rows]
+
+        # 统计 sophos 消息数量
+        sophos_count = sum(1 for r in rows if r.get("source") == "sophos")
+
+        if sophos_count < min_self_messages:
+            # Query 2: 补充 sophos 消息
+            seen_ids = {r["id"] for r in rows}
+            need = min_self_messages - sophos_count
+            extra_params: list[Any] = []
+            extra_idx = 1
+            extra_parts: list[str] = []
+
+            if exclude_group_id is not None:
+                extra_parts.append(f"NOT (group_id = ${extra_idx})")
+                extra_params.append(exclude_group_id)
+                extra_idx += 1
+            if exclude_private_user_id is not None:
+                extra_parts.append(f"NOT (group_id IS NULL AND user_id = ${extra_idx})")
+                extra_params.append(exclude_private_user_id)
+                extra_idx += 1
+
+            extra_where = " AND ".join(extra_parts) if extra_parts else "TRUE"
+            extra_params.append(need + len(rows))  # 多取一些以跳过已有的
+
+            extra_rows = await self._pool.fetch(
+                f"""
+                SELECT * FROM messages
+                WHERE {extra_where} AND source = 'sophos'
+                ORDER BY timestamp DESC
+                LIMIT ${extra_idx}
+                """,
+                *extra_params,
+            )
+            for r in extra_rows:
+                rd = dict(r)
+                if rd["id"] not in seen_ids:
+                    rows.append(rd)
+                    seen_ids.add(rd["id"])
+                    need -= 1
+                    if need <= 0:
+                        break
+
+        # 按时间正序
+        rows.sort(key=lambda r: r["timestamp"])
+        # 截断到 limit
+        return rows[-limit:] if len(rows) > limit else rows
+
     # ── 内部工具 ──────────────────────────────────────────
 
     @staticmethod

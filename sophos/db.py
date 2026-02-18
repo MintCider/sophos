@@ -227,6 +227,11 @@ _CREATE_INDEXES = [
     CREATE INDEX IF NOT EXISTS idx_memories_tsv
     ON memories USING gin(tsv);
     """,
+    # 跨上下文最近消息查询（全局时间索引）
+    """\
+    CREATE INDEX IF NOT EXISTS idx_messages_ts_desc
+    ON messages (timestamp DESC);
+    """,
 ]
 
 
