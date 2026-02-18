@@ -199,6 +199,39 @@ CREATE TABLE IF NOT EXISTS memories (
 );
 """
 
+# ── 权限系统 ──────────────────────────────────────────────
+
+_CREATE_PERM_SCOPE_TABLE = """\
+CREATE TABLE IF NOT EXISTS perm_scope (
+    scope_type  VARCHAR(16)  NOT NULL,
+    scope_id    BIGINT       NOT NULL,
+    enabled     BOOLEAN      NOT NULL DEFAULT true,
+    updated_at  TIMESTAMPTZ  DEFAULT now(),
+    PRIMARY KEY (scope_type, scope_id)
+);
+"""
+
+_CREATE_PERM_GRANT_TABLE = """\
+CREATE TABLE IF NOT EXISTS perm_grant (
+    user_id     BIGINT       NOT NULL,
+    scope_type  VARCHAR(16)  NOT NULL,
+    scope_id    BIGINT       NOT NULL,
+    permission  VARCHAR(32)  NOT NULL,
+    granted_by  BIGINT,
+    created_at  TIMESTAMPTZ  DEFAULT now(),
+    PRIMARY KEY (user_id, scope_type, scope_id, permission)
+);
+"""
+
+_CREATE_PERM_TOOL_TABLE = """\
+CREATE TABLE IF NOT EXISTS perm_tool (
+    scope_type  VARCHAR(16)  NOT NULL,
+    scope_id    BIGINT       NOT NULL,
+    tool_name   VARCHAR(64)  NOT NULL,
+    PRIMARY KEY (scope_type, scope_id, tool_name)
+);
+"""
+
 _CREATE_INDEXES = [
     # 按群聊查最近消息（最常用）
     """\
@@ -239,6 +272,11 @@ _CREATE_INDEXES = [
     CREATE INDEX IF NOT EXISTS idx_messages_ts_desc
     ON messages (timestamp DESC);
     """,
+    # 权限系统：按 scope 查询授权
+    """\
+    CREATE INDEX IF NOT EXISTS idx_perm_grant_scope
+    ON perm_grant (scope_type, scope_id);
+    """,
 ]
 
 
@@ -261,6 +299,10 @@ async def _init_schema(pool: asyncpg.Pool) -> None:
         await conn.execute(_CREATE_MEMORY_PROFILE_CONTEXT_TABLE)
         await conn.execute(_CREATE_MEMORY_PROFILE_USER_TABLE)
         await conn.execute(_CREATE_MEMORIES_TABLE)
+        # 权限系统
+        await conn.execute(_CREATE_PERM_SCOPE_TABLE)
+        await conn.execute(_CREATE_PERM_GRANT_TABLE)
+        await conn.execute(_CREATE_PERM_TOOL_TABLE)
         # tsvector 生成列（ALTER 幂等：列已存在时报错，忽略即可）
         try:
             await conn.execute(

@@ -16,8 +16,13 @@ from pathlib import Path
 from typing import Any
 
 import aiohttp
+import asyncpg
 
-from sophos.commands import handle_config_command, handle_llm_command, handle_memory_command, handle_prompt_command, handle_trigger_command
+from sophos.commands import (
+    handle_bot_command, handle_config_command, handle_help_command,
+    handle_llm_command, handle_memory_command, handle_perm_command,
+    handle_prompt_command, handle_tools_command, handle_trigger_command,
+)
 from sophos.config import settings
 from sophos.db import get_pool
 from sophos.llm.context import build_chat_context, describe_schema, format_timestamp, get_display_name
@@ -475,11 +480,23 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
             sent_via_tool = True
         return result
 
+    tool_schemas = registry.get_function_schemas(scope=ctx.message_type)
+
+    # 工具白名单过滤
+    from sophos import permission as _perm
+    _pool = get_pool()
+    _scope_type = "group" if ctx.message_type == "group" else "private"
+    _scope_id: int = ctx.group_id if ctx.message_type == "group" else ctx.user_id  # type: ignore[assignment]
+    whitelist = await _perm.get_tool_whitelist(_pool, _scope_type, _scope_id)
+    if whitelist is not None:
+        allowed = set(whitelist)
+        tool_schemas = [s for s in tool_schemas if s["function"]["name"] in allowed]
+
     try:
         result_messages = await run_tool_loop(
             provider,
             messages,
-            tools=registry.get_function_schemas(scope=ctx.message_type),
+            tools=tool_schemas,
             tool_executor=tool_executor,
             max_rounds=runtime_config.get("llm_max_tool_rounds"),
         )
@@ -610,8 +627,65 @@ class FilterSelfStage(Stage):
         await next()
 
 
+def _strip_at_prefix(ctx: PipelineContext) -> str:
+    """去除消息开头的 @bot，使 '@sophos .help' 等命令正常工作。"""
+    text = ctx.text
+    if not ctx.segments:
+        return text
+    first = ctx.segments[0]
+    if first.get("type") != "at":
+        return text
+    if str(first.get("data", {}).get("qq")) != str(ctx.self_id):
+        return text
+    m = re.match(r"^@\S+\s*", text)
+    return text[m.end():] if m else text
+
+
+class CheckScopeStage(Stage):
+    """检查会话是否启用。禁用时仅放行有 cmd.bot 权限的 .bot 命令。"""
+
+    @property
+    def name(self) -> str:
+        return "check_scope"
+
+    @property
+    def description(self) -> str:
+        return "检查会话开关（权限系统）"
+
+    async def execute(self, ctx: PipelineContext, next: NextFn) -> None:
+        from sophos import permission as _perm
+
+        if _perm.is_master(ctx.user_id):
+            await next()
+            return
+
+        scope_type = "group" if ctx.message_type == "group" else "private"
+        scope_id: int = ctx.group_id if ctx.message_type == "group" else ctx.user_id  # type: ignore[assignment]
+        pool = get_pool()
+
+        if await _perm.is_scope_enabled(pool, scope_type, scope_id):
+            await next()
+            return
+
+        # 会话禁用 — 仅放行 .bot 命令（有 cmd.bot 权限时）
+        cmd_text = _strip_at_prefix(ctx)
+        if cmd_text.startswith(".bot"):
+            if await _perm.has_permission(pool, ctx.user_id, scope_type, scope_id, "cmd.bot"):
+                ctx.state["_cmd_text"] = cmd_text
+                await next()
+                return
+        # 静默丢弃
+
+
 class HandleCommandStage(Stage):
-    """处理 dot 命令（.ping, .llm）。"""
+    """处理 dot 命令（权限检查 + 分发）。"""
+
+    _COMMAND_PERMS: dict[str, str] = {
+        ".bot": "cmd.bot", ".tools": "cmd.tools",
+        ".llm": "cmd.llm", ".trigger": "cmd.trigger",
+        ".memory": "cmd.memory", ".config": "cmd.config",
+        ".prompt": "cmd.prompt", ".perm": "delegate",
+    }
 
     @property
     def name(self) -> str:
@@ -619,39 +693,95 @@ class HandleCommandStage(Stage):
 
     @property
     def description(self) -> str:
-        return "处理 dot 命令（.ping, .llm）"
+        return "处理 dot 命令（权限检查 + 分发）"
 
     async def execute(self, ctx: PipelineContext, next: NextFn) -> None:
-        if ctx.text == ".ping":
+        from sophos import permission as _perm
+
+        text = ctx.state.get("_cmd_text") or _strip_at_prefix(ctx)
+        pool = get_pool()
+        scope_type = "group" if ctx.message_type == "group" else "private"
+        scope_id: int = ctx.group_id if ctx.message_type == "group" else ctx.user_id  # type: ignore[assignment]
+
+        # 无需权限
+        if text == ".ping":
             await self._handle_ping(ctx)
             return
-        if ctx.text.startswith(".llm"):
-            await handle_llm_command(
-                ctx.text, api=ctx.api, event=ctx.event, provider_mgr=ctx.provider_mgr,
+        if text.startswith(".help"):
+            await handle_help_command(
+                text, api=ctx.api, event=ctx.event, pool=pool,
+                user_id=ctx.user_id, scope_type=scope_type, scope_id=scope_id,
             )
             return
-        if ctx.text.startswith(".trigger"):
-            await handle_trigger_command(
-                ctx.text, api=ctx.api, event=ctx.event, pool=get_pool(),
-            )
-            return
-        if ctx.text.startswith(".memory"):
-            await handle_memory_command(
-                ctx.text, api=ctx.api, event=ctx.event,
-                provider_mgr=ctx.provider_mgr, pool=get_pool(),
-            )
-            return
-        if ctx.text.startswith(".config"):
-            await handle_config_command(
-                ctx.text, api=ctx.api, event=ctx.event,
-            )
-            return
-        if ctx.text.startswith(".prompt"):
-            await handle_prompt_command(
-                ctx.text, api=ctx.api, event=ctx.event,
-            )
-            return
+
+        # 权限检查 + 分发
+        for prefix, perm in self._COMMAND_PERMS.items():
+            if text.startswith(prefix):
+                if not await _perm.has_permission(pool, ctx.user_id, scope_type, scope_id, perm):
+                    await self._send_text(ctx, "权限不足")
+                    return
+                await self._dispatch(
+                    prefix, text, ctx=ctx, pool=pool,
+                    scope_type=scope_type, scope_id=scope_id,
+                )
+                return
+
         await next()
+
+    async def _dispatch(
+        self, prefix: str, text: str, *, ctx: PipelineContext,
+        pool: asyncpg.Pool, scope_type: str, scope_id: int,
+    ) -> None:
+        if prefix == ".bot":
+            await handle_bot_command(
+                text, api=ctx.api, event=ctx.event, pool=pool,
+                scope_type=scope_type, scope_id=scope_id,
+            )
+        elif prefix == ".tools":
+            registry = _get_registry()
+            all_names = [s["function"]["name"] for s in registry.get_function_schemas()]
+            await handle_tools_command(
+                text, api=ctx.api, event=ctx.event, pool=pool,
+                scope_type=scope_type, scope_id=scope_id, all_tool_names=all_names,
+            )
+        elif prefix == ".llm":
+            await handle_llm_command(
+                text, api=ctx.api, event=ctx.event, provider_mgr=ctx.provider_mgr,
+            )
+        elif prefix == ".trigger":
+            await handle_trigger_command(
+                text, api=ctx.api, event=ctx.event, pool=pool,
+            )
+        elif prefix == ".memory":
+            await handle_memory_command(
+                text, api=ctx.api, event=ctx.event,
+                provider_mgr=ctx.provider_mgr, pool=pool,
+            )
+        elif prefix == ".config":
+            await handle_config_command(
+                text, api=ctx.api, event=ctx.event,
+            )
+        elif prefix == ".prompt":
+            await handle_prompt_command(
+                text, api=ctx.api, event=ctx.event,
+            )
+        elif prefix == ".perm":
+            await handle_perm_command(
+                text, api=ctx.api, event=ctx.event, pool=pool,
+                user_id=ctx.user_id, scope_type=scope_type,
+                scope_id=scope_id, group_id=ctx.group_id,
+            )
+
+    async def _send_text(self, ctx: PipelineContext, text: str) -> None:
+        params: dict[str, Any] = {
+            "message_type": ctx.message_type,
+            "message": [{"type": "text", "data": {"text": text}}],
+        }
+        if ctx.message_type == "group":
+            params["group_id"] = ctx.group_id
+        else:
+            params["user_id"] = ctx.user_id
+        await ctx.api.call("send_msg", params)
 
     async def _handle_ping(self, ctx: PipelineContext) -> None:
         params: dict[str, Any] = {
@@ -740,6 +870,7 @@ DEFAULT_STAGES: list[Stage] = [
     EnrichMessageStage(),
     ProcessImagesStage(),
     FilterSelfStage(),
+    CheckScopeStage(),
     HandleCommandStage(),
     TriggerLLMStage(),
 ]

@@ -10,7 +10,7 @@ import asyncpg
 
 from sophos.llm.provider_manager import ProviderManager
 from sophos.onebot_api import OneBotAPI
-from sophos import runtime_config, trigger
+from sophos import permission, runtime_config, trigger
 
 logger = logging.getLogger(__name__)
 
@@ -495,6 +495,308 @@ async def handle_prompt_command(
             "  .prompt          — 查看当前 prompt（截断 500 字）\n"
             "  .prompt full     — 完整显示\n"
             "  .prompt reload   — 重新加载文件"
+        )
+
+    await _reply(api, event, reply)
+    return True
+
+
+# ── 权限相关常量 ──────────────────────────────────────────
+
+_ALL_PERMS: frozenset[str] = frozenset({
+    "cmd.bot", "cmd.tools", "cmd.config", "cmd.llm",
+    "cmd.trigger", "cmd.memory", "cmd.prompt",
+    "private", "delegate",
+})
+
+_PERM_ALIASES: dict[str, str] = {
+    "bot": "cmd.bot", "tools": "cmd.tools", "config": "cmd.config",
+    "llm": "cmd.llm", "trigger": "cmd.trigger", "memory": "cmd.memory",
+    "prompt": "cmd.prompt", "private": "private", "delegate": "delegate",
+}
+
+
+async def _resolve_targets(
+    api: OneBotAPI, target: str, group_id: int | None,
+) -> list[int] | str:
+    """解析目标用户。返回 user_id 列表或错误消息字符串。"""
+    if target == "admins":
+        if group_id is None:
+            return "admins 仅限群聊使用"
+        members = await api.call("get_group_member_list", {"group_id": group_id})
+        if not isinstance(members, list):
+            return "获取群成员列表失败"
+        return [
+            m["user_id"] for m in members
+            if m.get("role") in ("owner", "admin")
+        ]
+    if target == "all":
+        if group_id is None:
+            return "all 仅限群聊使用"
+        members = await api.call("get_group_member_list", {"group_id": group_id})
+        if not isinstance(members, list):
+            return "获取群成员列表失败"
+        return [m["user_id"] for m in members]
+    # 逗号分隔的 QQ 号
+    ids: list[int] = []
+    for part in target.split(","):
+        part = part.strip()
+        if not part.isdigit():
+            return f"无效的 QQ 号: {part}"
+        ids.append(int(part))
+    return ids
+
+
+# ── .help ─────────────────────────────────────────────────
+
+
+async def handle_help_command(
+    text: str,
+    *,
+    api: OneBotAPI,
+    event: dict[str, Any],
+    pool: asyncpg.Pool,
+    user_id: int,
+    scope_type: str,
+    scope_id: int,
+) -> bool:
+    """处理 .help 命令。根据用户权限动态显示可用命令。"""
+    lines = [
+        "可用命令:",
+        "  .ping   — 连通测试",
+        "  .help   — 显示此帮助",
+    ]
+    is_m = permission.is_master(user_id)
+    cmd_map = [
+        ("cmd.bot", ".bot", "会话开关"),
+        ("cmd.tools", ".tools", "工具白名单"),
+        ("cmd.llm", ".llm", "LLM provider 管理"),
+        ("cmd.trigger", ".trigger", "触发器配置"),
+        ("cmd.memory", ".memory", "记忆系统管理"),
+        ("cmd.config", ".config", "运行时配置"),
+        ("cmd.prompt", ".prompt", "System prompt 管理"),
+    ]
+    for perm, cmd, desc in cmd_map:
+        if is_m or await permission.has_permission(pool, user_id, scope_type, scope_id, perm):
+            lines.append(f"  {cmd:<10}— {desc}")
+    if is_m or await permission.has_permission(pool, user_id, scope_type, scope_id, "delegate"):
+        lines.append("  .perm    — 权限管理")
+    await _reply(api, event, "\n".join(lines))
+    return True
+
+
+# ── .bot ──────────────────────────────────────────────────
+
+
+async def handle_bot_command(
+    text: str,
+    *,
+    api: OneBotAPI,
+    event: dict[str, Any],
+    pool: asyncpg.Pool,
+    scope_type: str,
+    scope_id: int,
+) -> bool:
+    """处理 .bot 命令。"""
+    parts = text.split()
+    sub = parts[1] if len(parts) > 1 else ""
+
+    if sub == "":
+        enabled = await permission.is_scope_enabled(pool, scope_type, scope_id)
+        reply = f"当前会话: {'已启用' if enabled else '已禁用'}"
+    elif sub == "on":
+        await permission.set_scope_enabled(pool, scope_type, scope_id, True)
+        reply = "会话已启用"
+    elif sub == "off":
+        await permission.set_scope_enabled(pool, scope_type, scope_id, False)
+        reply = "会话已禁用"
+    else:
+        reply = "用法: .bot [on|off]"
+
+    await _reply(api, event, reply)
+    return True
+
+
+# ── .tools ────────────────────────────────────────────────
+
+
+async def handle_tools_command(
+    text: str,
+    *,
+    api: OneBotAPI,
+    event: dict[str, Any],
+    pool: asyncpg.Pool,
+    scope_type: str,
+    scope_id: int,
+    all_tool_names: list[str],
+) -> bool:
+    """处理 .tools 命令。"""
+    parts = text.split()
+    sub = parts[1] if len(parts) > 1 else ""
+
+    if sub == "":
+        wl = await permission.get_tool_whitelist(pool, scope_type, scope_id)
+        if wl is None:
+            reply = "工具白名单: 未启用（全部工具可用）"
+        else:
+            reply = f"工具白名单 ({len(wl)}):\n" + "\n".join(f"  {t}" for t in sorted(wl))
+    elif sub == "add":
+        if len(parts) < 3:
+            reply = "用法: .tools add <tool1,tool2,...>"
+        else:
+            names = [n.strip() for n in parts[2].split(",") if n.strip()]
+            invalid = [n for n in names if n not in all_tool_names]
+            if invalid:
+                reply = f"未知工具: {', '.join(invalid)}\n用 .tools list-all 查看可用工具"
+            else:
+                added = await permission.add_tools(pool, scope_type, scope_id, names)
+                reply = f"已添加 {added} 个工具到白名单"
+    elif sub == "remove":
+        if len(parts) < 3:
+            reply = "用法: .tools remove <tool1,tool2,...>"
+        else:
+            names = [n.strip() for n in parts[2].split(",") if n.strip()]
+            removed = await permission.remove_tools(pool, scope_type, scope_id, names)
+            reply = f"已移除 {removed} 个工具"
+    elif sub == "reset":
+        await permission.reset_tools(pool, scope_type, scope_id)
+        reply = "工具白名单已重置（全部工具可用）"
+    elif sub == "list-all":
+        reply = f"可用工具 ({len(all_tool_names)}):\n" + "\n".join(f"  {t}" for t in sorted(all_tool_names))
+    else:
+        reply = (
+            "用法:\n"
+            "  .tools                    — 查看白名单\n"
+            "  .tools add <t1,t2>        — 添加工具\n"
+            "  .tools remove <t1,t2>     — 移除工具\n"
+            "  .tools reset              — 重置（全部可用）\n"
+            "  .tools list-all           — 列出所有工具"
+        )
+
+    await _reply(api, event, reply)
+    return True
+
+
+# ── .perm ─────────────────────────────────────────────────
+
+
+async def handle_perm_command(
+    text: str,
+    *,
+    api: OneBotAPI,
+    event: dict[str, Any],
+    pool: asyncpg.Pool,
+    user_id: int,
+    scope_type: str,
+    scope_id: int,
+    group_id: int | None,
+) -> bool:
+    """处理 .perm 命令。"""
+    parts = text.split()
+    sub = parts[1] if len(parts) > 1 else ""
+    is_m = permission.is_master(user_id)
+
+    if sub == "":
+        enabled = await permission.is_scope_enabled(pool, scope_type, scope_id)
+        grants = await permission.list_grants(pool, scope_type, scope_id)
+        lines = [f"会话状态: {'启用' if enabled else '禁用'}"]
+        if grants:
+            from collections import defaultdict
+            by_user: dict[int, list[str]] = defaultdict(list)
+            for uid, perm in grants:
+                by_user[uid].append(perm)
+            for uid, perms in by_user.items():
+                lines.append(f"  {uid}: {', '.join(perms)}")
+        else:
+            lines.append("  (无授权)")
+        reply = "\n".join(lines)
+
+    elif sub == "grant":
+        if len(parts) < 4:
+            reply = "用法: .perm grant <权限> <目标>"
+        else:
+            perm_alias = parts[2]
+            perm_name = _PERM_ALIASES.get(perm_alias)
+            if not perm_name:
+                reply = f"未知权限: {perm_alias}\n可用: {', '.join(sorted(_PERM_ALIASES))}"
+            elif perm_name == "delegate" and not is_m:
+                reply = "仅 master 可授予 delegate 权限"
+            elif not is_m and not await permission.has_permission(pool, user_id, scope_type, scope_id, perm_name):
+                reply = f"你没有 {perm_alias} 权限，无法授予他人"
+            else:
+                targets = await _resolve_targets(api, parts[3], group_id)
+                if isinstance(targets, str):
+                    reply = targets
+                elif perm_name == "private":
+                    # private 权限特殊处理：操作 perm_scope 表
+                    count = 0
+                    for tid in targets:
+                        await permission.set_scope_enabled(pool, "private", tid, True)
+                        count += 1
+                    reply = f"已为 {count} 人开通私聊"
+                else:
+                    count = await permission.batch_grant(
+                        pool, targets, scope_type, scope_id, perm_name, user_id,
+                    )
+                    reply = f"已授予 {count} 人 {perm_alias} 权限"
+
+    elif sub == "revoke":
+        if len(parts) < 4:
+            reply = "用法: .perm revoke <权限> <目标>"
+        else:
+            perm_alias = parts[2]
+            perm_name = _PERM_ALIASES.get(perm_alias)
+            if not perm_name:
+                reply = f"未知权限: {perm_alias}\n可用: {', '.join(sorted(_PERM_ALIASES))}"
+            elif perm_name == "delegate" and not is_m:
+                reply = "仅 master 可撤销 delegate 权限"
+            elif not is_m and not await permission.has_permission(pool, user_id, scope_type, scope_id, perm_name):
+                reply = f"你没有 {perm_alias} 权限，无法撤销他人"
+            else:
+                targets = await _resolve_targets(api, parts[3], group_id)
+                if isinstance(targets, str):
+                    reply = targets
+                elif perm_name == "private":
+                    count = 0
+                    for tid in targets:
+                        await permission.set_scope_enabled(pool, "private", tid, False)
+                        count += 1
+                    reply = f"已关闭 {count} 人的私聊"
+                else:
+                    count = await permission.batch_revoke(
+                        pool, targets, scope_type, scope_id, perm_name,
+                    )
+                    reply = f"已撤销 {count} 人的 {perm_alias} 权限"
+
+    elif sub == "list":
+        target_qq = parts[2] if len(parts) > 2 else None
+        if target_qq:
+            if not target_qq.isdigit():
+                reply = "用法: .perm list [QQ号]"
+            else:
+                uid = int(target_qq)
+                perms = await permission.list_user_grants(pool, uid, scope_type, scope_id)
+                reply = f"{uid} 的权限: {', '.join(perms)}" if perms else f"{uid} 无权限"
+        else:
+            grants = await permission.list_grants(pool, scope_type, scope_id)
+            if not grants:
+                reply = "当前会话无授权"
+            else:
+                from collections import defaultdict
+                by_user: dict[int, list[str]] = defaultdict(list)
+                for uid, perm in grants:
+                    by_user[uid].append(perm)
+                lines = [f"{uid}: {', '.join(perms)}" for uid, perms in by_user.items()]
+                reply = "\n".join(lines)
+    else:
+        reply = (
+            "用法:\n"
+            "  .perm                          — 权限概览\n"
+            "  .perm grant <权限> <目标>       — 授予权限\n"
+            "  .perm revoke <权限> <目标>      — 撤销权限\n"
+            "  .perm list [QQ号]              — 列出权限\n"
+            f"权限: {', '.join(sorted(_PERM_ALIASES))}\n"
+            "目标: QQ号 | QQ1,QQ2 | admins | all"
         )
 
     await _reply(api, event, reply)
