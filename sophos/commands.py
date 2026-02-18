@@ -445,6 +445,10 @@ _VALIDATORS: dict[str, tuple[Any, str]] = {
     "llm_bot_schema":     (lambda v: "{{message}}" in v, "必须包含 {{message}} 占位符"),
     "vision_refine_prompt": (lambda v: "{prev_description}" in v,
                              "必须包含 {prev_description} 占位符"),
+    "forward_head_count": (lambda v: v >= 1,  "必须 >= 1"),
+    "forward_tail_count": (lambda v: v >= 1,  "必须 >= 1"),
+    "forward_max_depth":  (lambda v: v >= 1,  "必须 >= 1"),
+    "reply_max_length":   (lambda v: v > 0,   "必须 > 0"),
 }
 
 

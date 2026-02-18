@@ -207,6 +207,15 @@ class MessageStore:
         )
         return dict(row) if row else None
 
+    # ── plain_text 更新（段展开后）────────────────────────────
+
+    async def update_plain_text(self, message_id: int, plain_text: str) -> None:
+        """更新消息的 plain_text（段展开后的富文本）。"""
+        await self._pool.execute(
+            "UPDATE messages SET plain_text = $2 WHERE message_id = $1",
+            message_id, plain_text,
+        )
+
     # ── 图片描述更新 ────────────────────────────────────────
 
     async def update_image_extra(

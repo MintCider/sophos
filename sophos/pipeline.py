@@ -28,6 +28,7 @@ from sophos.memory.profile import build_profile_block
 from sophos.message_store import MessageStore
 from sophos.onebot_api import OneBotAPI
 from sophos import runtime_config
+from sophos.segment import expand_segments, has_expandable_segments
 from sophos.tools.memory import MEMORY_TOOLS
 from sophos.tools.onebot import ALL_TOOLS
 from sophos.tools.registry import ToolRegistry
@@ -557,6 +558,41 @@ class ProcessImagesStage(Stage):
         await next()
 
 
+class EnrichMessageStage(Stage):
+    """展开消息段（@、回复、转发、卡片等）为富文本。"""
+
+    @property
+    def name(self) -> str:
+        return "enrich_message"
+
+    @property
+    def description(self) -> str:
+        return "展开消息段（@、回复、转发、卡片等）为富文本"
+
+    async def execute(self, ctx: PipelineContext, next: NextFn) -> None:
+        if not has_expandable_segments(ctx.segments):
+            await next()
+            return
+        try:
+            enriched = await expand_segments(
+                ctx.segments,
+                api=ctx.api,
+                store=ctx.store,
+                session=ctx.session,
+                pool=ctx.store.pool,
+                vision_provider=ctx.provider_mgr.get_vision_provider(),
+                group_id=ctx.group_id,
+            )
+            if enriched != ctx.text:
+                message_id = ctx.event.get("message_id")
+                if message_id is not None:
+                    await ctx.store.update_plain_text(message_id, enriched)
+                ctx.text = enriched
+        except Exception:
+            logger.warning("Message enrichment failed", exc_info=True)
+        await next()
+
+
 class FilterSelfStage(Stage):
     """跳过 bot 自身发出的消息。"""
 
@@ -701,6 +737,7 @@ class TriggerLLMStage(Stage):
 
 DEFAULT_STAGES: list[Stage] = [
     StoreMessageStage(),
+    EnrichMessageStage(),
     ProcessImagesStage(),
     FilterSelfStage(),
     HandleCommandStage(),

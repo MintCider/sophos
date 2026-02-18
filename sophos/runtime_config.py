@@ -29,6 +29,10 @@ _DEFAULTS: dict[str, Any] = {
     "recent_global_min_self": 5,
     "vision_system_prompt": settings.vision_system_prompt,
     "vision_refine_prompt": settings.vision_refine_prompt,
+    "forward_head_count": 3,
+    "forward_tail_count": 2,
+    "forward_max_depth": 2,
+    "reply_max_length": 100,
 }
 
 _cache: dict[str, Any] = {}
