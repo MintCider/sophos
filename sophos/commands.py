@@ -361,9 +361,9 @@ async def handle_config_command(
             val = runtime_config.get(key)
             default = runtime_config.get_defaults().get(key)
             is_custom = key in runtime_config._cache
-            reply = f"{key}: {_format_value(val)}"
+            reply = f"{key}: {_format_value_full(val)}"
             if is_custom:
-                reply += f"\n默认值: {_format_value(default)}"
+                reply += f"\n默认值: {_format_value_full(default)}"
         else:
             raw_value = parts[2]
             try:
@@ -388,10 +388,18 @@ async def handle_config_command(
 
 
 def _format_value(v: Any) -> str:
+    """格式化配置值（列表展示用，截断长字符串）。"""
     if isinstance(v, bool):
         return "true" if v else "false"
     if isinstance(v, str):
         return v if len(v) <= 60 else v[:57] + "..."
+    return str(v)
+
+
+def _format_value_full(v: Any) -> str:
+    """格式化配置值（单项查看用，不截断）。"""
+    if isinstance(v, bool):
+        return "true" if v else "false"
     return str(v)
 
 
@@ -435,6 +443,8 @@ _VALIDATORS: dict[str, tuple[Any, str]] = {
                            "可选值: system / inline / off"),
     "llm_user_schema":    (lambda v: "{{message}}" in v, "必须包含 {{message}} 占位符"),
     "llm_bot_schema":     (lambda v: "{{message}}" in v, "必须包含 {{message}} 占位符"),
+    "vision_refine_prompt": (lambda v: "{prev_description}" in v,
+                             "必须包含 {prev_description} 占位符"),
 }
 
 

@@ -27,6 +27,8 @@ _DEFAULTS: dict[str, Any] = {
     "cross_context_mode": settings.cross_context_mode,
     "recent_global_limit": 50,
     "recent_global_min_self": 5,
+    "vision_system_prompt": settings.vision_system_prompt,
+    "vision_refine_prompt": settings.vision_refine_prompt,
 }
 
 _cache: dict[str, Any] = {}

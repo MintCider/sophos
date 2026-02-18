@@ -20,6 +20,7 @@ import asyncpg
 
 from sophos.config import settings
 from sophos.llm.openai_compat import OpenAICompatProvider
+from sophos import runtime_config
 
 logger = logging.getLogger(__name__)
 
@@ -144,11 +145,11 @@ async def describe_image(
 
     # 构建 system prompt
     if prev_description:
-        system_text = settings.vision_refine_prompt.format(prev_description=prev_description)
+        system_text = runtime_config.get("vision_refine_prompt").format(prev_description=prev_description)
         if correction_hint:
             system_text += f"\n用户指出：{correction_hint}"
     else:
-        system_text = settings.vision_system_prompt
+        system_text = runtime_config.get("vision_system_prompt")
 
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": system_text},
