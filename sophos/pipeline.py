@@ -320,7 +320,7 @@ def _get_registry() -> ToolRegistry:
 
 
 _RAW_TOOL_CALL_RE = re.compile(
-    r"^(send_msg|set_profile_context|set_profile_user|write_memory|"
+    r"^(send_msg|set_profile_self|set_profile_context|set_profile_user|write_memory|"
     r"search_memory|delete_memory|correct_image_description|"
     r"query_messages|set_group_name)\s*[\(\{]",
 )

@@ -5,6 +5,40 @@ from typing import Any
 from sophos.tools.base import Tool
 
 
+class SetProfileSelfTool(Tool):
+    """设置自我档案（整体替换）。"""
+
+    @property
+    def category(self) -> str:
+        return "output"
+
+    @property
+    def name(self) -> str:
+        return "set_profile_self"
+
+    @property
+    def description(self) -> str:
+        return (
+            "设置你的自我档案（整体替换）。"
+            "这是你对自身的动态认知，会始终出现在你的提示中。"
+            "用于记录你在互动中形成的自我认知变化。"
+        )
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "content": {"type": "string", "description": "自我档案内容"},
+            },
+            "required": ["content"],
+        }
+
+    async def execute(self, params: dict[str, Any], context: dict[str, Any]) -> Any:
+        store = context["memory_store"]
+        return await store.set_profile_self(params["content"])
+
+
 class SetProfileContextTool(Tool):
     """设置当前会话的档案（整体替换）。"""
 
@@ -186,6 +220,7 @@ class DeleteMemoryTool(Tool):
 
 
 MEMORY_TOOLS: list[Tool] = [
+    SetProfileSelfTool(),
     SetProfileContextTool(),
     SetProfileUserTool(),
     WriteMemoryTool(),

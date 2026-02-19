@@ -19,6 +19,11 @@ async def build_profile_block(
     """构建档案 prompt 块。无内容时返回空字符串。"""
     parts: list[str] = []
 
+    # 自我档案（全局）
+    self_content = await store.get_profile_self()
+    if self_content:
+        parts.append(f"自我: {self_content}")
+
     # 会话档案
     ctx_content = await store.get_profile_context(scope_type, scope_id)
     if ctx_content:

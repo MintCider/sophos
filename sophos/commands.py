@@ -391,6 +391,7 @@ async def handle_memory_command(
             f"  Endpoint: {ep}\n"
             f"  Extra body: {eb}\n"
             f"  迁移状态: {mig}\n"
+            f"  自我档案: {'已设置' if stats['profile_self'] else '未设置'}\n"
             f"  会话档案: {stats['profile_context']} 条\n"
             f"  用户档案: {stats['profile_user']} 条\n"
             f"  记忆: {stats['memories']} 条"

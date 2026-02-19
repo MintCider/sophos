@@ -185,6 +185,18 @@ CREATE TABLE IF NOT EXISTS memory_profile_user (
 );
 """
 
+_CREATE_MEMORY_PROFILE_SELF_TABLE = """\
+CREATE TABLE IF NOT EXISTS memory_profile_self (
+    id          INTEGER     PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+    content     TEXT        NOT NULL DEFAULT '',
+    updated_at  TIMESTAMPTZ DEFAULT now()
+);
+"""
+
+_SEED_MEMORY_PROFILE_SELF = """\
+INSERT INTO memory_profile_self (id) VALUES (1) ON CONFLICT DO NOTHING;
+"""
+
 _CREATE_MEMORIES_TABLE = """\
 CREATE TABLE IF NOT EXISTS memories (
     id          BIGSERIAL       PRIMARY KEY,
@@ -298,6 +310,8 @@ async def _init_schema(pool: asyncpg.Pool) -> None:
         # 记忆系统
         await conn.execute(_CREATE_MEMORY_PROFILE_CONTEXT_TABLE)
         await conn.execute(_CREATE_MEMORY_PROFILE_USER_TABLE)
+        await conn.execute(_CREATE_MEMORY_PROFILE_SELF_TABLE)
+        await conn.execute(_SEED_MEMORY_PROFILE_SELF)
         await conn.execute(_CREATE_MEMORIES_TABLE)
         # 权限系统
         await conn.execute(_CREATE_PERM_SCOPE_TABLE)

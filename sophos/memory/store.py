@@ -24,6 +24,27 @@ class MemoryStore:
         """热替换 embedding provider（迁移完成后调用）。"""
         self._embed = provider
 
+    # ── 档案：自我 ────────────────────────────────────────────
+
+    async def set_profile_self(self, content: str) -> dict[str, Any]:
+        """整体替换自我档案（全局单例）。"""
+        await self._pool.execute(
+            """
+            UPDATE memory_profile_self
+            SET content = $1, updated_at = now()
+            WHERE id = 1
+            """,
+            content,
+        )
+        return {"status": "ok"}
+
+    async def get_profile_self(self) -> str | None:
+        """获取自我档案。空字符串视为无内容，返回 None。"""
+        val = await self._pool.fetchval(
+            "SELECT content FROM memory_profile_self WHERE id = 1",
+        )
+        return val if val else None
+
     # ── 档案：会话 ────────────────────────────────────────────
 
     async def set_profile_context(
@@ -244,7 +265,10 @@ class MemoryStore:
 
     async def get_memory_stats(self) -> dict[str, int]:
         """各表行数统计。"""
+        self_count = await self._pool.fetchval(
+            "SELECT CASE WHEN content != '' THEN 1 ELSE 0 END FROM memory_profile_self WHERE id = 1",
+        ) or 0
         ctx_count = await self._pool.fetchval("SELECT count(*) FROM memory_profile_context") or 0
         user_count = await self._pool.fetchval("SELECT count(*) FROM memory_profile_user") or 0
         mem_count = await self._pool.fetchval("SELECT count(*) FROM memories") or 0
-        return {"profile_context": ctx_count, "profile_user": user_count, "memories": mem_count}
+        return {"profile_self": self_count, "profile_context": ctx_count, "profile_user": user_count, "memories": mem_count}
