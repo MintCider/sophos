@@ -33,6 +33,16 @@ _DEFAULTS: dict[str, Any] = {
     "forward_tail_count": 2,
     "forward_max_depth": 2,
     "reply_max_length": 100,
+    # 触发器引擎
+    "trigger_delay": 2.0,
+    "trigger_qps": 0.5,
+    "trigger_wait_timeout": 30.0,
+    "trigger_eval_context_limit": 20,
+    "trigger_eval_max_tokens": 64,
+    "trigger_eval_temperature": 0.0,
+    "trigger_eval_persona": "",
+    "trigger_bucket_capacity": 10,
+    "trigger_bucket_refill": 6.0,
 }
 
 _cache: dict[str, Any] = {}

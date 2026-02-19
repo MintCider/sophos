@@ -97,6 +97,16 @@ class Settings(BaseSettings):
     # API 类型：'openai' | 'gemini'（seed 时写入 llm_active.api_type）
     vision_api_type: str = "openai"
 
+    # ── Trigger LLM（首次启动 seed 用，之后以 DB 为准）────────
+    # 轻量级 LLM 用于判断是否需要回复（留空则不启用 LLM 触发）
+    trigger_base_url: str = ""
+    trigger_api_key: str = ""
+    trigger_model: str = ""
+    trigger_stream: bool = False
+    trigger_extra_body: str = ""
+    trigger_request_timeout: int = 15
+    trigger_api_type: str = "openai"
+
     # ── Embedding（首次启动 seed 用，之后以 DB 为准）──────────
     embedding_base_url: str = ""
     embedding_api_key: str = ""

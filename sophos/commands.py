@@ -133,6 +133,52 @@ async def handle_llm_command(
                 "  .llm vision off          — 关闭 vision"
             )
 
+    elif sub == "trigger":
+        trigger_sub = parts[2] if len(parts) > 2 else ""
+        if trigger_sub == "":
+            info = provider_mgr.current_info()
+            if info.get("trigger_alias"):
+                ttype = f" ({info['trigger_api_type']})" if info.get("trigger_api_type", "openai") != "openai" else ""
+                reply = f"Trigger 模型: {info['trigger_alias']} / {info['trigger_model']}{ttype}"
+            else:
+                reply = "Trigger 未配置"
+        elif trigger_sub == "switch":
+            if len(parts) < 4 or "/" not in parts[3]:
+                reply = "用法: .llm trigger switch <alias>/<model> [--type gemini]"
+            else:
+                alias, _, model = parts[3].partition("/")
+                api_type = _extract_type_flag(parts[4:])
+                reply = await provider_mgr.switch_trigger(alias, model, api_type=api_type)
+        elif trigger_sub == "off":
+            reply = await provider_mgr.disable_trigger()
+        elif trigger_sub == "extra_body":
+            if len(parts) < 4:
+                reply = await provider_mgr.get_active_extra_body("trigger")
+            else:
+                arg = " ".join(parts[3:])
+                if arg == "clear":
+                    reply = await provider_mgr.set_provider_extra_body("trigger", "")
+                else:
+                    reply = await provider_mgr.set_provider_extra_body("trigger", arg)
+        elif trigger_sub == "timeout":
+            if len(parts) < 4:
+                t = await provider_mgr._pool.fetchval("SELECT request_timeout FROM llm_active WHERE key = 'trigger'")
+                reply = f"Trigger timeout: {t or 15}s"
+            else:
+                try:
+                    reply = await provider_mgr.set_timeout("trigger", int(parts[3]))
+                except ValueError:
+                    reply = "用法: .llm trigger timeout <秒>"
+        else:
+            reply = (
+                "用法:\n"
+                "  .llm trigger              — 当前 trigger 模型\n"
+                "  .llm trigger switch <alias>/<model>\n"
+                "  .llm trigger extra_body [json|clear]\n"
+                "  .llm trigger timeout <秒>\n"
+                "  .llm trigger off          — 关闭 trigger"
+            )
+
     elif sub == "extra_body":
         # .llm extra_body [json|clear]  — 操作当前 default slot
         if len(parts) < 3:
@@ -165,7 +211,8 @@ async def handle_llm_command(
             "  .llm switch <alias>/<model> [--type gemini]\n"
             "  .llm extra_body [json|clear]  — 当前模型的 extra_body\n"
             "  .llm timeout [秒]  — 请求超时\n"
-            "  .llm vision  — vision 模型管理"
+            "  .llm vision   — vision 模型管理\n"
+            "  .llm trigger  — trigger 模型管理"
         )
 
     await _reply(api, event, reply)
@@ -178,6 +225,7 @@ async def handle_trigger_command(
     api: OneBotAPI,
     event: dict[str, Any],
     pool: asyncpg.Pool,
+    provider_mgr: ProviderManager,
 ) -> bool:
     """处理 .trigger 命令。返回 True 表示已处理。"""
     parts = text.split()
@@ -186,12 +234,27 @@ async def handle_trigger_command(
     if sub == "":
         cfg = await trigger.load(pool)
         kw_lines = [f"  {k.word} (+{k.boost})" for k in cfg.keywords]
+        # LLM trigger 状态
+        info = provider_mgr.current_info()
+        if info.get("trigger_alias"):
+            ttype = f" ({info['trigger_api_type']})" if info.get("trigger_api_type", "openai") != "openai" else ""
+            llm_line = f"  LLM 触发: 已启用 ({info['trigger_alias']}/{info['trigger_model']}{ttype})"
+        else:
+            llm_line = "  LLM 触发: 未配置"
+        delay = runtime_config.get("trigger_delay")
+        qps = runtime_config.get("trigger_qps")
+        wait_timeout = runtime_config.get("trigger_wait_timeout")
+        bucket_cap = runtime_config.get("trigger_bucket_capacity")
+        bucket_refill = runtime_config.get("trigger_bucket_refill")
         reply = (
             f"触发配置:\n"
             f"  基础概率: {cfg.base_rate}\n"
             f"  @必回: {'开' if cfg.at_always else '关'}\n"
             f"  关键词 ({len(cfg.keywords)}):\n"
             + ("\n".join(kw_lines) if kw_lines else "    (无)")
+            + f"\n{llm_line}\n"
+            f"  延迟: {delay}s | QPS: {qps} | 等待超时: {wait_timeout}s\n"
+            f"  配额桶: {bucket_cap}/{bucket_refill}s"
         )
 
     elif sub == "rate":
@@ -491,6 +554,14 @@ _VALIDATORS: dict[str, tuple[Any, str]] = {
     "forward_tail_count": (lambda v: v >= 1,  "必须 >= 1"),
     "forward_max_depth":  (lambda v: v >= 1,  "必须 >= 1"),
     "reply_max_length":   (lambda v: v > 0,   "必须 > 0"),
+    "trigger_delay":      (lambda v: 0 <= v <= 30,  "范围 0~30"),
+    "trigger_qps":        (lambda v: 0.01 <= v <= 10, "范围 0.01~10"),
+    "trigger_wait_timeout": (lambda v: 5 <= v <= 300, "范围 5~300"),
+    "trigger_eval_context_limit": (lambda v: v > 0, "必须 > 0"),
+    "trigger_eval_max_tokens": (lambda v: v > 0,    "必须 > 0"),
+    "trigger_eval_temperature": (lambda v: 0 <= v <= 2, "范围 0~2"),
+    "trigger_bucket_capacity": (lambda v: v > 0,    "必须 > 0"),
+    "trigger_bucket_refill": (lambda v: v > 0,      "必须 > 0"),
 }
 
 

@@ -751,6 +751,7 @@ class HandleCommandStage(Stage):
         elif prefix == ".trigger":
             await handle_trigger_command(
                 text, api=ctx.api, event=ctx.event, pool=pool,
+                provider_mgr=ctx.provider_mgr,
             )
         elif prefix == ".memory":
             await handle_memory_command(
@@ -808,7 +809,7 @@ class HandleCommandStage(Stage):
 
 
 class TriggerLLMStage(Stage):
-    """概率触发 LLM 对话。"""
+    """概率触发 LLM 对话（委托给 TriggerEngine）。"""
 
     @property
     def name(self) -> str:
@@ -826,19 +827,22 @@ class TriggerLLMStage(Stage):
         )
 
     async def execute(self, ctx: PipelineContext, next: NextFn) -> None:
+        from sophos.trigger_engine import get_trigger_engine
+
         pool = get_pool()
         cfg = await trigger.load(pool)
+        engine = get_trigger_engine()
 
-        # 私聊始终触发
+        # 计算简易触发
+        simple_triggered = False
+
         if ctx.message_type == "private":
-            rate = 1.0
+            simple_triggered = True
             reason = "private"
-        # 被 @ 且开启 at_always
         elif cfg.at_always and self._is_at_bot(ctx):
-            rate = 1.0
+            simple_triggered = True
             reason = "@bot"
         else:
-            # 关键词匹配：取最大 boost
             max_boost = 0.0
             matched = ""
             for kw in cfg.keywords:
@@ -849,18 +853,20 @@ class TriggerLLMStage(Stage):
             rate = min(1.0, cfg.base_rate + max_boost)
             reason = f"keyword '{matched}'" if matched else "base"
 
-        roll = random.random()
-        if roll < rate:
-            logger.debug(
-                "Trigger fired: reason=%s rate=%.3f roll=%.3f", reason, rate, roll,
-            )
-            await _handle_llm_trigger(ctx)
-            return
+            roll = random.random()
+            if roll < rate:
+                simple_triggered = True
+                logger.debug(
+                    "Simple trigger fired: reason=%s rate=%.3f roll=%.3f",
+                    reason, rate, roll,
+                )
+            else:
+                logger.debug(
+                    "Simple trigger skipped: reason=%s rate=%.3f roll=%.3f",
+                    reason, rate, roll,
+                )
 
-        logger.debug(
-            "Trigger skipped: reason=%s rate=%.3f roll=%.3f", reason, rate, roll,
-        )
-        await next()
+        await engine.on_message(ctx, simple_triggered=simple_triggered)
 
 
 # ── 默认 stage 列表 ──────────────────────────────────────────

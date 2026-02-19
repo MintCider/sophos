@@ -38,6 +38,11 @@ class ProviderManager:
         self._vision_alias: str = ""
         self._vision_model: str = ""
         self._vision_api_type: str = "openai"
+        # Trigger slot (lightweight LLM for trigger evaluation)
+        self._trigger_provider: LLMProvider | None = None
+        self._trigger_alias: str = ""
+        self._trigger_model: str = ""
+        self._trigger_api_type: str = "openai"
         # Embedding slot
         self._embedding_provider: EmbeddingProvider | None = None
         self._embedding_alias: str = ""
@@ -64,6 +69,7 @@ class ProviderManager:
                 self._current_alias, self._current_model,
             )
             await self._init_vision()
+            await self._init_trigger()
             await self._init_embedding()
             return
 
@@ -71,11 +77,13 @@ class ProviderManager:
         if not settings.llm_base_url:
             logger.warning("No LLM provider configured (DB empty, LLM_BASE_URL not set)")
             await self._init_vision()
+            await self._init_trigger()
             await self._init_embedding()
             return
 
         await self._seed_from_env()
         await self._init_vision()
+        await self._init_trigger()
         await self._init_embedding()
 
     async def _init_vision(self) -> None:
@@ -103,6 +111,32 @@ class ProviderManager:
             return
 
         await self._seed_vision_from_env()
+
+    async def _init_trigger(self) -> None:
+        """启动时加载 trigger slot。DB 有记录则用，否则从 .env seed。"""
+        row = await self._pool.fetchrow(
+            """
+            SELECT p.id, p.alias, p.base_url, p.api_key,
+                   a.extra_body, p.stream, a.request_timeout,
+                   a.model, a.api_type
+            FROM llm_active a
+            JOIN llm_providers p ON p.id = a.provider_id
+            WHERE a.key = 'trigger'
+            """,
+        )
+        if row:
+            self._apply_trigger_row(row, api_type=row.get("api_type", "openai") or "openai")
+            logger.info(
+                "Loaded trigger provider from DB: %s / %s",
+                self._trigger_alias, self._trigger_model,
+            )
+            return
+
+        if not settings.trigger_base_url:
+            logger.info("No trigger provider configured (DB empty, TRIGGER_BASE_URL not set)")
+            return
+
+        await self._seed_trigger_from_env()
 
     async def _init_embedding(self) -> None:
         """启动时加载 embedding slot。DB 有记录则用，否则从 .env seed。"""
@@ -223,6 +257,9 @@ class ProviderManager:
         if self._vision_provider is not None:
             await self._vision_provider.close()
             self._vision_provider = None
+        if self._trigger_provider is not None:
+            await self._trigger_provider.close()
+            self._trigger_provider = None
         if self._embedding_provider is not None:
             await self._embedding_provider.close()
             self._embedding_provider = None
@@ -246,6 +283,10 @@ class ProviderManager:
             info["vision_alias"] = self._vision_alias
             info["vision_model"] = self._vision_model
             info["vision_api_type"] = self._vision_api_type
+        if self._trigger_alias:
+            info["trigger_alias"] = self._trigger_alias
+            info["trigger_model"] = self._trigger_model
+            info["trigger_api_type"] = self._trigger_api_type
         if self._embedding_alias:
             info["embedding_alias"] = self._embedding_alias
             info["embedding_model"] = self._embedding_model
@@ -254,6 +295,10 @@ class ProviderManager:
     def get_vision_provider(self) -> LLMProvider | None:
         """获取 vision provider。未配置时返回 None（优雅降级）。"""
         return self._vision_provider
+
+    def get_trigger_provider(self) -> LLMProvider | None:
+        """获取 trigger provider。未配置时返回 None。"""
+        return self._trigger_provider
 
     def get_embedding_provider(self) -> EmbeddingProvider | None:
         """获取 embedding provider。未配置时返回 None。"""
@@ -385,6 +430,9 @@ class ProviderManager:
         elif slot == "vision" and self._vision_provider is not None:
             self._vision_provider._extra_body = parsed or {}
             logger.info("Hot-reloaded extra_body for vision slot")
+        elif slot == "trigger" and self._trigger_provider is not None:
+            self._trigger_provider._extra_body = parsed or {}
+            logger.info("Hot-reloaded extra_body for trigger slot")
         elif slot == "embedding" and self._embedding_provider is not None:
             self._embedding_provider._extra_body = parsed or {}
             logger.info("Hot-reloaded extra_body for embedding slot")
@@ -404,6 +452,7 @@ class ProviderManager:
         provider = {
             "default": self._provider,
             "vision": self._vision_provider,
+            "trigger": self._trigger_provider,
             "embedding": self._embedding_provider,
         }.get(slot)
         if provider is not None:
@@ -526,6 +575,58 @@ class ProviderManager:
         await self._pool.execute("DELETE FROM llm_active WHERE key = 'vision'")
         logger.info("Vision provider disabled")
         return "已关闭 vision"
+
+    async def switch_trigger(self, alias: str, model: str, *, api_type: str = "openai") -> str:
+        """热切换 trigger slot 到指定 provider + model。"""
+        row = await self._pool.fetchrow(
+            """
+            SELECT id, alias, base_url, api_key, stream
+            FROM llm_providers WHERE alias = $1
+            """,
+            alias,
+        )
+        if not row:
+            return f"provider '{alias}' 不存在"
+
+        existing_timeout = await self._pool.fetchval(
+            "SELECT request_timeout FROM llm_active WHERE key = 'trigger'",
+        ) or 15
+
+        if self._trigger_provider is not None:
+            await self._trigger_provider.close()
+
+        self._apply_trigger_row(
+            {**dict(row), "model": model, "extra_body": None, "request_timeout": existing_timeout},
+            api_type=api_type,
+        )
+
+        await self._pool.execute(
+            """
+            INSERT INTO llm_active (key, provider_id, model, api_type, extra_body, request_timeout, updated_at)
+            VALUES ('trigger', $1, $2, $3, NULL, $4, now())
+            ON CONFLICT (key) DO UPDATE
+            SET provider_id = EXCLUDED.provider_id,
+                model = EXCLUDED.model,
+                api_type = EXCLUDED.api_type,
+                extra_body = NULL,
+                updated_at = EXCLUDED.updated_at
+            """,
+            row["id"], model, api_type, existing_timeout,
+        )
+
+        logger.info("Switched trigger to %s / %s (api_type=%s)", alias, model, api_type)
+        return f"已切换 trigger 到 {alias} / {model}" + (f" (api_type={api_type})" if api_type != "openai" else "")
+
+    async def disable_trigger(self) -> str:
+        """关闭 trigger provider。"""
+        if self._trigger_provider is not None:
+            await self._trigger_provider.close()
+            self._trigger_provider = None
+        self._trigger_alias = ""
+        self._trigger_model = ""
+        await self._pool.execute("DELETE FROM llm_active WHERE key = 'trigger'")
+        logger.info("Trigger provider disabled")
+        return "已关闭 trigger"
 
     # ── Embedding 切换 + 迁移 ──────────────────────────────────
 
@@ -990,4 +1091,96 @@ class ProviderManager:
         logger.info(
             "Seeded vision provider from .env: %s / %s",
             settings.vision_base_url, settings.vision_model,
+        )
+
+    def _apply_trigger_row(self, row: dict[str, Any] | asyncpg.Record, api_type: str = "openai") -> None:
+        """从 DB 行创建 trigger provider 实例。"""
+        extra_body = row.get("extra_body")
+        if isinstance(extra_body, str):
+            extra_body = json.loads(extra_body)
+
+        kwargs = {
+            "base_url": row["base_url"],
+            "api_key": row["api_key"],
+            "model": row["model"],
+            "default_temperature": 0.0,
+            "default_max_tokens": 64,
+            "request_timeout": row.get("request_timeout", 15) or 15,
+            "stream": row.get("stream", False) if row.get("stream") is not None else False,
+            "extra_body": extra_body,
+        }
+        if api_type == "gemini":
+            self._trigger_provider = GeminiProvider(**kwargs)
+        elif api_type == "anthropic":
+            self._trigger_provider = AnthropicProvider(**kwargs)
+        else:
+            self._trigger_provider = OpenAICompatProvider(**kwargs)
+        self._trigger_alias = row["alias"]
+        self._trigger_model = row["model"]
+        self._trigger_api_type = api_type
+
+    async def _seed_trigger_from_env(self) -> None:
+        """从 .env TRIGGER_* 配置 seed 一个 'trigger' slot 到 DB。"""
+        extra_body = None
+        if settings.trigger_extra_body:
+            try:
+                extra_body = json.loads(settings.trigger_extra_body)
+            except json.JSONDecodeError:
+                logger.warning("Invalid TRIGGER_EXTRA_BODY JSON: %s", settings.trigger_extra_body)
+
+        extra_json = json.dumps(extra_body, ensure_ascii=False) if extra_body else None
+
+        existing = await self._pool.fetchval(
+            "SELECT id FROM llm_providers WHERE base_url = $1 AND api_key = $2",
+            settings.trigger_base_url, settings.trigger_api_key,
+        )
+        if existing:
+            provider_id = existing
+        else:
+            provider_id = await self._pool.fetchval(
+                """
+                INSERT INTO llm_providers (alias, base_url, api_key, stream)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (alias) DO UPDATE SET alias = EXCLUDED.alias
+                RETURNING id
+                """,
+                f"trigger-{settings.trigger_model}",
+                settings.trigger_base_url,
+                settings.trigger_api_key,
+                settings.trigger_stream,
+            )
+
+        await self._pool.execute(
+            """
+            INSERT INTO llm_active (key, provider_id, model, api_type, extra_body, request_timeout)
+            VALUES ('trigger', $1, $2, $3, $4::jsonb, $5)
+            ON CONFLICT (key) DO NOTHING
+            """,
+            provider_id, settings.trigger_model, settings.trigger_api_type, extra_json,
+            settings.trigger_request_timeout,
+        )
+
+        kwargs = {
+            "base_url": settings.trigger_base_url,
+            "api_key": settings.trigger_api_key,
+            "model": settings.trigger_model,
+            "default_temperature": 0.0,
+            "default_max_tokens": 64,
+            "request_timeout": settings.trigger_request_timeout,
+            "stream": settings.trigger_stream,
+            "extra_body": extra_body,
+        }
+        if settings.trigger_api_type == "gemini":
+            self._trigger_provider = GeminiProvider(**kwargs)
+        elif settings.trigger_api_type == "anthropic":
+            self._trigger_provider = AnthropicProvider(**kwargs)
+        else:
+            self._trigger_provider = OpenAICompatProvider(**kwargs)
+        self._trigger_alias = f"trigger-{settings.trigger_model}"
+        self._trigger_model = settings.trigger_model
+        self._trigger_api_type = settings.trigger_api_type
+
+        logger.info(
+            "Seeded trigger provider from .env: %s / %s",
+            settings.trigger_base_url, settings.trigger_model,
         )
