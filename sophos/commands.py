@@ -105,13 +105,54 @@ async def handle_llm_command(
                 reply = await provider_mgr.switch_vision(alias, model, api_type=api_type)
         elif vision_sub == "off":
             reply = await provider_mgr.disable_vision()
+        elif vision_sub == "extra_body":
+            if len(parts) < 4:
+                reply = await provider_mgr.get_active_extra_body("vision")
+            else:
+                arg = " ".join(parts[3:])
+                if arg == "clear":
+                    reply = await provider_mgr.set_provider_extra_body("vision", "")
+                else:
+                    reply = await provider_mgr.set_provider_extra_body("vision", arg)
+        elif vision_sub == "timeout":
+            if len(parts) < 4:
+                t = await provider_mgr._pool.fetchval("SELECT request_timeout FROM llm_active WHERE key = 'vision'")
+                reply = f"Vision timeout: {t or 30}s"
+            else:
+                try:
+                    reply = await provider_mgr.set_timeout("vision", int(parts[3]))
+                except ValueError:
+                    reply = "用法: .llm vision timeout <秒>"
         else:
             reply = (
                 "用法:\n"
                 "  .llm vision              — 当前 vision 模型\n"
                 "  .llm vision switch <alias>/<model>\n"
+                "  .llm vision extra_body [json|clear]\n"
+                "  .llm vision timeout <秒>\n"
                 "  .llm vision off          — 关闭 vision"
             )
+
+    elif sub == "extra_body":
+        # .llm extra_body [json|clear]  — 操作当前 default slot
+        if len(parts) < 3:
+            reply = await provider_mgr.get_active_extra_body("default")
+        else:
+            arg = " ".join(parts[2:])
+            if arg == "clear":
+                reply = await provider_mgr.set_provider_extra_body("default", "")
+            else:
+                reply = await provider_mgr.set_provider_extra_body("default", arg)
+
+    elif sub == "timeout":
+        if len(parts) < 3:
+            t = await provider_mgr._pool.fetchval("SELECT request_timeout FROM llm_active WHERE key = 'default'")
+            reply = f"Timeout: {t or 60}s"
+        else:
+            try:
+                reply = await provider_mgr.set_timeout("default", int(parts[2]))
+            except ValueError:
+                reply = "用法: .llm timeout <秒>"
 
     else:
         reply = (
@@ -122,6 +163,8 @@ async def handle_llm_command(
             "  .llm remove <alias>\n"
             "  .llm models <alias>\n"
             "  .llm switch <alias>/<model> [--type gemini]\n"
+            "  .llm extra_body [json|clear]  — 当前模型的 extra_body\n"
+            "  .llm timeout [秒]  — 请求超时\n"
             "  .llm vision  — vision 模型管理"
         )
 
@@ -231,11 +274,11 @@ async def handle_memory_command(
         info = provider_mgr.current_info()
         embed_model = info.get("embedding_model", "未配置")
         embed_alias = info.get("embedding_alias", "")
-        cfg = await pool.fetchrow("SELECT dimension, endpoint, extra_body, migration_status FROM embedding_config WHERE id = 1")
+        cfg = await pool.fetchrow("SELECT dimension, endpoint, migration_status FROM embedding_config WHERE id = 1")
         dim = cfg["dimension"] if cfg else 0
         ep = cfg["endpoint"] if cfg and cfg["endpoint"] else "/embeddings"
-        eb = cfg["extra_body"] if cfg and cfg["extra_body"] else None
         mig = cfg["migration_status"] if cfg else "none"
+        eb = await pool.fetchval("SELECT extra_body FROM llm_active WHERE key = 'embedding'")
         reply = (
             f"记忆系统:\n"
             f"  嵌入模型: {embed_alias}/{embed_model} (维度: {dim})\n"
@@ -275,8 +318,7 @@ async def handle_memory_command(
     elif sub == "extra_body":
         arg = " ".join(parts[2:]) if len(parts) > 2 else ""
         if arg == "":
-            cfg = await pool.fetchrow("SELECT extra_body FROM embedding_config WHERE id = 1")
-            eb = cfg["extra_body"] if cfg and cfg["extra_body"] else None
+            eb = await pool.fetchval("SELECT extra_body FROM llm_active WHERE key = 'embedding'")
             reply = f"当前 extra_body: {eb}"
         elif arg == "clear":
             reply = await provider_mgr.set_embedding_extra_body("")
