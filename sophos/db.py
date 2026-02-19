@@ -94,7 +94,7 @@ _CREATE_LLM_PROVIDERS_TABLE = """\
 CREATE TABLE IF NOT EXISTS llm_providers (
     id              SERIAL          PRIMARY KEY,
     alias           TEXT            UNIQUE NOT NULL,
-    base_url        TEXT            NOT NULL,
+    base_urls       JSONB           NOT NULL DEFAULT '{}'::jsonb,
     api_key         TEXT            NOT NULL,
     models          JSONB           DEFAULT '[]'::jsonb,
     stream          BOOLEAN         DEFAULT true,

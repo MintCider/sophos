@@ -48,23 +48,65 @@ async def handle_llm_command(
             for p in providers:
                 marker = " ← 活跃" if p["is_active"] else ""
                 model_info = f" ({p['active_model']})" if p["is_active"] else ""
+                urls = p["base_urls"]
+                url_display = urls.get("openai", "?")
+                extra_urls = [f"{k}={v}" for k, v in urls.items() if k != "openai"]
+                if extra_urls:
+                    url_display += f" ({', '.join(extra_urls)})"
                 lines.append(
-                    f"  {p['alias']}: {p['base_url']} "
+                    f"  {p['alias']}: {url_display} "
                     f"[{p['model_count']} models]{model_info}{marker}"
                 )
             reply = "Providers:\n" + "\n".join(lines)
 
     elif sub == "add":
         if len(parts) < 5:
-            reply = "用法: .llm add <alias> <base_url> <api_key>"
+            reply = "用法: .llm add <alias> <url> <key> [--gemini <url>] [--anthropic <url>]"
         else:
-            reply = await provider_mgr.add_provider(parts[2], parts[3], parts[4])
+            alias_arg, url_arg, key_arg = parts[2], parts[3], parts[4]
+            base_urls: dict[str, str] = {"openai": url_arg}
+            extra_args = parts[5:]
+            for i, arg in enumerate(extra_args):
+                if arg == "--gemini" and i + 1 < len(extra_args):
+                    base_urls["gemini"] = extra_args[i + 1]
+                elif arg == "--anthropic" and i + 1 < len(extra_args):
+                    base_urls["anthropic"] = extra_args[i + 1]
+            reply = await provider_mgr.add_provider(alias_arg, base_urls, key_arg)
 
     elif sub == "remove":
         if len(parts) < 3:
             reply = "用法: .llm remove <alias>"
         else:
             reply = await provider_mgr.remove_provider(parts[2])
+
+    elif sub == "url":
+        if len(parts) < 3:
+            reply = (
+                "用法:\n"
+                "  .llm url <alias>                — 查看所有 URL\n"
+                "  .llm url <alias> <type> <url>   — 设置 per-type URL\n"
+                "  .llm url <alias> <type> clear    — 清除（回退到自动推导）"
+            )
+        elif len(parts) == 3:
+            result = await provider_mgr.get_provider_urls(parts[2])
+            if isinstance(result, str):
+                reply = result
+            else:
+                if not result:
+                    reply = f"'{parts[2]}' 无 URL 配置"
+                else:
+                    lines = [f"  {k}: {v}" for k, v in result.items()]
+                    reply = f"'{parts[2]}' URLs:\n" + "\n".join(lines)
+        elif len(parts) >= 5:
+            api_type_arg = parts[3]
+            if api_type_arg not in ("openai", "gemini", "anthropic"):
+                reply = "type 必须是 openai / gemini / anthropic"
+            elif parts[4] == "clear":
+                reply = await provider_mgr.set_provider_url(parts[2], api_type_arg, None)
+            else:
+                reply = await provider_mgr.set_provider_url(parts[2], api_type_arg, parts[4])
+        else:
+            reply = "用法: .llm url <alias> <type> <url|clear>"
 
     elif sub == "models":
         if len(parts) < 3:
@@ -81,7 +123,7 @@ async def handle_llm_command(
 
     elif sub == "switch":
         if len(parts) < 3 or "/" not in parts[2]:
-            reply = "用法: .llm switch <alias>/<model> [--type gemini]"
+            reply = "用法: .llm switch <alias>/<model> [--type openai|gemini|anthropic]"
         else:
             alias, _, model = parts[2].partition("/")
             api_type = _extract_type_flag(parts[3:])
@@ -98,7 +140,7 @@ async def handle_llm_command(
                 reply = "Vision 未配置"
         elif vision_sub == "switch":
             if len(parts) < 4 or "/" not in parts[3]:
-                reply = "用法: .llm vision switch <alias>/<model> [--type gemini]"
+                reply = "用法: .llm vision switch <alias>/<model> [--type openai|gemini|anthropic]"
             else:
                 alias, _, model = parts[3].partition("/")
                 api_type = _extract_type_flag(parts[4:])
@@ -144,7 +186,7 @@ async def handle_llm_command(
                 reply = "Trigger 未配置"
         elif trigger_sub == "switch":
             if len(parts) < 4 or "/" not in parts[3]:
-                reply = "用法: .llm trigger switch <alias>/<model> [--type gemini]"
+                reply = "用法: .llm trigger switch <alias>/<model> [--type openai|gemini|anthropic]"
             else:
                 alias, _, model = parts[3].partition("/")
                 api_type = _extract_type_flag(parts[4:])
@@ -205,10 +247,11 @@ async def handle_llm_command(
             "用法:\n"
             "  .llm          — 当前模型\n"
             "  .llm list     — 列出 providers\n"
-            "  .llm add <alias> <url> <key>\n"
+            "  .llm add <alias> <url> <key> [--gemini <url>] [--anthropic <url>]\n"
             "  .llm remove <alias>\n"
+            "  .llm url <alias> [<type> <url|clear>]  — 管理 per-type URL\n"
             "  .llm models <alias>\n"
-            "  .llm switch <alias>/<model> [--type gemini]\n"
+            "  .llm switch <alias>/<model> [--type openai|gemini|anthropic]\n"
             "  .llm extra_body [json|clear]  — 当前模型的 extra_body\n"
             "  .llm timeout [秒]  — 请求超时\n"
             "  .llm vision   — vision 模型管理\n"

@@ -8,7 +8,7 @@
 import json
 import logging
 from typing import Any
-from urllib.parse import urlparse
+
 
 import aiohttp
 
@@ -33,8 +33,7 @@ class AnthropicProvider(LLMProvider):
         stream: bool = True,
         extra_body: dict[str, Any] | None = None,
     ) -> None:
-        parsed = urlparse(base_url)
-        self._root = f"{parsed.scheme}://{parsed.netloc}"
+        self._root = base_url.rstrip("/")
         self._api_key = api_key
         self._model = model
         self._default_temperature = default_temperature
