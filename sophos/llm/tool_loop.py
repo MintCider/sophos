@@ -59,20 +59,26 @@ async def run_tool_loop(
                 max_tokens=max_tokens,
             )
         except Exception as e:
-            # 上一轮的 assistant message 可能包含畸形 tool_calls，
-            # 导致 API 拒绝整个请求。回滚畸形消息后不带 tools 做最终调用。
             logger.warning("LLM API error in tool loop round %d, attempting recovery: %s", round_num, e)
-            while messages and messages[-1].get("role") == "tool":
-                messages.pop()
-            if messages and messages[-1].get("role") == "assistant" and messages[-1].get("tool_calls"):
-                messages.pop()
+            # 第一步：全同重试（处理超时等瞬时错误）
             try:
-                response = await provider.chat(messages, temperature=temperature, max_tokens=max_tokens)
-                messages.append(response["message"])
+                response = await provider.chat(
+                    messages, tools=tools, temperature=temperature, max_tokens=max_tokens,
+                )
             except Exception:
-                logger.exception("Recovery call also failed")
-                raise
-            return messages
+                # 第二步：上一轮的 assistant message 可能包含畸形 tool_calls，
+                # 导致 API 拒绝整个请求。回滚畸形消息后不带 tools 做最终调用。
+                while messages and messages[-1].get("role") == "tool":
+                    messages.pop()
+                if messages and messages[-1].get("role") == "assistant" and messages[-1].get("tool_calls"):
+                    messages.pop()
+                try:
+                    response = await provider.chat(messages, temperature=temperature, max_tokens=max_tokens)
+                    messages.append(response["message"])
+                except Exception:
+                    logger.exception("Recovery call also failed")
+                    raise
+                return messages
 
         assistant_msg = response["message"]
         messages.append(assistant_msg)
