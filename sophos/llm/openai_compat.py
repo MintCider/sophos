@@ -28,7 +28,7 @@ class OpenAICompatProvider(LLMProvider):
         base_url: str,
         api_key: str,
         model: str,
-        default_temperature: float = 0.7,
+        default_temperature: float | None = None,
         default_max_tokens: int = 4096,
         request_timeout: int = 60,
         stream: bool = True,
@@ -72,9 +72,11 @@ class OpenAICompatProvider(LLMProvider):
         payload: dict[str, Any] = {
             "model": self._model,
             "messages": messages,
-            "temperature": temperature if temperature is not None else self._default_temperature,
             "max_tokens": max_tokens if max_tokens is not None else self._default_max_tokens,
         }
+        temp = temperature if temperature is not None else self._default_temperature
+        if temp is not None:
+            payload["temperature"] = temp
         if tools:
             payload["tools"] = tools
         if self._extra_body:

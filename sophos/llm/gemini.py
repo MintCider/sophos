@@ -28,7 +28,7 @@ class GeminiProvider(LLMProvider):
         base_url: str,
         api_key: str,
         model: str,
-        default_temperature: float = 0.7,
+        default_temperature: float | None = None,
         default_max_tokens: int = 4096,
         request_timeout: int = 60,
         stream: bool = True,
@@ -258,9 +258,11 @@ class GeminiProvider(LLMProvider):
             payload["tools"] = self._convert_tools(tools)
 
         gen_config: dict[str, Any] = {
-            "temperature": temperature if temperature is not None else self._default_temperature,
             "maxOutputTokens": max_tokens if max_tokens is not None else self._default_max_tokens,
         }
+        temp = temperature if temperature is not None else self._default_temperature
+        if temp is not None:
+            gen_config["temperature"] = temp
         # extra_body 中的参数合并到 generationConfig
         for k, v in self._extra_body.items():
             gen_config[k] = v

@@ -64,8 +64,8 @@ class Settings(BaseSettings):
     llm_api_type: str = "openai"
 
     # ── LLM 全局行为参数（始终从 .env 读取）─────────────────
-    # 生成温度
-    llm_temperature: float = 0.7
+    # 生成温度（None = 不传，由 API 使用自身默认值）
+    llm_temperature: float | None = None
     # 最大生成 token 数
     llm_max_tokens: int = 4096
     # 上下文降级：开启后将多轮消息合并为单条 user message，兼容不支持连续 user message 的模型
