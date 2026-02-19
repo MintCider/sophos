@@ -50,7 +50,7 @@ class ProviderManager:
         row = await self._pool.fetchrow(
             """
             SELECT p.id, p.alias, p.base_url, p.api_key,
-                   p.extra_body, p.stream, p.request_timeout,
+                   a.extra_body, p.stream, a.request_timeout,
                    a.model, a.api_type
             FROM llm_active a
             JOIN llm_providers p ON p.id = a.provider_id
@@ -83,7 +83,7 @@ class ProviderManager:
         row = await self._pool.fetchrow(
             """
             SELECT p.id, p.alias, p.base_url, p.api_key,
-                   p.extra_body, p.stream, p.request_timeout,
+                   a.extra_body, p.stream, a.request_timeout,
                    a.model, a.api_type
             FROM llm_active a
             JOIN llm_providers p ON p.id = a.provider_id
@@ -109,7 +109,7 @@ class ProviderManager:
         row = await self._pool.fetchrow(
             """
             SELECT p.id, p.alias, p.base_url, p.api_key,
-                   p.request_timeout, a.model
+                   a.request_timeout, a.model, a.extra_body
             FROM llm_active a
             JOIN llm_providers p ON p.id = a.provider_id
             WHERE a.key = 'embedding'
@@ -117,10 +117,10 @@ class ProviderManager:
         )
         if row:
             cfg = await self._pool.fetchrow(
-                "SELECT endpoint, extra_body FROM embedding_config WHERE id = 1",
+                "SELECT endpoint FROM embedding_config WHERE id = 1",
             )
             endpoint = (cfg["endpoint"] if cfg and cfg["endpoint"] else "/embeddings")
-            extra_body = cfg.get("extra_body") if cfg else None
+            extra_body = row.get("extra_body")
             if isinstance(extra_body, str):
                 extra_body = json.loads(extra_body)
             self._embedding_provider = EmbeddingProvider(
@@ -155,7 +155,7 @@ class ProviderManager:
                 logger.warning("Invalid EMBEDDING_EXTRA_BODY JSON: %s", settings.embedding_extra_body)
         extra_json = json.dumps(extra_body, ensure_ascii=False) if extra_body else None
 
-        # 查找或创建 provider（不写 extra_body 到 provider 行，embedding 专属 extra_body 存 embedding_config）
+        # 查找或创建 provider
         existing = await self._pool.fetchval(
             "SELECT id FROM llm_providers WHERE base_url = $1 AND api_key = $2",
             settings.embedding_base_url, settings.embedding_api_key,
@@ -165,15 +165,14 @@ class ProviderManager:
         else:
             provider_id = await self._pool.fetchval(
                 """
-                INSERT INTO llm_providers (alias, base_url, api_key, stream, request_timeout)
-                VALUES ($1, $2, $3, false, $4)
+                INSERT INTO llm_providers (alias, base_url, api_key, stream)
+                VALUES ($1, $2, $3, false)
                 ON CONFLICT (alias) DO UPDATE SET alias = EXCLUDED.alias
                 RETURNING id
                 """,
                 f"embedding-{settings.embedding_model}",
                 settings.embedding_base_url,
                 settings.embedding_api_key,
-                settings.embedding_request_timeout,
             )
 
         endpoint = settings.embedding_endpoint or "/embeddings"
@@ -199,15 +198,16 @@ class ProviderManager:
 
         await self._pool.execute(
             """
-            INSERT INTO llm_active (key, provider_id, model)
-            VALUES ('embedding', $1, $2)
+            INSERT INTO llm_active (key, provider_id, model, extra_body, request_timeout)
+            VALUES ('embedding', $1, $2, $3::jsonb, $4)
             ON CONFLICT (key) DO NOTHING
             """,
-            provider_id, settings.embedding_model,
+            provider_id, settings.embedding_model, extra_json,
+            settings.embedding_request_timeout,
         )
         await self._pool.execute(
-            "UPDATE embedding_config SET dimension = $1, endpoint = $2, extra_body = $3::jsonb, updated_at = now() WHERE id = 1",
-            dim, endpoint, extra_json,
+            "UPDATE embedding_config SET dimension = $1, endpoint = $2, updated_at = now() WHERE id = 1",
+            dim, endpoint,
         )
 
         logger.info(
@@ -268,18 +268,15 @@ class ProviderManager:
         api_key: str,
         *,
         stream: bool = True,
-        extra_body: dict[str, Any] | None = None,
-        request_timeout: int = 60,
     ) -> str:
         """新增 provider 到 DB。返回确认信息。"""
-        extra_json = json.dumps(extra_body, ensure_ascii=False) if extra_body else None
         try:
             await self._pool.execute(
                 """
-                INSERT INTO llm_providers (alias, base_url, api_key, stream, extra_body, request_timeout)
-                VALUES ($1, $2, $3, $4, $5::jsonb, $6)
+                INSERT INTO llm_providers (alias, base_url, api_key, stream)
+                VALUES ($1, $2, $3, $4)
                 """,
-                alias, base_url, api_key, stream, extra_json, request_timeout,
+                alias, base_url, api_key, stream,
             )
         except asyncpg.UniqueViolationError:
             return f"provider '{alias}' 已存在"
@@ -368,14 +365,76 @@ class ProviderManager:
             return f"provider '{alias}' 不存在"
         return f"已更新 '{alias}' 的模型列表（{len(models)} 个）"
 
+    async def set_provider_extra_body(self, slot: str, extra_body_json: str) -> str:
+        """设置活跃 slot 的 extra_body 并热重载。slot: 'default' | 'vision'。"""
+        try:
+            parsed = json.loads(extra_body_json) if extra_body_json else None
+        except json.JSONDecodeError:
+            return f"JSON 格式错误: {extra_body_json}"
+        extra_json = json.dumps(parsed, ensure_ascii=False) if parsed else None
+        result = await self._pool.execute(
+            "UPDATE llm_active SET extra_body = $1::jsonb WHERE key = $2",
+            extra_json, slot,
+        )
+        if result == "UPDATE 0":
+            return f"slot '{slot}' 不存在"
+        # 热重载到内存中的 provider 实例
+        if slot == "default" and self._provider is not None:
+            self._provider._extra_body = parsed or {}
+            logger.info("Hot-reloaded extra_body for default slot")
+        elif slot == "vision" and self._vision_provider is not None:
+            self._vision_provider._extra_body = parsed or {}
+            logger.info("Hot-reloaded extra_body for vision slot")
+        elif slot == "embedding" and self._embedding_provider is not None:
+            self._embedding_provider._extra_body = parsed or {}
+            logger.info("Hot-reloaded extra_body for embedding slot")
+        return "extra_body 已更新" + (f": {parsed}" if parsed else " (已清除)")
+
+    async def set_timeout(self, slot: str, seconds: int) -> str:
+        """设置活跃 slot 的 request_timeout 并热重载。"""
+        if seconds < 5 or seconds > 600:
+            return "timeout 范围: 5-600 秒"
+        result = await self._pool.execute(
+            "UPDATE llm_active SET request_timeout = $1 WHERE key = $2",
+            seconds, slot,
+        )
+        if result == "UPDATE 0":
+            return f"slot '{slot}' 不存在"
+        # 热重载
+        provider = {
+            "default": self._provider,
+            "vision": self._vision_provider,
+            "embedding": self._embedding_provider,
+        }.get(slot)
+        if provider is not None:
+            import aiohttp
+            provider._timeout = aiohttp.ClientTimeout(total=seconds)
+            logger.info("Hot-reloaded timeout for %s slot: %ds", slot, seconds)
+        return f"timeout 已更新: {seconds}s"
+
+    async def get_active_extra_body(self, slot: str) -> str:
+        """获取活跃 slot 的 extra_body。"""
+        row = await self._pool.fetchrow(
+            """
+            SELECT a.extra_body, p.alias
+            FROM llm_active a
+            JOIN llm_providers p ON p.id = a.provider_id
+            WHERE a.key = $1
+            """,
+            slot,
+        )
+        if not row:
+            return f"slot '{slot}' 未配置"
+        eb = row["extra_body"]
+        return f"{row['alias']} extra_body: {eb}" if eb else f"{row['alias']} extra_body: (无)"
+
     # ── 热切换 ───────────────────────────────────────────────
 
     async def switch(self, alias: str, model: str, *, api_type: str = "openai") -> str:
         """热切换到指定 provider + model。返回确认信息。"""
         row = await self._pool.fetchrow(
             """
-            SELECT id, alias, base_url, api_key,
-                   extra_body, stream, request_timeout
+            SELECT id, alias, base_url, api_key, stream
             FROM llm_providers WHERE alias = $1
             """,
             alias,
@@ -383,25 +442,34 @@ class ProviderManager:
         if not row:
             return f"provider '{alias}' 不存在"
 
+        # 读取当前 slot 的 timeout（切换时保留）
+        existing_timeout = await self._pool.fetchval(
+            "SELECT request_timeout FROM llm_active WHERE key = 'default'",
+        ) or 60
+
         # 关闭旧 provider
         if self._provider is not None:
             await self._provider.close()
 
-        # 创建新实例
-        self._apply_row({**dict(row), "model": model}, api_type=api_type)
+        # 创建新实例（extra_body 清空，timeout 保留）
+        self._apply_row(
+            {**dict(row), "model": model, "extra_body": None, "request_timeout": existing_timeout},
+            api_type=api_type,
+        )
 
-        # 更新 DB
+        # 更新 DB（extra_body 重置为 NULL，request_timeout 保留）
         await self._pool.execute(
             """
-            INSERT INTO llm_active (key, provider_id, model, api_type, updated_at)
-            VALUES ('default', $1, $2, $3, now())
+            INSERT INTO llm_active (key, provider_id, model, api_type, extra_body, request_timeout, updated_at)
+            VALUES ('default', $1, $2, $3, NULL, $4, now())
             ON CONFLICT (key) DO UPDATE
             SET provider_id = EXCLUDED.provider_id,
                 model = EXCLUDED.model,
                 api_type = EXCLUDED.api_type,
+                extra_body = NULL,
                 updated_at = EXCLUDED.updated_at
             """,
-            row["id"], model, api_type,
+            row["id"], model, api_type, existing_timeout,
         )
 
         logger.info("Switched LLM to %s / %s (api_type=%s)", alias, model, api_type)
@@ -411,8 +479,7 @@ class ProviderManager:
         """热切换 vision slot 到指定 provider + model。"""
         row = await self._pool.fetchrow(
             """
-            SELECT id, alias, base_url, api_key,
-                   extra_body, stream, request_timeout
+            SELECT id, alias, base_url, api_key, stream
             FROM llm_providers WHERE alias = $1
             """,
             alias,
@@ -420,22 +487,30 @@ class ProviderManager:
         if not row:
             return f"provider '{alias}' 不存在"
 
+        existing_timeout = await self._pool.fetchval(
+            "SELECT request_timeout FROM llm_active WHERE key = 'vision'",
+        ) or 30
+
         if self._vision_provider is not None:
             await self._vision_provider.close()
 
-        self._apply_vision_row({**dict(row), "model": model}, api_type=api_type)
+        self._apply_vision_row(
+            {**dict(row), "model": model, "extra_body": None, "request_timeout": existing_timeout},
+            api_type=api_type,
+        )
 
         await self._pool.execute(
             """
-            INSERT INTO llm_active (key, provider_id, model, api_type, updated_at)
-            VALUES ('vision', $1, $2, $3, now())
+            INSERT INTO llm_active (key, provider_id, model, api_type, extra_body, request_timeout, updated_at)
+            VALUES ('vision', $1, $2, $3, NULL, $4, now())
             ON CONFLICT (key) DO UPDATE
             SET provider_id = EXCLUDED.provider_id,
                 model = EXCLUDED.model,
                 api_type = EXCLUDED.api_type,
+                extra_body = NULL,
                 updated_at = EXCLUDED.updated_at
             """,
-            row["id"], model, api_type,
+            row["id"], model, api_type, existing_timeout,
         )
 
         logger.info("Switched vision to %s / %s (api_type=%s)", alias, model, api_type)
@@ -457,24 +532,31 @@ class ProviderManager:
     async def switch_embedding(self, alias: str, model: str) -> str:
         """切换 embedding 模型。首次直接激活，后续暂存待迁移。"""
         row = await self._pool.fetchrow(
-            "SELECT id, alias, base_url, api_key, request_timeout FROM llm_providers WHERE alias = $1",
+            "SELECT id, alias, base_url, api_key FROM llm_providers WHERE alias = $1",
             alias,
         )
         if not row:
             return f"provider '{alias}' 不存在"
 
-        # 从 embedding_config 读取 endpoint 和 extra_body
-        cfg = await self._pool.fetchrow("SELECT endpoint, extra_body FROM embedding_config WHERE id = 1")
+        # 从 embedding_config 读取 endpoint
+        cfg = await self._pool.fetchrow("SELECT endpoint FROM embedding_config WHERE id = 1")
         endpoint = (cfg["endpoint"] if cfg and cfg["endpoint"] else "/embeddings")
-        extra_body = cfg.get("extra_body") if cfg else None
-        if isinstance(extra_body, str):
-            extra_body = json.loads(extra_body)
+        # 从 llm_active 读取 extra_body 和 request_timeout
+        active_row = await self._pool.fetchrow(
+            "SELECT extra_body, request_timeout FROM llm_active WHERE key = 'embedding'",
+        )
+        extra_body = None
+        timeout = 30
+        if active_row:
+            eb_raw = active_row.get("extra_body")
+            extra_body = json.loads(eb_raw) if isinstance(eb_raw, str) else eb_raw
+            timeout = active_row.get("request_timeout") or 30
 
         # 创建临时 provider 检测维度
         tmp = EmbeddingProvider(
             base_url=row["base_url"], api_key=row["api_key"], model=model,
             endpoint=endpoint, extra_body=extra_body,
-            request_timeout=row.get("request_timeout", 30) or 30,
+            request_timeout=timeout,
         )
         try:
             dim = await tmp.detect_dimension()
@@ -543,22 +625,28 @@ class ProviderManager:
 
         # 获取 pending provider 信息
         prov_row = await self._pool.fetchrow(
-            "SELECT base_url, api_key, request_timeout FROM llm_providers WHERE id = $1",
+            "SELECT base_url, api_key FROM llm_providers WHERE id = $1",
             cfg["pending_provider_id"],
         )
         if not prov_row:
             return "pending provider 不存在"
 
         endpoint = cfg.get("endpoint") or "/embeddings"
-        extra_body = cfg.get("extra_body")
-        if isinstance(extra_body, str):
-            extra_body = json.loads(extra_body)
+        active_row = await self._pool.fetchrow(
+            "SELECT extra_body, request_timeout FROM llm_active WHERE key = 'embedding'",
+        )
+        extra_body = None
+        timeout = 30
+        if active_row:
+            eb_raw = active_row.get("extra_body")
+            extra_body = json.loads(eb_raw) if isinstance(eb_raw, str) else eb_raw
+            timeout = active_row.get("request_timeout") or 30
 
         new_provider = EmbeddingProvider(
             base_url=prov_row["base_url"], api_key=prov_row["api_key"],
             model=cfg["pending_model"],
             endpoint=endpoint, extra_body=extra_body,
-            request_timeout=prov_row.get("request_timeout", 30) or 30,
+            request_timeout=timeout,
         )
 
         try:
@@ -687,29 +775,19 @@ class ProviderManager:
         return f"Endpoint 已切换为 {endpoint}"
 
     async def set_embedding_extra_body(self, extra_body_json: str) -> str:
-        """设置 embedding 专属 extra_body 并重建 provider。"""
-        try:
-            parsed = json.loads(extra_body_json) if extra_body_json else None
-        except json.JSONDecodeError:
-            return f"JSON 格式错误: {extra_body_json}"
-        store_json = json.dumps(parsed, ensure_ascii=False) if parsed else None
-        await self._pool.execute(
-            "UPDATE embedding_config SET extra_body = $1::jsonb, updated_at = now() WHERE id = 1",
-            store_json,
-        )
-        await self._rebuild_embedding_provider(extra_body=parsed)
-        return f"Extra body 已更新: {parsed}"
+        """设置 embedding extra_body（统一存 llm_active）。"""
+        return await self.set_provider_extra_body("embedding", extra_body_json)
 
     async def _rebuild_embedding_provider(
-        self, *, endpoint: str | None = None, extra_body: Any = ...,
+        self, *, endpoint: str | None = None,
     ) -> None:
-        """重建当前 embedding provider（endpoint/extra_body 变更后调用）。"""
+        """重建当前 embedding provider（endpoint 变更后调用）。"""
         if self._embedding_provider is None:
             return
         old = self._embedding_provider
         row = await self._pool.fetchrow(
             """
-            SELECT p.base_url, p.api_key, p.request_timeout, a.model
+            SELECT p.base_url, p.api_key, a.request_timeout, a.model, a.extra_body
             FROM llm_active a
             JOIN llm_providers p ON p.id = a.provider_id
             WHERE a.key = 'embedding'
@@ -717,15 +795,14 @@ class ProviderManager:
         )
         if not row:
             return
-        cfg = await self._pool.fetchrow(
-            "SELECT endpoint, extra_body FROM embedding_config WHERE id = 1",
-        )
+        extra_body = row.get("extra_body")
+        if isinstance(extra_body, str):
+            extra_body = json.loads(extra_body)
         if endpoint is None:
+            cfg = await self._pool.fetchrow(
+                "SELECT endpoint FROM embedding_config WHERE id = 1",
+            )
             endpoint = (cfg["endpoint"] if cfg and cfg["endpoint"] else "/embeddings")
-        if extra_body is ...:
-            extra_body = cfg.get("extra_body") if cfg else None
-            if isinstance(extra_body, str):
-                extra_body = json.loads(extra_body)
         self._embedding_provider = EmbeddingProvider(
             base_url=row["base_url"], api_key=row["api_key"],
             model=row["model"], endpoint=endpoint, extra_body=extra_body,
@@ -776,24 +853,23 @@ class ProviderManager:
         # INSERT provider
         provider_id = await self._pool.fetchval(
             """
-            INSERT INTO llm_providers (alias, base_url, api_key, stream, extra_body, request_timeout)
-            VALUES ('default', $1, $2, $3, $4::jsonb, $5)
+            INSERT INTO llm_providers (alias, base_url, api_key, stream)
+            VALUES ('default', $1, $2, $3)
             RETURNING id
             """,
             settings.llm_base_url,
             settings.llm_api_key,
             settings.llm_stream,
-            extra_json,
-            settings.llm_request_timeout,
         )
 
-        # INSERT active
+        # INSERT active（extra_body + request_timeout 存这里）
         await self._pool.execute(
             """
-            INSERT INTO llm_active (key, provider_id, model, api_type)
-            VALUES ('default', $1, $2, $3)
+            INSERT INTO llm_active (key, provider_id, model, api_type, extra_body, request_timeout)
+            VALUES ('default', $1, $2, $3, $4::jsonb, $5)
             """,
-            provider_id, settings.llm_model, settings.llm_api_type,
+            provider_id, settings.llm_model, settings.llm_api_type, extra_json,
+            settings.llm_request_timeout,
         )
 
         # 创建实例
@@ -869,8 +945,8 @@ class ProviderManager:
         else:
             provider_id = await self._pool.fetchval(
                 """
-                INSERT INTO llm_providers (alias, base_url, api_key, stream, extra_body, request_timeout)
-                VALUES ($1, $2, $3, $4, $5::jsonb, $6)
+                INSERT INTO llm_providers (alias, base_url, api_key, stream)
+                VALUES ($1, $2, $3, $4)
                 ON CONFLICT (alias) DO UPDATE SET alias = EXCLUDED.alias
                 RETURNING id
                 """,
@@ -878,17 +954,17 @@ class ProviderManager:
                 settings.vision_base_url,
                 settings.vision_api_key,
                 settings.vision_stream,
-                extra_json,
-                settings.vision_request_timeout,
             )
 
+        # extra_body + request_timeout 存到 llm_active
         await self._pool.execute(
             """
-            INSERT INTO llm_active (key, provider_id, model, api_type)
-            VALUES ('vision', $1, $2, $3)
+            INSERT INTO llm_active (key, provider_id, model, api_type, extra_body, request_timeout)
+            VALUES ('vision', $1, $2, $3, $4::jsonb, $5)
             ON CONFLICT (key) DO NOTHING
             """,
-            provider_id, settings.vision_model, settings.vision_api_type,
+            provider_id, settings.vision_model, settings.vision_api_type, extra_json,
+            settings.vision_request_timeout,
         )
 
         kwargs = {

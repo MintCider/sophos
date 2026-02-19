@@ -97,9 +97,7 @@ CREATE TABLE IF NOT EXISTS llm_providers (
     base_url        TEXT            NOT NULL,
     api_key         TEXT            NOT NULL,
     models          JSONB           DEFAULT '[]'::jsonb,
-    extra_body      JSONB,
     stream          BOOLEAN         DEFAULT true,
-    request_timeout INTEGER         DEFAULT 60,
     created_at      TIMESTAMPTZ     DEFAULT now()
 );
 """
@@ -110,6 +108,8 @@ CREATE TABLE IF NOT EXISTS llm_active (
     provider_id     INTEGER         REFERENCES llm_providers(id) ON DELETE SET NULL,
     model           TEXT            NOT NULL,
     api_type        TEXT            DEFAULT 'openai',
+    extra_body      JSONB,
+    request_timeout INTEGER         DEFAULT 60,
     updated_at      TIMESTAMPTZ     DEFAULT now()
 );
 """
@@ -147,7 +147,6 @@ CREATE TABLE IF NOT EXISTS embedding_config (
     id                  INTEGER     PRIMARY KEY DEFAULT 1 CHECK (id = 1),
     dimension           INTEGER     NOT NULL DEFAULT 0,
     endpoint            VARCHAR(128) DEFAULT '/embeddings',
-    extra_body          JSONB,
     pending_provider_id INTEGER     REFERENCES llm_providers(id) ON DELETE SET NULL,
     pending_model       TEXT,
     pending_dimension   INTEGER,
@@ -195,7 +194,8 @@ CREATE TABLE IF NOT EXISTS memories (
     source_id   BIGINT,
     created_at  TIMESTAMPTZ     DEFAULT now(),
     last_hit    TIMESTAMPTZ,
-    hit_count   INTEGER         DEFAULT 0
+    hit_count   INTEGER         DEFAULT 0,
+    tsv         tsvector        GENERATED ALWAYS AS (to_tsvector('simple', content)) STORED
 );
 """
 
@@ -303,33 +303,5 @@ async def _init_schema(pool: asyncpg.Pool) -> None:
         await conn.execute(_CREATE_PERM_SCOPE_TABLE)
         await conn.execute(_CREATE_PERM_GRANT_TABLE)
         await conn.execute(_CREATE_PERM_TOOL_TABLE)
-        # tsvector 生成列（ALTER 幂等：列已存在时报错，忽略即可）
-        try:
-            await conn.execute(
-                "ALTER TABLE memories ADD COLUMN tsv tsvector "
-                "GENERATED ALWAYS AS (to_tsvector('simple', content)) STORED;"
-            )
-        except asyncpg.DuplicateColumnError:
-            pass
-        # llm_active 新列（向后兼容已有 DB）
-        try:
-            await conn.execute(
-                "ALTER TABLE llm_active ADD COLUMN api_type TEXT DEFAULT 'openai';"
-            )
-        except asyncpg.DuplicateColumnError:
-            pass
-        # embedding_config 新列（向后兼容已有 DB）
-        try:
-            await conn.execute(
-                "ALTER TABLE embedding_config ADD COLUMN endpoint VARCHAR(128) DEFAULT '/embeddings';"
-            )
-        except asyncpg.DuplicateColumnError:
-            pass
-        try:
-            await conn.execute(
-                "ALTER TABLE embedding_config ADD COLUMN extra_body JSONB;"
-            )
-        except asyncpg.DuplicateColumnError:
-            pass
         for ddl in _CREATE_INDEXES:
             await conn.execute(ddl)
