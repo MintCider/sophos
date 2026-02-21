@@ -43,6 +43,10 @@ _DEFAULTS: dict[str, Any] = {
     "trigger_eval_persona": "",
     "trigger_bucket_capacity": 10,
     "trigger_bucket_refill": 6.0,
+    # Tavily 联网搜索
+    "tavily_api_key": "",
+    "tavily_max_results": 5,
+    "tavily_include_answer": True,
 }
 
 _cache: dict[str, Any] = {}

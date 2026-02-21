@@ -38,6 +38,7 @@ from sophos.tools.memory import MEMORY_TOOLS
 from sophos.tools.onebot import ALL_TOOLS
 from sophos.tools.registry import ToolRegistry
 from sophos.tools.vision import VISION_TOOLS
+from sophos.tools.web import WEB_TOOLS
 from sophos import trigger
 from sophos.vision import process_message_images
 
@@ -314,7 +315,7 @@ def _get_registry() -> ToolRegistry:
     global _tool_registry
     if _tool_registry is None:
         _tool_registry = ToolRegistry()
-        for tool in ALL_TOOLS + MEMORY_TOOLS + VISION_TOOLS:
+        for tool in ALL_TOOLS + MEMORY_TOOLS + VISION_TOOLS + WEB_TOOLS:
             _tool_registry.register(tool)
     return _tool_registry
 
@@ -322,7 +323,7 @@ def _get_registry() -> ToolRegistry:
 _RAW_TOOL_CALL_RE = re.compile(
     r"^(send_msg|set_profile_self|set_profile_context|set_profile_user|write_memory|"
     r"search_memory|delete_memory|correct_image_description|"
-    r"query_messages|set_group_name)\s*[\(\{]",
+    r"query_messages|set_group_name|web_search|web_fetch|view_image)\s*[\(\{]",
 )
 
 
@@ -471,6 +472,9 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
     if memory_store:
         tool_context["memory_store"] = memory_store
         tool_context["embedding_provider"] = ctx.provider_mgr.get_embedding_provider()
+    vision_provider = ctx.provider_mgr.get_vision_provider()
+    if vision_provider:
+        tool_context["vision_provider"] = vision_provider
     sent_via_tool = False
 
     async def tool_executor(name: str, params: dict[str, Any]) -> Any:
@@ -491,6 +495,15 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
     if whitelist is not None:
         allowed = set(whitelist)
         tool_schemas = [s for s in tool_schemas if s["function"]["name"] in allowed]
+
+    # 条件工具过滤（API key / provider 未配置时隐藏）
+    _disabled: set[str] = set()
+    if not runtime_config.get("tavily_api_key"):
+        _disabled.update({"web_search", "web_fetch"})
+    if not vision_provider:
+        _disabled.add("view_image")
+    if _disabled:
+        tool_schemas = [s for s in tool_schemas if s["function"]["name"] not in _disabled]
 
     try:
         result_messages = await run_tool_loop(

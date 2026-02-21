@@ -606,6 +606,7 @@ _VALIDATORS: dict[str, tuple[Any, str]] = {
     "trigger_eval_temperature": (lambda v: 0 <= v <= 2, "范围 0~2"),
     "trigger_bucket_capacity": (lambda v: v > 0,    "必须 > 0"),
     "trigger_bucket_refill": (lambda v: v > 0,      "必须 > 0"),
+    "tavily_max_results":   (lambda v: 1 <= v <= 20, "范围 1~20"),
 }
 
 
