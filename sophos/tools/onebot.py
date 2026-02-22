@@ -8,6 +8,7 @@
 有特殊逻辑的工具（如 send_msg 需要存储消息）用独立类。
 """
 
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -153,13 +154,14 @@ class SendMessageTool(Tool):
             }
 
         # 构建消息段：reply → at → text
+        text = re.sub(r"^\[回复[^\]]*\]\s*", "", params["text"])
         segments: list[dict[str, Any]] = []
         if reply_to := params.get("reply_to"):
             segments.append({"type": "reply", "data": {"id": str(reply_to)}})
         if at_list := params.get("at"):
             for uid in at_list:
                 segments.append({"type": "at", "data": {"qq": str(uid)}})
-        segments.append({"type": "text", "data": {"text": params["text"]}})
+        segments.append({"type": "text", "data": {"text": text}})
 
         api_params: dict[str, Any] = {
             "message_type": msg_type,
@@ -195,7 +197,7 @@ class SendMessageTool(Tool):
                 extra=extra,
             )
 
-        return {"status": "ok", "message_id": message_id, "message_text": params["text"]}
+        return {"status": "ok", "message_id": message_id, "message_text": text}
 
 
 # ── 输出工具 ─────────────────────────────────────────────

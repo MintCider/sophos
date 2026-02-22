@@ -13,6 +13,7 @@
 """
 
 import json
+import re
 from datetime import timedelta, timezone
 from typing import Any
 
@@ -20,6 +21,28 @@ from sophos.config import settings
 from sophos.llm.provider import Message
 from sophos.message_store import MessageStore
 from sophos import runtime_config
+
+_RE_REPLY_PREFIX = re.compile(r"^\[回复[^\]]*\]\s*")
+
+
+def _strip_reply_prefix(text: str) -> str:
+    """剥离 EnrichMessageStage 注入的 [回复 ...] 前缀。"""
+    return _RE_REPLY_PREFIX.sub("", text)
+
+
+def _extract_reply_to(row: dict[str, Any]) -> int | None:
+    """从 raw_message 提取 reply segment 的 message_id。"""
+    raw = row.get("raw_message")
+    if not raw:
+        return None
+    if isinstance(raw, str):
+        raw = json.loads(raw)
+    for seg in raw:
+        if isinstance(seg, dict) and seg.get("type") == "reply":
+            mid = seg.get("data", {}).get("id")
+            if mid is not None:
+                return int(mid)
+    return None
 
 
 async def build_chat_context(
@@ -69,11 +92,14 @@ def _build_multi_turn(
     for row in rows:
         img_text = _format_image_descriptions(row)
         if row.get("source") == "sophos":
-            content = row.get("plain_text", "")
+            content = _strip_reply_prefix(row.get("plain_text", ""))
             if inline_bg:
                 content = _maybe_append_inline_bg(content, row)
             if img_text:
                 content = f"{content} {img_text}" if content else img_text
+            reply_to = _extract_reply_to(row)
+            if reply_to is not None:
+                content = f"send_msg(reply={reply_to}) {content}"
             messages.append({"role": "assistant", "content": content})
         else:
             content = apply_schema(
@@ -101,13 +127,17 @@ def _build_flat(
     for row in rows:
         img_text = _format_image_descriptions(row)
         if row.get("source") == "sophos":
+            bot_text = _strip_reply_prefix(row.get("plain_text", ""))
+            reply_to = _extract_reply_to(row)
+            if reply_to is not None:
+                bot_text = f"send_msg(reply={reply_to}) {bot_text}"
             line = apply_schema(
                 runtime_config.get("llm_bot_schema"),
                 time=format_timestamp(row),
                 mid=str(row.get("message_id", "")),
                 name=bot_name,
                 uid="",
-                message=row.get("plain_text", ""),
+                message=bot_text,
             )
             if inline_bg:
                 line = _maybe_append_inline_bg(line, row)

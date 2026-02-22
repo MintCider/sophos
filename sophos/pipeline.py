@@ -327,12 +327,15 @@ _RAW_TOOL_CALL_RE = re.compile(
 )
 
 
+_RE_REPLY_PREFIX = re.compile(r"^\[回复[^\]]*\]\s*")
+
+
 def _sanitize_fallback_reply(text: str) -> str | None:
     """如果 fallback 文本像 raw tool call，尝试提取实际回复；无法提取则返回 None。
 
     Gemini 有时会把工具调用以文本形式输出而非使用 function calling 机制。
     """
-    stripped = text.strip()
+    stripped = _RE_REPLY_PREFIX.sub("", text).strip()
 
     # 以工具名开头 → 大概率是 raw tool call
     m = _RAW_TOOL_CALL_RE.match(stripped)
