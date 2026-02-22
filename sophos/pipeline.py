@@ -454,6 +454,15 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
         logger.warning("Failed to build recent global block", exc_info=True)
 
     system_prompt += meta
+
+    # 等待图片处理完成（如有），确保 LLM 能拿到图片描述
+    image_task: asyncio.Task[None] | None = ctx.state.get("image_task")
+    if image_task and not image_task.done():
+        try:
+            await image_task
+        except Exception:
+            logger.warning("Image processing failed, continuing without descriptions")
+
     messages = await build_chat_context(
         ctx.store,
         group_id=ctx.group_id,
@@ -584,7 +593,7 @@ class ProcessImagesStage(Stage):
         return "异步处理消息中的图片（VLM 识别）"
 
     async def execute(self, ctx: PipelineContext, next: NextFn) -> None:
-        asyncio.create_task(_process_event_images(ctx))
+        ctx.state["image_task"] = asyncio.create_task(_process_event_images(ctx))
         await next()
 
 
