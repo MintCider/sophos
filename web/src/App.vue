@@ -20,7 +20,7 @@ watchEffect(() => {
 
 const themeOverrides = computed<GlobalThemeOverrides>(() => ({
   common: {
-    bodyColor: isDark.value ? '#161228' : '#eee8ff',
+    bodyColor: 'transparent',
     cardColor: isDark.value
       ? 'rgba(36, 36, 42, 0.7)'
       : 'rgba(255, 255, 255, 0.7)',

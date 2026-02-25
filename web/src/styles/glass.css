@@ -40,26 +40,30 @@ body,
 /* ── Mesh Gradient Background ────────────────────────── */
 
 body {
-  transition: background-color 0.5s ease;
   background-color: #eee8ff;
-  position: relative;
-  overflow: hidden;
+  transition: background-color 0.5s ease;
 }
 
 html.dark body {
   background-color: #161228;
 }
 
-/* Mesh gradient via blurred color blobs */
-body::before {
+/* Gradient lives on #app so Naive UI body manipulation can't interfere */
+#app {
+  position: relative;
+  isolation: isolate;
+}
+
+#app::before {
   content: '';
   position: fixed;
   inset: 0;
   z-index: -1;
   background-color: #eee8ff;
+  transition: background-color 0.5s ease;
 }
 
-body::after {
+#app::after {
   content: '';
   position: fixed;
   inset: -20%;
@@ -72,11 +76,11 @@ body::after {
     radial-gradient(circle at 30% 55%, #b8a0ff 0%, transparent 30%);
 }
 
-html.dark body::before {
+html.dark #app::before {
   background-color: #161228;
 }
 
-html.dark body::after {
+html.dark #app::after {
   background:
     radial-gradient(circle at 15% 20%, #352068 0%, transparent 45%),
     radial-gradient(circle at 85% 15%, #183060 0%, transparent 40%),
