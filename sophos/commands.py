@@ -662,15 +662,17 @@ async def handle_prompt_command(
 # ── 权限相关常量 ──────────────────────────────────────────
 
 _ALL_PERMS: frozenset[str] = frozenset({
-    "cmd.bot", "cmd.tools", "cmd.config", "cmd.llm",
+    "bot", "bot.group", "bot.private",
+    "cmd.tools", "cmd.config", "cmd.llm",
     "cmd.trigger", "cmd.memory", "cmd.prompt",
-    "private", "delegate",
+    "delegate",
 })
 
 _PERM_ALIASES: dict[str, str] = {
-    "bot": "cmd.bot", "tools": "cmd.tools", "config": "cmd.config",
+    "bot": "bot", "bot.group": "bot.group", "bot.private": "bot.private",
+    "tools": "cmd.tools", "config": "cmd.config",
     "llm": "cmd.llm", "trigger": "cmd.trigger", "memory": "cmd.memory",
-    "prompt": "cmd.prompt", "private": "private", "delegate": "delegate",
+    "prompt": "cmd.prompt", "delegate": "delegate",
 }
 
 
@@ -723,10 +725,10 @@ async def handle_help_command(
         "可用命令:",
         "  .ping   — 连通测试",
         "  .help   — 显示此帮助",
+        "  .bot    — 会话开关",
     ]
     is_m = permission.is_master(user_id)
     cmd_map = [
-        ("cmd.bot", ".bot", "会话开关"),
         ("cmd.tools", ".tools", "工具白名单"),
         ("cmd.llm", ".llm", "LLM provider 管理"),
         ("cmd.trigger", ".trigger", "触发器配置"),
@@ -838,6 +840,38 @@ async def handle_tools_command(
 # ── .perm ─────────────────────────────────────────────────
 
 
+async def _can_delegate_perm(
+    perm_name: str,
+    user_id: int,
+    scope_type: str,
+    scope_id: int,
+    pool: asyncpg.Pool,
+    *,
+    has_perm_fn: Any,
+) -> bool:
+    """检查用户是否有权分发指定权限。
+
+    规则：
+    - bot + delegate → 可分发 bot 和 bot.group
+    - bot.group + delegate → 可分发当前群的 bot.group
+    - bot.private → 仅 master（调用方已处理）
+    - 其他 cmd.* → 拥有该权限即可分发
+    """
+    # 必须有 delegate 权限
+    if not await has_perm_fn(pool, user_id, scope_type, scope_id, "delegate"):
+        return False
+    if perm_name in ("bot", "bot.group"):
+        # 有 bot 全局权限 → 可分发 bot 和 bot.group
+        if await has_perm_fn(pool, user_id, "global", 0, "bot"):
+            return True
+        # 有当前群 bot.group → 只能分发当前群 bot.group
+        if perm_name == "bot.group" and scope_type == "group":
+            return await has_perm_fn(pool, user_id, scope_type, scope_id, "bot.group")
+        return False
+    # 其他权限：拥有即可分发
+    return await has_perm_fn(pool, user_id, scope_type, scope_id, perm_name)
+
+
 async def handle_perm_command(
     text: str,
     *,
@@ -879,19 +913,40 @@ async def handle_perm_command(
                 reply = f"未知权限: {perm_alias}\n可用: {', '.join(sorted(_PERM_ALIASES))}"
             elif perm_name == "delegate" and not is_m:
                 reply = "仅 master 可授予 delegate 权限"
-            elif not is_m and not await permission.has_permission(pool, user_id, scope_type, scope_id, perm_name):
-                reply = f"你没有 {perm_alias} 权限，无法授予他人"
+            elif perm_name == "bot.private" and not is_m:
+                reply = "仅 master 可授予 bot.private 权限"
+            elif not is_m and not await _can_delegate_perm(
+                perm_name, user_id, scope_type, scope_id, pool,
+                has_perm_fn=permission.has_permission,
+            ):
+                reply = f"你没有权限授予 {perm_alias}"
             else:
                 targets = await _resolve_targets(api, parts[3], group_id)
                 if isinstance(targets, str):
                     reply = targets
-                elif perm_name == "private":
-                    # private 权限特殊处理：操作 perm_scope 表
+                elif perm_name == "bot.private":
+                    # 双写：perm_grant + perm_scope
                     count = 0
                     for tid in targets:
+                        await permission.grant(pool, tid, "global", 0, "bot.private", user_id)
                         await permission.set_scope_enabled(pool, "private", tid, True)
                         count += 1
                     reply = f"已为 {count} 人开通私聊"
+                elif perm_name == "bot.group":
+                    # 绑定当前群
+                    if group_id is None:
+                        reply = "bot.group 仅限群聊中使用"
+                    else:
+                        count = await permission.batch_grant(
+                            pool, targets, "group", group_id, "bot.group", user_id,
+                        )
+                        reply = f"已授予 {count} 人当前群 bot.group 权限"
+                elif perm_name == "bot":
+                    # 全局 bot 权限
+                    count = await permission.batch_grant(
+                        pool, targets, "global", 0, "bot", user_id,
+                    )
+                    reply = f"已授予 {count} 人 bot 权限"
                 else:
                     count = await permission.batch_grant(
                         pool, targets, scope_type, scope_id, perm_name, user_id,
@@ -908,18 +963,38 @@ async def handle_perm_command(
                 reply = f"未知权限: {perm_alias}\n可用: {', '.join(sorted(_PERM_ALIASES))}"
             elif perm_name == "delegate" and not is_m:
                 reply = "仅 master 可撤销 delegate 权限"
-            elif not is_m and not await permission.has_permission(pool, user_id, scope_type, scope_id, perm_name):
-                reply = f"你没有 {perm_alias} 权限，无法撤销他人"
+            elif perm_name == "bot.private" and not is_m:
+                reply = "仅 master 可撤销 bot.private 权限"
+            elif not is_m and not await _can_delegate_perm(
+                perm_name, user_id, scope_type, scope_id, pool,
+                has_perm_fn=permission.has_permission,
+            ):
+                reply = f"你没有权限撤销 {perm_alias}"
             else:
                 targets = await _resolve_targets(api, parts[3], group_id)
                 if isinstance(targets, str):
                     reply = targets
-                elif perm_name == "private":
+                elif perm_name == "bot.private":
+                    # 双写：删 perm_grant + 关 perm_scope
                     count = 0
                     for tid in targets:
+                        await permission.revoke(pool, tid, "global", 0, "bot.private")
                         await permission.set_scope_enabled(pool, "private", tid, False)
                         count += 1
                     reply = f"已关闭 {count} 人的私聊"
+                elif perm_name == "bot.group":
+                    if group_id is None:
+                        reply = "bot.group 仅限群聊中使用"
+                    else:
+                        count = await permission.batch_revoke(
+                            pool, targets, "group", group_id, "bot.group",
+                        )
+                        reply = f"已撤销 {count} 人当前群 bot.group 权限"
+                elif perm_name == "bot":
+                    count = await permission.batch_revoke(
+                        pool, targets, "global", 0, "bot",
+                    )
+                    reply = f"已撤销 {count} 人 bot 权限"
                 else:
                     count = await permission.batch_revoke(
                         pool, targets, scope_type, scope_id, perm_name,

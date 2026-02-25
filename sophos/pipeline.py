@@ -667,7 +667,7 @@ def _strip_at_prefix(ctx: PipelineContext) -> str:
 
 
 class CheckScopeStage(Stage):
-    """检查会话是否启用。禁用时仅放行有 cmd.bot 权限的 .bot 命令。"""
+    """检查会话是否启用。禁用时仅放行 .bot 命令（按权限）。"""
 
     @property
     def name(self) -> str:
@@ -680,33 +680,62 @@ class CheckScopeStage(Stage):
     async def execute(self, ctx: PipelineContext, next: NextFn) -> None:
         from sophos import permission as _perm
 
-        if _perm.is_master(ctx.user_id):
-            await next()
-            return
-
         scope_type = "group" if ctx.message_type == "group" else "private"
         scope_id: int = ctx.group_id if ctx.message_type == "group" else ctx.user_id  # type: ignore[assignment]
         pool = get_pool()
 
+        # 会话已启用 → 放行
         if await _perm.is_scope_enabled(pool, scope_type, scope_id):
             await next()
             return
 
-        # 会话禁用 — 仅放行 .bot 命令（有 cmd.bot 权限时）
+        # 会话禁用 — 仅放行 .bot 命令
         cmd_text = _strip_at_prefix(ctx)
-        if cmd_text.startswith(".bot"):
-            if await _perm.has_permission(pool, ctx.user_id, scope_type, scope_id, "cmd.bot"):
+        if not cmd_text.startswith(".bot"):
+            return  # 静默丢弃
+
+        parts = cmd_text.split()
+        sub = parts[1] if len(parts) > 1 else ""
+
+        # .bot（查看状态）和 .bot off — 无条件放行
+        if sub in ("", "off"):
+            ctx.state["_cmd_text"] = cmd_text
+            await next()
+            return
+
+        # .bot on — 需要权限
+        if sub == "on":
+            if _perm.is_master(ctx.user_id):
                 ctx.state["_cmd_text"] = cmd_text
                 await next()
                 return
-        # 静默丢弃
+            # bot 权限（全局开关权限）
+            if await _perm.has_permission(pool, ctx.user_id, "global", 0, "bot"):
+                ctx.state["_cmd_text"] = cmd_text
+                await next()
+                return
+            # 群聊：bot.group 权限
+            if scope_type == "group" and await _perm.has_permission(
+                pool, ctx.user_id, scope_type, scope_id, "bot.group",
+            ):
+                ctx.state["_cmd_text"] = cmd_text
+                await next()
+                return
+            # 私聊：bot.private 权限
+            if scope_type == "private" and await _perm.has_permission(
+                pool, ctx.user_id, "global", 0, "bot.private",
+            ):
+                ctx.state["_cmd_text"] = cmd_text
+                await next()
+                return
+        # 无权限 → 静默丢弃
 
 
 class HandleCommandStage(Stage):
     """处理 dot 命令（权限检查 + 分发）。"""
 
     _COMMAND_PERMS: dict[str, str] = {
-        ".bot": "cmd.bot", ".tools": "cmd.tools",
+        ".tools": "cmd.tools",
         ".llm": "cmd.llm", ".trigger": "cmd.trigger",
         ".memory": "cmd.memory", ".config": "cmd.config",
         ".prompt": "cmd.prompt", ".perm": "delegate",
@@ -736,6 +765,36 @@ class HandleCommandStage(Stage):
             await handle_help_command(
                 text, api=ctx.api, event=ctx.event, pool=pool,
                 user_id=ctx.user_id, scope_type=scope_type, scope_id=scope_id,
+            )
+            return
+
+        # .bot 命令 — 特殊权限逻辑
+        if text.startswith(".bot"):
+            parts = text.split()
+            sub = parts[1] if len(parts) > 1 else ""
+            # .bot（状态查看）和 .bot off — 无需权限
+            if sub in ("", "off"):
+                await self._dispatch(
+                    ".bot", text, ctx=ctx, pool=pool,
+                    scope_type=scope_type, scope_id=scope_id,
+                )
+                return
+            # .bot on — 需要 bot / bot.group / bot.private 权限
+            if sub == "on":
+                can = (
+                    _perm.is_master(ctx.user_id)
+                    or await _perm.has_permission(pool, ctx.user_id, "global", 0, "bot")
+                    or (scope_type == "group" and await _perm.has_permission(
+                        pool, ctx.user_id, scope_type, scope_id, "bot.group"))
+                    or (scope_type == "private" and await _perm.has_permission(
+                        pool, ctx.user_id, "global", 0, "bot.private"))
+                )
+                if not can:
+                    await self._send_text(ctx, "权限不足")
+                    return
+            await self._dispatch(
+                ".bot", text, ctx=ctx, pool=pool,
+                scope_type=scope_type, scope_id=scope_id,
             )
             return
 
