@@ -8,13 +8,15 @@ import {
   NTooltip,
 } from 'naive-ui'
 import { ref, computed } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRouter, useRoute } from 'vue-router'
 import { useTheme } from '@/composables/useTheme'
 
 const router = useRouter()
+const route = useRoute()
 const { mode, toggleMode } = useTheme()
 
 const collapsed = ref(false)
+const activeMenu = computed(() => (route.name as string) ?? 'dashboard')
 
 const modeLabel = computed(() => {
   const labels: Record<string, string> = {
@@ -34,7 +36,10 @@ const modeIcon = computed(() => {
   return icons[mode.value] ?? '◐'
 })
 
-const menuOptions = [{ label: '仪表盘', key: 'dashboard' }]
+const menuOptions = [
+  { label: '仪表盘', key: 'dashboard' },
+  { label: '日志', key: 'logs' },
+]
 
 function handleMenuUpdate(key: string) {
   router.push({ name: key })
@@ -62,7 +67,7 @@ function handleMenuUpdate(key: string) {
         :collapsed="collapsed"
         :collapsed-width="64"
         :options="menuOptions"
-        default-value="dashboard"
+        :value="activeMenu"
         @update:value="handleMenuUpdate"
       />
       <div class="sider-footer">
@@ -85,6 +90,7 @@ function handleMenuUpdate(key: string) {
 <style scoped>
 .layout-root {
   height: 100vh;
+  background: transparent !important;
 }
 
 .glass-sider {
