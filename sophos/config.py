@@ -141,6 +141,12 @@ class Settings(BaseSettings):
     # imagehash average_hash 的 hash_size 参数
     vision_hash_size: int = 15
 
+    # ── 日志 ──────────────────────────────────────────────
+    # 日志文件最大字节数（超过后轮转），默认 20MB
+    log_max_bytes: int = 20 * 1024 * 1024
+    # 保留的轮转备份文件数
+    log_backup_count: int = 3
+
 
 # 全局单例，import 后直接使用
 settings = Settings()

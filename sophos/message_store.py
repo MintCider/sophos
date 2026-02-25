@@ -274,6 +274,15 @@ class MessageStore:
         )
         return [dict(r) for r in rows]
 
+    async def touch_accessed(self, ids: list[int]) -> None:
+        """批量更新消息的 last_accessed 时间戳。"""
+        if not ids:
+            return
+        await self._pool.execute(
+            "UPDATE messages SET last_accessed = now() WHERE id = ANY($1)",
+            ids,
+        )
+
     # ── 跨 context 背景查询 ───────────────────────────────
 
     async def get_cross_context_background(

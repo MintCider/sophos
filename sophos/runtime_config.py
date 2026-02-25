@@ -47,6 +47,10 @@ _DEFAULTS: dict[str, Any] = {
     "tavily_api_key": "",
     "tavily_max_results": 5,
     "tavily_include_answer": True,
+    # 数据清理
+    "cleanup_messages_max_bytes": 2 * 1024 * 1024 * 1024,  # 2GB
+    "cleanup_memories_max_bytes": 2 * 1024 * 1024 * 1024,  # 2GB
+    "cleanup_interval_seconds": 3600,  # 1 小时
 }
 
 _cache: dict[str, Any] = {}

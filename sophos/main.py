@@ -3,11 +3,13 @@
 import asyncio
 import json
 import logging
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
 import aiohttp
 
+from sophos.cleanup import run_cleanup_loop
 from sophos.config import settings
 from sophos.db import close_db, init_db
 from sophos.llm.provider_manager import ProviderManager
@@ -102,9 +104,13 @@ async def start() -> None:
     # 初始化记忆存储
     memory_store = MemoryStore(pool, provider_mgr.get_embedding_provider())
 
+    # 启动后台数据清理任务
+    cleanup_task = asyncio.create_task(run_cleanup_loop(pool))
+
     try:
         await ws_loop(store, provider_mgr, memory_store=memory_store)
     finally:
+        cleanup_task.cancel()
         await provider_mgr.close()
         await close_db()
 
@@ -132,7 +138,10 @@ def main() -> None:
     # 文件 handler
     log_dir = Path("logs")
     log_dir.mkdir(exist_ok=True)
-    file_handler = logging.FileHandler(log_dir / "sophos.log", encoding="utf-8")
+    file_handler = RotatingFileHandler(
+        log_dir / "sophos.log", maxBytes=settings.log_max_bytes,
+        backupCount=settings.log_backup_count, encoding="utf-8",
+    )
     file_handler.setLevel(TRACE)
     file_handler.setFormatter(logging.Formatter(log_fmt))
     root_logger.addHandler(file_handler)

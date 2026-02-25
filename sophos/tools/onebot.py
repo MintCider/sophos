@@ -396,6 +396,11 @@ class QueryMessagesTool(Tool):
         if not rows:
             return {"messages": "(无记录)", "count": 0}
 
+        # 更新 LRU access time
+        ids = [row["id"] for row in rows if "id" in row]
+        if ids:
+            await store.touch_accessed(ids)
+
         # 用与上下文相同的 schema 格式化
         bot_name = settings.bot_nickname or "Sophos"
         lines: list[str] = []
