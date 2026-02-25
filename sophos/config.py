@@ -147,6 +147,10 @@ class Settings(BaseSettings):
     # 保留的轮转备份文件数
     log_backup_count: int = 3
 
+    # ── WebUI API ──────────────────────────────────────────
+    api_host: str = "0.0.0.0"
+    api_port: int = 8080
+
 
 # 全局单例，import 后直接使用
 settings = Settings()

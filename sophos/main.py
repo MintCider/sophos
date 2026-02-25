@@ -8,7 +8,9 @@ from pathlib import Path
 from typing import Any
 
 import aiohttp
+from aiohttp import web
 
+from sophos.api import create_app
 from sophos.cleanup import run_cleanup_loop
 from sophos.config import settings
 from sophos.db import close_db, init_db
@@ -104,6 +106,14 @@ async def start() -> None:
     # 初始化记忆存储
     memory_store = MemoryStore(pool, provider_mgr.get_embedding_provider())
 
+    # 启动 HTTP API server（非阻塞）
+    app = await create_app(pool=pool, provider_mgr=provider_mgr, memory_store=memory_store)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, settings.api_host, settings.api_port)
+    await site.start()
+    logger.info("API server listening on %s:%d", settings.api_host, settings.api_port)
+
     # 启动后台数据清理任务
     cleanup_task = asyncio.create_task(run_cleanup_loop(pool))
 
@@ -111,6 +121,7 @@ async def start() -> None:
         await ws_loop(store, provider_mgr, memory_store=memory_store)
     finally:
         cleanup_task.cancel()
+        await runner.cleanup()
         await provider_mgr.close()
         await close_db()
 

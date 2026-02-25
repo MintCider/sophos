@@ -9,7 +9,8 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
-    "aiohttp>=3.9",            # WebSocket 客户端，连接 NapCat OneBot WS
+    "aiohttp>=3.9",            # WebSocket 客户端 + HTTP server
+    "aiohttp-cors>=0.7",       # CORS 支持（WebUI 开发阶段跨域）
     "asyncpg>=0.30",           # 异步 PostgreSQL 驱动
     "pydantic-settings>=2.7",  # 从 .env 加载类型安全的配置
     "imagehash>=4.3",          # 感知哈希（含 Pillow）
