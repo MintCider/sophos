@@ -1,0 +1,25 @@
+{
+  "name": "@sophos/web",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc -b && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "vue": "^3.5",
+    "vue-router": "^4.5",
+    "pinia": "^3.0",
+    "naive-ui": "^2.41",
+    "@vueuse/core": "^13.0",
+    "axios": "^1.7"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2",
+    "typescript": "~5.7",
+    "vite": "^6.2",
+    "vue-tsc": "^2.2"
+  }
+}

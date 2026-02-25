@@ -43,3 +43,8 @@ docker-compose.override.yml
 htmlcov/
 .pytest_cache/
 .mypy_cache/
+
+# Frontend
+node_modules/
+web/dist/
+pnpm-lock.yaml
