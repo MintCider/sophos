@@ -85,6 +85,19 @@ function parseLines(rawLines: string[]): LogLine[] {
   return result
 }
 
+/** 过滤谓词：等级 + 搜索词 */
+function matchesFilter(line: LogLine, minPriority: number, query: string): boolean {
+  if (line.level) {
+    const p = LEVEL_PRIORITY[line.level] ?? 20
+    if (p < minPriority) return false
+  }
+  if (query) {
+    const text = line.raw + line.continuation.join('\n')
+    if (!text.toLowerCase().includes(query)) return false
+  }
+  return true
+}
+
 // ── Composable ────────────────────────────────────────
 
 export function useLogs() {
@@ -133,23 +146,17 @@ export function useLogs() {
   const filteredLines = computed(() => {
     const minPriority = LEVEL_PRIORITY[minLevel.value] ?? 20
     const query = searchQuery.value.toLowerCase()
-
-    return lines.value.filter((line) => {
-      // 等级过滤：有等级的行按优先级过滤，续行（无等级）跟随上一条
-      if (line.level) {
-        const p = LEVEL_PRIORITY[line.level] ?? 20
-        if (p < minPriority) return false
-      }
-      // 搜索过滤
-      if (query) {
-        const text = line.raw + line.continuation.join('\n')
-        if (!text.toLowerCase().includes(query)) return false
-      }
-      return true
-    })
+    return lines.value.filter((l) => matchesFilter(l, minPriority, query))
   })
 
   const bufferedCount = computed(() => buffer.value.length)
+
+  /** buffer 中匹配当前过滤条件的条目数 */
+  const filteredBufferedCount = computed(() => {
+    const minPriority = LEVEL_PRIORITY[minLevel.value] ?? 20
+    const query = searchQuery.value.toLowerCase()
+    return buffer.value.filter((l) => matchesFilter(l, minPriority, query)).length
+  })
 
   /** 加载初始日志 */
   async function loadInitial() {
@@ -209,6 +216,7 @@ export function useLogs() {
     filteredLines,
     buffer,
     bufferedCount,
+    filteredBufferedCount,
     isFollowing,
     selectedFile,
     minLevel,

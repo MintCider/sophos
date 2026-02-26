@@ -14,6 +14,7 @@ const { isDark } = useTheme()
 const {
   filteredLines,
   bufferedCount,
+  filteredBufferedCount,
   isFollowing,
   selectedFile,
   minLevel,
@@ -279,11 +280,11 @@ onUnmounted(() => {
     <!-- 浮动提示：有新日志 -->
     <Transition name="fade">
       <div
-        v-if="bufferedCount > 0 && !isFollowing"
+        v-if="filteredBufferedCount > 0 && !isFollowing"
         class="logs-new-indicator"
         @click="handleResumeClick"
       >
-        {{ bufferedCount }} 条新日志 ▼
+        {{ filteredBufferedCount }} 条新日志 ▼
       </div>
     </Transition>
   </div>
