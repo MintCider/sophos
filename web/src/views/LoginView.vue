@@ -4,6 +4,7 @@ import { ref, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuth } from '@/composables/useAuth'
 import { useTheme } from '@/composables/useTheme'
+import SophosLogo from '@/components/SophosLogo.vue'
 
 const router = useRouter()
 const { login } = useAuth()
@@ -35,8 +36,8 @@ async function handleLogin() {
 <template>
   <div class="login-page">
     <div class="login-card glass-panel">
-      <h1 class="login-title">Sophos</h1>
-      <form class="login-form" @submit.prevent="handleLogin">
+      <SophosLogo variant="vertical" size="lg" />
+      <form class="login-form" style="margin-top: 28px" @submit.prevent="handleLogin">
         <NInput
           v-model:value="password"
           type="password"
@@ -78,14 +79,6 @@ async function handleLogin() {
   width: 100%;
   max-width: 360px;
   padding: 40px 32px;
-}
-
-.login-title {
-  text-align: center;
-  font-size: 1.5rem;
-  font-weight: 700;
-  letter-spacing: 0.05em;
-  margin: 0 0 32px;
 }
 
 .login-form {

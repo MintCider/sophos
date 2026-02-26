@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@chinese-fonts/maple-mono-cn": "^2.0.0",
+    "@fontsource/allura": "^5.2.8",
     "@fontsource/inter": "^5.2.8",
     "@vueuse/core": "^13.0",
     "axios": "^1.7",

@@ -11,6 +11,7 @@ import { ref, computed } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useTheme } from '@/composables/useTheme'
 import { useAuth } from '@/composables/useAuth'
+import SophosLogo from '@/components/SophosLogo.vue'
 
 const router = useRouter()
 const route = useRoute()
@@ -62,8 +63,8 @@ function handleMenuUpdate(key: string) {
       @expand="collapsed = false"
     >
       <div class="sider-header">
-        <span v-show="!collapsed" class="logo-text">Sophos</span>
-        <span v-show="collapsed" class="logo-text">S</span>
+        <SophosLogo v-if="!collapsed" variant="horizontal" size="sm" />
+        <SophosLogo v-else variant="icon" size="sm" />
       </div>
       <NMenu
         :collapsed="collapsed"
@@ -109,17 +110,11 @@ function handleMenuUpdate(key: string) {
 }
 
 .sider-header {
-  height: 56px;
+  height: 72px;
   display: flex;
   align-items: center;
   justify-content: center;
   border-bottom: 1px solid var(--glass-border);
-}
-
-.logo-text {
-  font-size: 1.25rem;
-  font-weight: 700;
-  letter-spacing: 0.05em;
 }
 
 .sider-footer {

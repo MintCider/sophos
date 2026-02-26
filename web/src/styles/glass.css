@@ -10,10 +10,16 @@
 
   /* Mono font stack */
   --font-mono: 'Maple Mono CN', 'Menlo', 'Monaco', 'Consolas', monospace;
+
+  /* Brand gradient (derived from primary #513fe0) */
+  --brand-gradient-start: #513fe0;
+  --brand-gradient-end: #a78bfa;
 }
 
 html.dark {
   color-scheme: dark;
+  --brand-gradient-start: #7c6bf0;
+  --brand-gradient-end: #c4b5fd;
   --glass-bg: rgba(20, 20, 35, 0.55);
   --glass-bg-heavy: rgba(20, 20, 35, 0.82);
   --glass-border: rgba(80, 80, 120, 0.25);
