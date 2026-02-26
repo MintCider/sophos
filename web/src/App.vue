@@ -7,7 +7,6 @@ import {
 } from 'naive-ui'
 import { computed, watchEffect } from 'vue'
 import { useTheme } from '@/composables/useTheme'
-import DefaultLayout from '@/layouts/DefaultLayout.vue'
 
 const { isDark } = useTheme()
 
@@ -65,7 +64,7 @@ const themeOverrides = computed<GlobalThemeOverrides>(() => ({
 <template>
   <NConfigProvider :theme="theme" :theme-overrides="themeOverrides">
     <NMessageProvider>
-      <DefaultLayout />
+      <RouterView />
     </NMessageProvider>
   </NConfigProvider>
 </template>

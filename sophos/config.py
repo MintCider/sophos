@@ -150,6 +150,8 @@ class Settings(BaseSettings):
     # ── WebUI API ──────────────────────────────────────────
     api_host: str = "0.0.0.0"
     api_port: int = 8080
+    # WebUI 登录密码（空 = 无需登录）
+    webui_password: str = ""
 
 
 # 全局单例，import 后直接使用

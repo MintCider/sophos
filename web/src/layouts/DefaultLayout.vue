@@ -10,10 +10,12 @@ import {
 import { ref, computed } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useTheme } from '@/composables/useTheme'
+import { useAuth } from '@/composables/useAuth'
 
 const router = useRouter()
 const route = useRoute()
 const { mode, toggleMode } = useTheme()
+const { authRequired, logout } = useAuth()
 
 const collapsed = ref(false)
 const activeMenu = computed(() => (route.name as string) ?? 'dashboard')
@@ -71,6 +73,14 @@ function handleMenuUpdate(key: string) {
         @update:value="handleMenuUpdate"
       />
       <div class="sider-footer">
+        <NTooltip v-if="authRequired" placement="right">
+          <template #trigger>
+            <NButton quaternary circle @click="logout">
+              ⏻
+            </NButton>
+          </template>
+          退出登录
+        </NTooltip>
         <NTooltip placement="right">
           <template #trigger>
             <NButton quaternary circle @click="toggleMode">
@@ -118,6 +128,7 @@ function handleMenuUpdate(key: string) {
   width: 100%;
   display: flex;
   justify-content: center;
+  gap: 4px;
 }
 
 .main-content {
