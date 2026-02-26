@@ -220,16 +220,17 @@ onUnmounted(() => {
     </div>
 
     <!-- 日志区域 -->
-    <div class="logs-container glass-panel-heavy" ref="logContainer" @scroll="onScroll">
-      <div v-if="loading" class="logs-loading">加载中...</div>
-      <div v-else-if="filteredLines.length === 0" class="logs-empty">
-        暂无日志
-      </div>
-      <template v-else>
-        <div
-          v-for="line in filteredLines"
-          :key="line.id"
-          :class="['log-line', `log-line--${line.level.toLowerCase() || 'unknown'}`]"
+    <div class="logs-container glass-panel-heavy">
+      <div class="logs-scroll" ref="logContainer" @scroll="onScroll">
+        <div v-if="loading" class="logs-loading">加载中...</div>
+        <div v-else-if="filteredLines.length === 0" class="logs-empty">
+          暂无日志
+        </div>
+        <template v-else>
+          <div
+            v-for="line in filteredLines"
+            :key="line.id"
+            :class="['log-line', `log-line--${line.level.toLowerCase() || 'unknown'}`]"
         >
           <!-- 折叠指示器（绝对定位在左 margin 区域） -->
           <span
@@ -272,6 +273,7 @@ onUnmounted(() => {
           >··· 收起 ···</span>
         </div>
       </template>
+      </div>
     </div>
 
     <!-- 浮动提示：有新日志 -->
@@ -310,26 +312,19 @@ onUnmounted(() => {
 
 .logs-container {
   flex: 1;
-  overflow-y: auto;
-  padding: 0 16px;
+  overflow: hidden;
+  padding: 12px 16px;
   font-family: var(--font-mono);
   font-size: 13px;
   line-height: 1.6;
 }
 
-/* Sticky top/bottom inset so colored rows never touch container edges */
-.logs-container::before,
-.logs-container::after {
-  content: '';
-  display: block;
-  height: 12px;
-  position: sticky;
-  z-index: 1;
-  pointer-events: none;
+.logs-scroll {
+  height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+  border-radius: 8px;
 }
-
-.logs-container::before { top: 0; }
-.logs-container::after  { bottom: 0; }
 
 .logs-loading,
 .logs-empty {

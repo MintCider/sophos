@@ -51,6 +51,13 @@ const themeOverrides = computed<GlobalThemeOverrides>(() => ({
     infoColorSuppl: '#6cdbfe',
     fontFamily: "'Inter', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans SC', sans-serif",
   },
+  Button: {
+    textColorPrimary: '#fff',
+    textColorHoverPrimary: '#fff',
+    textColorPressedPrimary: '#fff',
+    textColorFocusPrimary: '#fff',
+    textColorDisabledPrimary: 'rgba(255, 255, 255, 0.5)',
+  },
   Card: {
     borderRadius: '12px',
   },

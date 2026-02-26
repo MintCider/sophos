@@ -170,8 +170,8 @@ export function useLogs() {
   function resumeFollowing() {
     lines.value.push(...buffer.value)
     buffer.value = []
-    if (lines.value.length > MAX_LINES) {
-      lines.value.splice(0, lines.value.length - MAX_LINES)
+    if (lines.value.length > MAX_ENTRIES) {
+      lines.value.splice(0, lines.value.length - MAX_ENTRIES)
     }
     isFollowing.value = true
   }

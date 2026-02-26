@@ -13,6 +13,7 @@
 }
 
 html.dark {
+  color-scheme: dark;
   --glass-bg: rgba(20, 20, 35, 0.55);
   --glass-bg-heavy: rgba(20, 20, 35, 0.82);
   --glass-border: rgba(80, 80, 120, 0.25);
@@ -35,6 +36,13 @@ body,
   font-family: 'Inter', 'PingFang SC', 'Microsoft YaHei',
     'Noto Sans SC', sans-serif;
   -webkit-font-smoothing: antialiased;
+  color: #1a1a2e;
+}
+
+html.dark,
+html.dark body,
+html.dark #app {
+  color: rgba(255, 255, 255, 0.85);
 }
 
 /* ── Mesh Gradient Background ────────────────────────── */
