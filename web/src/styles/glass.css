@@ -128,3 +128,26 @@ html.dark #app::after {
 .n-base-select-menu {
   border-radius: 8px !important;
 }
+
+/* ── NDrawer 移动端：顶栏下方展开 ────────────────────── */
+
+.n-drawer-container {
+  top: 48px !important;
+  height: calc(100% - 48px) !important;
+}
+
+.n-drawer-mask {
+  display: none !important;
+}
+
+.n-drawer {
+  background: var(--glass-bg) !important;
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+}
+
+.n-drawer .n-drawer-content-wrapper,
+.n-drawer .n-drawer-content,
+.n-drawer .n-drawer-body-content-wrapper {
+  background: transparent !important;
+}

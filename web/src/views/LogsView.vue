@@ -294,7 +294,7 @@ onUnmounted(() => {
 .logs-page {
   display: flex;
   flex-direction: column;
-  height: calc(100vh - 48px);
+  height: calc(100vh - 48px - 48px);
   position: relative;
 }
 
@@ -482,5 +482,11 @@ onUnmounted(() => {
 .fade-enter-from,
 .fade-leave-to {
   opacity: 0;
+}
+
+@media (max-width: 767px) {
+  .logs-page {
+    height: calc(100vh - 48px - 32px);
+  }
 }
 </style>

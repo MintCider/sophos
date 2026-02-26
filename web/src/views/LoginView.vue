@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { NInput, NButton } from 'naive-ui'
+import { NInput, NButton, NIcon } from 'naive-ui'
 import { ref, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuth } from '@/composables/useAuth'
 import { useTheme } from '@/composables/useTheme'
 import SophosLogo from '@/components/SophosLogo.vue'
+import { Sun, Moon, SunMoon } from 'lucide-vue-next'
 
 const router = useRouter()
 const { login } = useAuth()
@@ -14,9 +15,9 @@ const password = ref('')
 const error = ref('')
 const loading = ref(false)
 
-const modeIcon = computed(() => {
-  const icons: Record<string, string> = { auto: '◐', light: '☀', dark: '☾' }
-  return icons[mode.value] ?? '◐'
+const themeIcon = computed(() => {
+  const icons: Record<string, typeof SunMoon> = { auto: SunMoon, light: Sun, dark: Moon }
+  return icons[mode.value] ?? SunMoon
 })
 
 async function handleLogin() {
@@ -61,7 +62,7 @@ async function handleLogin() {
       </form>
     </div>
     <button class="theme-toggle" @click="toggleMode">
-      {{ modeIcon }}
+      <NIcon size="18"><component :is="themeIcon" /></NIcon>
     </button>
   </div>
 </template>
