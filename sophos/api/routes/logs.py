@@ -74,6 +74,7 @@ async def stream_logs(request: web.Request) -> web.StreamResponse:
             heartbeat_interval = 5.0  # 每 5 秒发送心跳
             poll_interval = 0.3
             elapsed = 0.0
+            skip_entry = False  # 当前多行条目是否被等级过滤
             while True:
                 line = f.readline()
                 if not line:
@@ -91,10 +92,15 @@ async def stream_logs(request: web.Request) -> web.StreamResponse:
                     continue
 
                 level = _parse_level(line)
-                # 续行（无等级前缀）始终推送
                 if level is not None:
+                    # 新条目：检查等级过滤
                     priority = _LEVEL_PRIORITY.get(level, 20)
-                    if priority < min_priority:
+                    skip_entry = priority < min_priority
+                    if skip_entry:
+                        continue
+                else:
+                    # 续行：跟随上一条目的过滤结果
+                    if skip_entry:
                         continue
 
                 payload = json.dumps(
