@@ -311,11 +311,25 @@ onUnmounted(() => {
 .logs-container {
   flex: 1;
   overflow-y: auto;
-  padding: 12px 16px;
+  padding: 0 16px;
   font-family: var(--font-mono);
   font-size: 13px;
   line-height: 1.6;
 }
+
+/* Sticky top/bottom inset so colored rows never touch container edges */
+.logs-container::before,
+.logs-container::after {
+  content: '';
+  display: block;
+  height: 12px;
+  position: sticky;
+  z-index: 1;
+  pointer-events: none;
+}
+
+.logs-container::before { top: 0; }
+.logs-container::after  { bottom: 0; }
 
 .logs-loading,
 .logs-empty {
@@ -455,8 +469,8 @@ onUnmounted(() => {
   background: var(--glass-bg-heavy);
   backdrop-filter: blur(var(--glass-blur));
   -webkit-backdrop-filter: blur(var(--glass-blur));
-  border: 1px solid var(--glass-border);
-  box-shadow: var(--glass-shadow);
+  border: 1.5px solid var(--primary-color, #513fe0);
+  box-shadow: 0 0 0 3px rgba(81, 63, 224, 0.15), var(--glass-shadow);
   transition: opacity 0.2s;
 }
 
