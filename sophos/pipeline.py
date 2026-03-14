@@ -26,7 +26,7 @@ from sophos.commands import (
 )
 from sophos.config import settings
 from sophos.db import get_pool
-from sophos.llm.context import build_chat_context, describe_schema, format_timestamp, get_display_name
+from sophos.llm.context import build_chat_context, describe_schema, format_new_messages, format_timestamp, get_display_name
 from sophos.llm.provider_manager import ProviderManager
 from sophos.llm.tool_loop import run_tool_loop
 from sophos.memory.association import auto_retrieve, format_association_block
@@ -474,6 +474,24 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
         system_prompt=system_prompt,
     )
 
+    # ── 上下文刷新闭包（tool loop 间隙注入新消息）──
+    _cursor_id = await ctx.store.get_max_id(
+        group_id=ctx.group_id,
+        user_id=ctx.user_id if ctx.message_type == "private" else None,
+    )
+
+    async def _refresh_context() -> str | None:
+        nonlocal _cursor_id
+        new_rows = await ctx.store.get_messages_after(
+            group_id=ctx.group_id,
+            user_id=ctx.user_id if ctx.message_type == "private" else None,
+            after_id=_cursor_id,
+        )
+        if not new_rows:
+            return None
+        _cursor_id = max(r["id"] for r in new_rows)
+        return format_new_messages(new_rows, self_user_id=ctx.self_id)
+
     tool_context: dict[str, Any] = {
         "api": ctx.api,
         "store": ctx.store,
@@ -525,6 +543,7 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
             tools=tool_schemas,
             tool_executor=tool_executor,
             max_rounds=runtime_config.get("llm_max_tool_rounds"),
+            context_refresher=_refresh_context,
         )
     except Exception:
         logger.exception("LLM tool loop failed")

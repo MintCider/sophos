@@ -424,6 +424,63 @@ class MessageStore:
         # 截断到 limit
         return rows[-limit:] if len(rows) > limit else rows
 
+    # ── 游标查询（tool loop 上下文刷新用）─────────────────
+
+    async def get_max_id(
+        self,
+        *,
+        group_id: int | None = None,
+        user_id: int | None = None,
+    ) -> int:
+        """当前会话最大 DB id，用作游标起点。无消息时返回 0。"""
+        if group_id is not None:
+            val = await self._pool.fetchval(
+                "SELECT COALESCE(MAX(id), 0) FROM messages WHERE group_id = $1",
+                group_id,
+            )
+        elif user_id is not None:
+            val = await self._pool.fetchval(
+                "SELECT COALESCE(MAX(id), 0) FROM messages WHERE user_id = $1 AND group_id IS NULL",
+                user_id,
+            )
+        else:
+            raise ValueError("Must provide either group_id or user_id")
+        return int(val)
+
+    async def get_messages_after(
+        self,
+        *,
+        group_id: int | None = None,
+        user_id: int | None = None,
+        after_id: int,
+        include_co_account: bool = True,
+    ) -> list[dict[str, Any]]:
+        """获取 id > after_id 的新消息，按 id ASC 排序。"""
+        source_filter = "" if include_co_account else "AND source != 'co_account'"
+
+        if group_id is not None:
+            rows = await self._pool.fetch(
+                f"""
+                SELECT * FROM messages
+                WHERE group_id = $1 AND id > $2 {source_filter}
+                ORDER BY id ASC
+                """,
+                group_id, after_id,
+            )
+        elif user_id is not None:
+            rows = await self._pool.fetch(
+                f"""
+                SELECT * FROM messages
+                WHERE user_id = $1 AND group_id IS NULL AND id > $2 {source_filter}
+                ORDER BY id ASC
+                """,
+                user_id, after_id,
+            )
+        else:
+            raise ValueError("Must provide either group_id or user_id")
+
+        return [dict(row) for row in rows]
+
     # ── 内部工具 ──────────────────────────────────────────
 
     @staticmethod

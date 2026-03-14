@@ -112,12 +112,18 @@ class TriggerEngine:
     def __init__(self) -> None:
         self._states: dict[ContextKey, ContextState] = {}
         self._buckets: dict[ContextKey, TokenBucket] = {}
+        self._locks: dict[ContextKey, asyncio.Lock] = {}
         self._global_qps_last: float = 0.0
 
     def _get_state(self, key: ContextKey) -> ContextState:
         if key not in self._states:
             self._states[key] = ContextState()
         return self._states[key]
+
+    def _get_lock(self, key: ContextKey) -> asyncio.Lock:
+        if key not in self._locks:
+            self._locks[key] = asyncio.Lock()
+        return self._locks[key]
 
     def _get_bucket(self, key: ContextKey) -> TokenBucket:
         if key not in self._buckets:
@@ -175,8 +181,13 @@ class TriggerEngine:
             return
 
         logger.debug("Delayed trigger firing for %s after %.1fs", key, delay)
-        from sophos.pipeline import _handle_llm_trigger
-        await _handle_llm_trigger(ctx)
+        lock = self._get_lock(key)
+        if lock.locked():
+            logger.debug("Session lock held for %s, dropping delayed trigger", key)
+            return
+        async with lock:
+            from sophos.pipeline import _handle_llm_trigger
+            await _handle_llm_trigger(ctx)
 
     # ── LLM 触发器 ────────────────────────────────────────────
 
@@ -233,8 +244,14 @@ class TriggerEngine:
                         return
                     logger.debug("LLM trigger firing main LLM for %s", key)
                     cs.state = TriggerState.RESPONDING
-                    from sophos.pipeline import _handle_llm_trigger
-                    await _handle_llm_trigger(ctx)
+                    lock = self._get_lock(key)
+                    if lock.locked():
+                        logger.debug("Session lock held for %s, dropping LLM trigger", key)
+                        cs.state = TriggerState.IDLE
+                        return
+                    async with lock:
+                        from sophos.pipeline import _handle_llm_trigger
+                        await _handle_llm_trigger(ctx)
                     cs.state = TriggerState.IDLE
                     return
 
@@ -255,8 +272,14 @@ class TriggerEngine:
                         cs.state = TriggerState.IDLE
                         return
                     cs.state = TriggerState.RESPONDING
-                    from sophos.pipeline import _handle_llm_trigger
-                    await _handle_llm_trigger(ctx)
+                    lock = self._get_lock(key)
+                    if lock.locked():
+                        logger.debug("Session lock held for %s, dropping timeout trigger", key)
+                        cs.state = TriggerState.IDLE
+                        return
+                    async with lock:
+                        from sophos.pipeline import _handle_llm_trigger
+                        await _handle_llm_trigger(ctx)
                     cs.state = TriggerState.IDLE
                     return
 

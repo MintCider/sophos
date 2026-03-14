@@ -274,3 +274,47 @@ def _maybe_append_inline_bg(content: str, row: dict[str, Any]) -> str:
         f"[背景] 来自{type_label} {source_id}（{ts}）：{summary}"
     )
 
+
+# ── Tool loop 上下文刷新 ─────────────────────────────────
+
+
+def format_new_messages(
+    rows: list[dict[str, Any]],
+    *,
+    self_user_id: int | None = None,
+) -> str | None:
+    """将新到达的消息格式化为注入文本。无新消息返回 None。
+
+    - 他人消息：用 llm_user_schema
+    - 自己的消息（source='sophos'）：用 llm_bot_schema，让模型认出自己已发的内容
+    """
+    if not rows:
+        return None
+
+    bot_name = settings.bot_nickname or "Sophos"
+    lines: list[str] = []
+
+    for row in rows:
+        ts = format_timestamp(row)
+        if row.get("source") == "sophos":
+            line = apply_schema(
+                runtime_config.get("llm_bot_schema"),
+                time=ts,
+                mid=str(row.get("message_id", "")),
+                name=bot_name,
+                uid=str(row.get("user_id", "")),
+                message=row.get("plain_text", ""),
+            )
+        else:
+            line = apply_schema(
+                runtime_config.get("llm_user_schema"),
+                time=ts,
+                mid=str(row.get("message_id", "")),
+                name=get_display_name(row),
+                uid=str(row.get("user_id", "")),
+                message=row.get("plain_text", ""),
+            )
+        lines.append(line)
+
+    return "[新消息 - 以下是你处理期间新到达的消息]\n" + "\n".join(lines)
+

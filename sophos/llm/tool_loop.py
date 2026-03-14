@@ -31,6 +31,7 @@ async def run_tool_loop(
     max_rounds: int = 10,
     temperature: float | None = None,
     max_tokens: int | None = None,
+    context_refresher: Callable[[], Awaitable[str | None]] | None = None,
 ) -> list[Message]:
     """运行 tool calling 循环。
 
@@ -42,6 +43,8 @@ async def run_tool_loop(
         max_rounds:     最大循环轮次，防止无限循环
         temperature:    覆盖 provider 默认温度
         max_tokens:     覆盖 provider 默认 max_tokens
+        context_refresher: 可选回调，每轮 tool call 执行完毕后调用，
+                        返回新上下文文本则追加为 user message，None 则跳过
 
     Returns:
         完整的 messages 列表，包含所有轮次的 assistant 和 tool 消息。
@@ -148,6 +151,16 @@ async def run_tool_loop(
                 "content": result_str,
             }
             messages.append(tool_msg)
+
+        # 注入 tool loop 期间新到达的消息（上下文刷新）
+        if context_refresher is not None:
+            try:
+                new_context = await context_refresher()
+                if new_context:
+                    messages.append({"role": "user", "content": new_context})
+                    logger.debug("Injected %d chars of new context", len(new_context))
+            except Exception:
+                logger.warning("Context refresher failed", exc_info=True)
 
     # 达到最大轮次，做最后一次不带 tools 的调用让模型总结
     logger.warning("Tool loop hit max rounds (%d), forcing final response", max_rounds)
