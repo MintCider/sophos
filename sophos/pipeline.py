@@ -9,11 +9,12 @@ import logging
 import random
 import re
 from abc import ABC, abstractmethod
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import aiohttp
 import asyncpg
@@ -215,7 +216,7 @@ async def _process_event_images(
         message_id = ctx.event.get("message_id")
         if message_id is not None:
             await ctx.store.update_image_extra(message_id, image_infos)
-            logger.info(
+            logger.debug(
                 "Stored %d image description(s) for message_id=%s",
                 len(image_infos), message_id,
             )
@@ -347,7 +348,7 @@ def _sanitize_fallback_reply(text: str) -> str | None:
                 try:
                     data = json.loads(json_m.group())
                     if isinstance(data, dict) and isinstance(data.get("text"), str):
-                        logger.info("Extracted reply text from raw send_msg call")
+                        logger.debug("Extracted reply text from raw send_msg call")
                         return data["text"]
                 except (json.JSONDecodeError, TypeError):
                     pass
@@ -359,7 +360,7 @@ def _sanitize_fallback_reply(text: str) -> str | None:
         try:
             data = json.loads(stripped)
             if isinstance(data, dict) and isinstance(data.get("text"), str):
-                logger.info("Extracted reply text from JSON fallback content")
+                logger.debug("Extracted reply text from JSON fallback content")
                 return data["text"]
         except (json.JSONDecodeError, TypeError):
             pass
@@ -376,9 +377,9 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
 
     nickname = settings.bot_nickname or "Sophos"
     fmt_desc = describe_schema(runtime_config.get("llm_user_schema"))
-    tz = timezone(timedelta(hours=settings.timezone_offset))
+    tz = ZoneInfo(settings.timezone)
     now_str = datetime.now(tz).strftime("%Y-%m-%d %H:%M")
-    tz_label = f"UTC+{settings.timezone_offset}" if settings.timezone_offset >= 0 else f"UTC{settings.timezone_offset}"
+    tz_label = settings.timezone
     if ctx.message_type == "group":
         meta = (
             f"\n---\n"
@@ -553,7 +554,7 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
 
         result = await ctx.api.call("send_msg", send_params)
         sent_message_id = result.get("message_id")
-        logger.info("Fallback reply sent (message_id=%s)", sent_message_id)
+        logger.debug("Fallback reply sent (message_id=%s)", sent_message_id)
 
         if sent_message_id is not None:
             await ctx.store.save_self_message(
@@ -880,7 +881,7 @@ class HandleCommandStage(Stage):
 
         result = await ctx.api.call("send_msg", params)
         sent_message_id = result.get("message_id")
-        logger.info("Replied pong (message_id=%s) to %s", sent_message_id, ctx.user_id)
+        logger.debug("Replied pong (message_id=%s) to %s", sent_message_id, ctx.user_id)
 
         if sent_message_id is not None:
             await ctx.store.save_self_message(

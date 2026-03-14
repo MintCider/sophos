@@ -11,6 +11,7 @@
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from sophos.config import settings
 from sophos.llm.context import apply_schema, format_timestamp, get_display_name
@@ -372,7 +373,7 @@ class QueryMessagesTool(Tool):
         # 解析锚点时间（本地时间 → UTC）
         anchor_str = params["anchor_time"]
         try:
-            local_tz = timezone(timedelta(hours=settings.timezone_offset))
+            local_tz = ZoneInfo(settings.timezone)
             local_dt = datetime.strptime(anchor_str, "%Y-%m-%d %H:%M").replace(tzinfo=local_tz)
             anchor_utc = local_dt.astimezone(timezone.utc)
         except ValueError:

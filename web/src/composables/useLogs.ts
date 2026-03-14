@@ -110,7 +110,7 @@ export function useLogs() {
   const loading = ref(false)
 
   // SSE URL
-  const streamUrl = computed(() => '/api/logs/stream')
+  const streamUrl = computed(() => `/api/logs/stream?level=${minLevel.value}`)
 
   const { connected, connect, disconnect } = useLogStream(streamUrl, {
     onMessage(data: string) {

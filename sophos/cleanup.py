@@ -84,4 +84,4 @@ async def run_cleanup_loop(pool: asyncpg.Pool) -> None:
             interval = runtime_config.get("cleanup_interval_seconds")
             await asyncio.sleep(interval)
     except asyncio.CancelledError:
-        logger.info("cleanup loop cancelled")
+        logger.debug("cleanup loop cancelled")

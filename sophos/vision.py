@@ -247,7 +247,7 @@ async def process_image_segment(
                 correction_hint=entry.get("correction_hint", "") or "",
             )
             await update_cache_after_explore(pool, hash_str, description)
-            logger.info("VLM explored image hash=%s: %s", hash_str, description[:80])
+            logger.info("VLM explored image hash=%s: %s", hash_str, description[:200])
         except Exception:
             logger.exception("VLM call failed for hash=%s", hash_str)
             description = entry.get("description", "")

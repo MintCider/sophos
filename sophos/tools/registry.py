@@ -31,7 +31,7 @@ class ToolRegistry:
         if tool.name in self._tools:
             logger.warning("Tool '%s' is being overridden", tool.name)
         self._tools[tool.name] = tool
-        logger.info("Registered tool: %s", tool.name)
+        logger.debug("Registered tool: %s", tool.name)
 
     def get(self, name: str) -> Tool | None:
         """按名称查找工具。"""

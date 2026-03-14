@@ -3,9 +3,11 @@
 import asyncio
 import json
 import logging
+from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import aiohttp
 from aiohttp import web
@@ -65,7 +67,7 @@ async def ws_loop(
                     async for msg in ws:
                         if msg.type == aiohttp.WSMsgType.TEXT:
                             data: dict[str, Any] = json.loads(msg.data)
-                            logger.debug("WS ← %s", msg.data)
+                            logger.log(5, "WS ← %s", msg.data)
 
                             # 分流：API 响应 → 填充 Future；事件 → 返回给我们处理
                             event = api.dispatch(data)
@@ -137,13 +139,23 @@ def main() -> None:
     # 文件：  TRACE 级别，包含完整 LLM 请求/响应
     log_fmt = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
 
+    class _TzFormatter(logging.Formatter):
+        """用配置时区替代本地时间的 Formatter。"""
+        _tz = ZoneInfo(settings.timezone)
+
+        def formatTime(self, record: logging.LogRecord, datefmt: str | None = None) -> str:
+            dt = datetime.fromtimestamp(record.created, tz=self._tz)
+            if datefmt:
+                return dt.strftime(datefmt)
+            return dt.strftime("%Y-%m-%d %H:%M:%S") + f",{int(record.msecs):03d}"
+
     root_logger = logging.getLogger()
     root_logger.setLevel(TRACE)
 
     # 控制台 handler
     console_handler = logging.StreamHandler()
     console_handler.setLevel(logging.INFO)
-    console_handler.setFormatter(logging.Formatter(log_fmt))
+    console_handler.setFormatter(_TzFormatter(log_fmt))
     root_logger.addHandler(console_handler)
 
     # 文件 handler
@@ -154,8 +166,12 @@ def main() -> None:
         backupCount=settings.log_backup_count, encoding="utf-8",
     )
     file_handler.setLevel(TRACE)
-    file_handler.setFormatter(logging.Formatter(log_fmt))
+    file_handler.setFormatter(_TzFormatter(log_fmt))
     root_logger.addHandler(file_handler)
+
+    # 压制 aiohttp access log（每个 HTTP 请求都输出 INFO，WebUI 连上就刷屏）
+    logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
+
     try:
         asyncio.run(start())
     except KeyboardInterrupt:

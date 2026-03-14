@@ -1,4 +1,4 @@
-import { ref, type Ref } from 'vue'
+import { ref, watch, type Ref } from 'vue'
 
 export interface SSEOptions {
   /** 收到一条 SSE data 消息时的回调 */
@@ -91,6 +91,14 @@ export function useLogStream(url: Ref<string>, options: SSEOptions) {
     connected.value = false
     lastActivity = 0
   }
+
+  // URL 变化时自动重连（如 level 参数变化）
+  watch(url, () => {
+    if (source !== null || reconnectTimer !== null) {
+      disconnect()
+      connect()
+    }
+  })
 
   return { connected, connect, disconnect }
 }

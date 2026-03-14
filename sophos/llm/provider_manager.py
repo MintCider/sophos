@@ -489,16 +489,16 @@ class ProviderManager:
         # 热重载到内存中的 provider 实例
         if slot == "default" and self._provider is not None:
             self._provider._extra_body = parsed or {}
-            logger.info("Hot-reloaded extra_body for default slot")
+            logger.debug("Hot-reloaded extra_body for default slot")
         elif slot == "vision" and self._vision_provider is not None:
             self._vision_provider._extra_body = parsed or {}
-            logger.info("Hot-reloaded extra_body for vision slot")
+            logger.debug("Hot-reloaded extra_body for vision slot")
         elif slot == "trigger" and self._trigger_provider is not None:
             self._trigger_provider._extra_body = parsed or {}
-            logger.info("Hot-reloaded extra_body for trigger slot")
+            logger.debug("Hot-reloaded extra_body for trigger slot")
         elif slot == "embedding" and self._embedding_provider is not None:
             self._embedding_provider._extra_body = parsed or {}
-            logger.info("Hot-reloaded extra_body for embedding slot")
+            logger.debug("Hot-reloaded extra_body for embedding slot")
         return "extra_body 已更新" + (f": {parsed}" if parsed else " (已清除)")
 
     async def set_timeout(self, slot: str, seconds: int) -> str:
@@ -521,7 +521,7 @@ class ProviderManager:
         if provider is not None:
             import aiohttp
             provider._timeout = aiohttp.ClientTimeout(total=seconds)
-            logger.info("Hot-reloaded timeout for %s slot: %ds", slot, seconds)
+            logger.debug("Hot-reloaded timeout for %s slot: %ds", slot, seconds)
         return f"timeout 已更新: {seconds}s"
 
     async def get_active_extra_body(self, slot: str) -> str:

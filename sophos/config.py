@@ -41,8 +41,8 @@ class Settings(BaseSettings):
     include_co_account_in_context: bool = True
 
     # ── 时区 ──────────────────────────────────────────────
-    # 喂给 LLM 时转换时间戳用的 UTC 偏移（小时）
-    timezone_offset: int = 8
+    # IANA 时区名（如 Asia/Shanghai），用于日志和 LLM 时间戳转换
+    timezone: str = "Asia/Shanghai"
 
     # ── LLM（首次启动 seed 用，之后以 DB 为准）──────────────
     # 以下 6 项仅在 DB 无 provider 时用于 seed "default" provider，

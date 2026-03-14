@@ -14,8 +14,8 @@
 
 import json
 import re
-from datetime import timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from sophos.config import settings
 from sophos.llm.provider import Message
@@ -196,8 +196,7 @@ def format_timestamp(row: dict[str, Any]) -> str:
     ts = row.get("timestamp")
     if ts is None:
         return "????-??-?? ??:??"
-    local_tz = timezone(timedelta(hours=settings.timezone_offset))
-    local_time = ts.astimezone(local_tz)
+    local_time = ts.astimezone(ZoneInfo(settings.timezone))
     return local_time.strftime("%Y-%m-%d %H:%M")
 
 

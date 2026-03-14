@@ -83,14 +83,25 @@ async def run_tool_loop(
         assistant_msg = response["message"]
         messages.append(assistant_msg)
 
+        _content = assistant_msg.get("content") or ""
+        _tc = assistant_msg.get("tool_calls") or []
+        logger.debug(
+            "LLM round %d: content[:%d]=%r, tools=%s",
+            round_num, min(len(_content), 200), _content[:200],
+            [tc["function"]["name"] for tc in _tc] if _tc else "none",
+        )
+
         # 如果模型没有调用工具，循环结束
         tool_calls = assistant_msg.get("tool_calls")
         if not tool_calls:
             logger.debug("Tool loop finished after %d round(s) (no tool calls)", round_num)
+            total_tc = sum(len(m.get("tool_calls") or []) for m in messages if m.get("role") == "assistant")
+            if total_tc > 0:
+                logger.info("Tool loop done: %d round(s), %d tool call(s)", round_num, total_tc)
             return messages
 
         # 执行每个 tool call，将结果作为 tool message 追加
-        logger.info("Tool loop round %d: %d tool call(s)", round_num, len(tool_calls))
+        logger.debug("Tool loop round %d: %d tool call(s)", round_num, len(tool_calls))
         for i, tc in enumerate(tool_calls):
             func = tc["function"]
             tool_name = func["name"]
@@ -122,7 +133,7 @@ async def run_tool_loop(
                 )
             else:
                 try:
-                    logger.info("Calling tool: %s(%s)", tool_name, json.dumps(params, ensure_ascii=False))
+                    logger.debug("Calling tool: %s(%s)", tool_name, json.dumps(params, ensure_ascii=False))
                     result = await tool_executor(tool_name, params)
                     result_str = json.dumps(result, ensure_ascii=False, default=str)
                 except Exception as e:
@@ -142,4 +153,7 @@ async def run_tool_loop(
     logger.warning("Tool loop hit max rounds (%d), forcing final response", max_rounds)
     response = await provider.chat(messages, temperature=temperature, max_tokens=max_tokens)
     messages.append(response["message"])
+    total_tc = sum(len(m.get("tool_calls") or []) for m in messages if m.get("role") == "assistant")
+    if total_tc > 0:
+        logger.info("Tool loop done: %d round(s), %d tool call(s)", max_rounds, total_tc)
     return messages
