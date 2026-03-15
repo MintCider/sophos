@@ -316,7 +316,7 @@ onMounted(loadProviders)
                   round
                   :bordered="false"
                 >
-                  {{ slot.key }} · {{ slot.api_type }}
+                  {{ slot.key }} · {{ slot.model }}
                 </NTag>
               </div>
               <p class="provider-primary-url">
