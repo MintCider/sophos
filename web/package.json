@@ -12,6 +12,7 @@
     "@chinese-fonts/maple-mono-cn": "^2.0.0",
     "@fontsource/allura": "^5.2.8",
     "@fontsource/inter": "^5.2.8",
+    "@lobehub/icons-static-svg": "^1.82.0",
     "@vueuse/core": "^13.0",
     "axios": "^1.7",
     "lucide-vue-next": "^0.575.0",

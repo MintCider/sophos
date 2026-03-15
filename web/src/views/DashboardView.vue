@@ -4,7 +4,12 @@ import { NCard, NGrid, NGridItem, NStatistic } from 'naive-ui'
 
 <template>
   <div class="dashboard">
-    <h1 class="page-title">仪表盘</h1>
+    <div class="page-header">
+      <div>
+        <h1 class="page-title">仪表盘</h1>
+        <p class="page-subtitle">查看 Sophos 的运行概览与关键指标</p>
+      </div>
+    </div>
     <NGrid :x-gap="16" :y-gap="16" :cols="3" responsive="screen">
       <NGridItem>
         <NCard class="glass-panel" title="消息总数">
@@ -26,9 +31,26 @@ import { NCard, NGrid, NGridItem, NStatistic } from 'naive-ui'
 </template>
 
 <style scoped>
+.dashboard {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
 .page-title {
   font-size: 1.5rem;
   font-weight: 600;
-  margin-bottom: 20px;
+}
+
+.page-subtitle {
+  margin-top: 6px;
+  opacity: 0.68;
 }
 </style>

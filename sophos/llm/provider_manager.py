@@ -25,6 +25,18 @@ from sophos import runtime_config
 logger = logging.getLogger(__name__)
 
 
+def _normalize_base_urls(base_urls: dict[str, Any] | None) -> dict[str, str]:
+    """清理 base_urls：去空值、去首尾空白，只保留字符串值。"""
+    normalized: dict[str, str] = {}
+    for key, value in (base_urls or {}).items():
+        if not isinstance(value, str):
+            continue
+        stripped = value.strip()
+        if stripped:
+            normalized[key] = stripped
+    return normalized
+
+
 def resolve_base_url(base_urls: dict[str, str], api_type: str) -> str:
     """从 base_urls 字典解析出指定 api_type 的 base URL。
 
@@ -32,8 +44,10 @@ def resolve_base_url(base_urls: dict[str, str], api_type: str) -> str:
     1. 有显式 per-type URL → 直接用
     2. 从 openai URL 推导：去掉尾部 /v\\d+(beta\\d*)?
     """
-    if api_type in base_urls:
-        return base_urls[api_type]
+    base_urls = _normalize_base_urls(base_urls)
+    explicit_url = base_urls.get(api_type, "").rstrip("/")
+    if explicit_url:
+        return explicit_url
     openai_url = base_urls.get("openai", "").rstrip("/")
     if api_type == "openai" or not openai_url:
         return openai_url
@@ -335,6 +349,9 @@ class ProviderManager:
         stream: bool = True,
     ) -> str:
         """新增 provider 到 DB。返回确认信息。"""
+        base_urls = _normalize_base_urls(base_urls)
+        if not base_urls:
+            return "至少提供一个 Base URL"
         base_urls_json = json.dumps(base_urls, ensure_ascii=False)
         try:
             await self._pool.execute(
@@ -358,11 +375,17 @@ class ProviderManager:
         base_urls = row["base_urls"]
         if isinstance(base_urls, str):
             base_urls = json.loads(base_urls)
-        base_urls = base_urls or {}
+        base_urls = _normalize_base_urls(base_urls)
         if url is None:
             base_urls.pop(api_type, None)
         else:
-            base_urls[api_type] = url
+            stripped = url.strip()
+            if stripped:
+                base_urls[api_type] = stripped
+            else:
+                base_urls.pop(api_type, None)
+        if not base_urls:
+            return f"provider '{alias}' 至少保留一个 Base URL"
         base_urls_json = json.dumps(base_urls, ensure_ascii=False)
         await self._pool.execute(
             "UPDATE llm_providers SET base_urls = $1::jsonb WHERE alias = $2",
@@ -382,12 +405,48 @@ class ProviderManager:
         base_urls = row["base_urls"]
         if isinstance(base_urls, str):
             base_urls = json.loads(base_urls)
-        return base_urls or {}
+        return _normalize_base_urls(base_urls)
+
+    async def update_provider(
+        self,
+        alias: str,
+        *,
+        base_urls: dict[str, str] | None = None,
+    ) -> str:
+        """更新 provider 配置。当前仅支持编辑 base_urls。"""
+        row = await self._pool.fetchrow(
+            "SELECT id FROM llm_providers WHERE alias = $1",
+            alias,
+        )
+        if not row:
+            return f"provider '{alias}' 不存在"
+
+        if base_urls is not None:
+            normalized = _normalize_base_urls(base_urls)
+            if not normalized:
+                return "至少提供一个 Base URL"
+            await self._pool.execute(
+                "UPDATE llm_providers SET base_urls = $1::jsonb WHERE alias = $2",
+                json.dumps(normalized, ensure_ascii=False),
+                alias,
+            )
+        return f"已更新 provider '{alias}'"
 
     async def remove_provider(self, alias: str) -> str:
         """删除 provider。如果是当前活跃的则拒绝。"""
-        if alias == self._current_alias:
-            return f"无法删除当前活跃的 provider '{alias}'，请先切换到其他 provider"
+        active_rows = await self._pool.fetch(
+            """
+            SELECT a.key
+            FROM llm_active a
+            JOIN llm_providers p ON p.id = a.provider_id
+            WHERE p.alias = $1
+            ORDER BY a.key
+            """,
+            alias,
+        )
+        if active_rows:
+            slots = ", ".join(row["key"] for row in active_rows)
+            return f"无法删除 provider '{alias}'，仍被以下 slot 使用: {slots}"
         result = await self._pool.execute(
             "DELETE FROM llm_providers WHERE alias = $1", alias,
         )
@@ -417,7 +476,8 @@ class ProviderManager:
                 lp_base_urls = json.loads(lp_base_urls)
             result.append({
                 "alias": r["alias"],
-                "base_urls": lp_base_urls or {},
+                "base_urls": _normalize_base_urls(lp_base_urls),
+                "models": models_raw or [],
                 "model_count": len(models_raw) if models_raw else 0,
                 "is_active": bool(r["is_active"]),
                 "active_model": r["active_model"] or "",
@@ -440,7 +500,11 @@ class ProviderManager:
         fm_base_urls = row.get("base_urls") or {}
         if isinstance(fm_base_urls, str):
             fm_base_urls = json.loads(fm_base_urls)
-        url = fm_base_urls.get("openai", "").rstrip("/") + "/models"
+        fm_base_urls = _normalize_base_urls(fm_base_urls)
+        openai_url = fm_base_urls.get("openai", "").rstrip("/")
+        if not openai_url:
+            return f"provider '{alias}' 未配置 OpenAI Base URL，无法拉取 /models"
+        url = openai_url + "/models"
         headers = {
             "Authorization": f"Bearer {row['api_key']}",
         }
@@ -553,6 +617,16 @@ class ProviderManager:
         )
         if not row:
             return f"provider '{alias}' 不存在"
+        base_urls = row.get("base_urls") or {}
+        if isinstance(base_urls, str):
+            base_urls = json.loads(base_urls)
+        if not resolve_base_url(base_urls, api_type):
+            if api_type == "openai":
+                return (
+                    f"provider '{alias}' 未配置 OpenAI Base URL。"
+                    "请补充 openai URL，或使用 --type gemini/anthropic 切换。"
+                )
+            return f"provider '{alias}' 未配置可用的 {api_type} Base URL"
 
         # 读取当前 slot 的 timeout（切换时保留）
         existing_timeout = await self._pool.fetchval(
@@ -598,6 +672,16 @@ class ProviderManager:
         )
         if not row:
             return f"provider '{alias}' 不存在"
+        base_urls = row.get("base_urls") or {}
+        if isinstance(base_urls, str):
+            base_urls = json.loads(base_urls)
+        if not resolve_base_url(base_urls, api_type):
+            if api_type == "openai":
+                return (
+                    f"provider '{alias}' 未配置 OpenAI Base URL。"
+                    "请补充 openai URL，或使用 --type gemini/anthropic 切换 vision。"
+                )
+            return f"provider '{alias}' 未配置可用的 {api_type} Base URL"
 
         existing_timeout = await self._pool.fetchval(
             "SELECT request_timeout FROM llm_active WHERE key = 'vision'",
@@ -650,6 +734,16 @@ class ProviderManager:
         )
         if not row:
             return f"provider '{alias}' 不存在"
+        base_urls = row.get("base_urls") or {}
+        if isinstance(base_urls, str):
+            base_urls = json.loads(base_urls)
+        if not resolve_base_url(base_urls, api_type):
+            if api_type == "openai":
+                return (
+                    f"provider '{alias}' 未配置 OpenAI Base URL。"
+                    "请补充 openai URL，或使用 --type gemini/anthropic 切换 trigger。"
+                )
+            return f"provider '{alias}' 未配置可用的 {api_type} Base URL"
 
         existing_timeout = await self._pool.fetchval(
             "SELECT request_timeout FROM llm_active WHERE key = 'trigger'",
@@ -996,6 +1090,7 @@ class ProviderManager:
         base_urls = row.get("base_urls") or {}
         if isinstance(base_urls, str):
             base_urls = json.loads(base_urls)
+        base_urls = _normalize_base_urls(base_urls)
         base_url = resolve_base_url(base_urls, api_type)
 
         kwargs = {
@@ -1087,6 +1182,7 @@ class ProviderManager:
         base_urls = row.get("base_urls") or {}
         if isinstance(base_urls, str):
             base_urls = json.loads(base_urls)
+        base_urls = _normalize_base_urls(base_urls)
         base_url = resolve_base_url(base_urls, api_type)
 
         kwargs = {
@@ -1187,6 +1283,7 @@ class ProviderManager:
         base_urls = row.get("base_urls") or {}
         if isinstance(base_urls, str):
             base_urls = json.loads(base_urls)
+        base_urls = _normalize_base_urls(base_urls)
         base_url = resolve_base_url(base_urls, api_type)
 
         kwargs = {

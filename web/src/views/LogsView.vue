@@ -193,6 +193,13 @@ onUnmounted(() => {
 
 <template>
   <div class="logs-page">
+    <div class="page-header">
+      <div>
+        <h1 class="page-title">日志</h1>
+        <p class="page-subtitle">查看实时日志流与历史日志文件</p>
+      </div>
+    </div>
+
     <!-- 工具栏 -->
     <div class="logs-toolbar glass-panel">
       <NSpace align="center" :size="12">
@@ -296,6 +303,24 @@ onUnmounted(() => {
   flex-direction: column;
   height: calc(100vh - 48px - 48px);
   position: relative;
+}
+
+.page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 4px;
+}
+
+.page-title {
+  font-size: 1.5rem;
+  font-weight: 600;
+}
+
+.page-subtitle {
+  margin-top: 6px;
+  opacity: 0.68;
 }
 
 .logs-toolbar {

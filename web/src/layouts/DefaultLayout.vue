@@ -20,6 +20,7 @@ import { renderIcon } from '@/utils/renderIcon'
 import {
   Gauge,
   ScrollText,
+  Orbit,
   LogOut,
   Sun,
   Moon,
@@ -60,6 +61,7 @@ const activeMenu = computed(() => (route.name as string) ?? 'dashboard')
 const menuOptions = [
   { label: '仪表盘', key: 'dashboard', icon: renderIcon(Gauge) },
   { label: '日志', key: 'logs', icon: renderIcon(ScrollText) },
+  { label: '模型服务商', key: 'providers', icon: renderIcon(Orbit) },
 ]
 
 function handleMenuUpdate(key: string) {
