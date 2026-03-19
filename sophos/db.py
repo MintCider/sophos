@@ -244,6 +244,22 @@ CREATE TABLE IF NOT EXISTS perm_tool (
 );
 """
 
+# ── 用户触发策略 ──────────────────────────────────────────
+
+_CREATE_USER_TRIGGER_POLICY_TABLE = """\
+CREATE TABLE IF NOT EXISTS user_trigger_policy (
+    user_id              BIGINT       NOT NULL,
+    scope_type           VARCHAR(16)  NOT NULL DEFAULT 'global',
+    scope_id             BIGINT       NOT NULL DEFAULT 0,
+    suppress_llm_trigger BOOLEAN      NOT NULL DEFAULT true,
+    rate_multiplier      REAL         NOT NULL DEFAULT 0.0,
+    suppress_refresh     BOOLEAN      NOT NULL DEFAULT true,
+    note                 TEXT,
+    updated_at           TIMESTAMPTZ  DEFAULT now(),
+    PRIMARY KEY (user_id, scope_type, scope_id)
+);
+"""
+
 _CREATE_INDEXES = [
     # 按群聊查最近消息（最常用）
     """\
@@ -317,5 +333,7 @@ async def _init_schema(pool: asyncpg.Pool) -> None:
         await conn.execute(_CREATE_PERM_SCOPE_TABLE)
         await conn.execute(_CREATE_PERM_GRANT_TABLE)
         await conn.execute(_CREATE_PERM_TOOL_TABLE)
+        # 用户触发策略
+        await conn.execute(_CREATE_USER_TRIGGER_POLICY_TABLE)
         for ddl in _CREATE_INDEXES:
             await conn.execute(ddl)

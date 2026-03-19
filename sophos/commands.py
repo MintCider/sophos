@@ -345,6 +345,112 @@ async def handle_trigger_command(
             removed = await trigger.remove_keyword(pool, parts[2])
             reply = f"关键词 '{parts[2]}' 已删除" if removed else f"关键词 '{parts[2]}' 不存在"
 
+    elif sub == "mute":
+        if len(parts) < 3:
+            reply = "用法: .trigger mute <QQ号> [备注]"
+        else:
+            target = parts[2]
+            if not target.isdigit():
+                reply = "QQ号 必须是数字"
+            else:
+                uid = int(target)
+                note = " ".join(parts[3:]) if len(parts) > 3 else None
+                from sophos import user_policy
+                await user_policy.set_policy(
+                    pool, uid,
+                    suppress_llm_trigger=True,
+                    rate_multiplier=0.0,
+                    suppress_refresh=True,
+                    note=note,
+                )
+                reply = f"已静默用户 {uid}"
+                if note:
+                    reply += f" ({note})"
+
+    elif sub == "unmute":
+        if len(parts) < 3:
+            reply = "用法: .trigger unmute <QQ号>"
+        else:
+            target = parts[2]
+            if not target.isdigit():
+                reply = "QQ号 必须是数字"
+            else:
+                uid = int(target)
+                from sophos import user_policy
+                removed = await user_policy.remove_policy(pool, uid)
+                reply = f"已解除用户 {uid} 的静默" if removed else f"用户 {uid} 无静默策略"
+
+    elif sub == "policy":
+        from sophos import user_policy
+        sub2 = parts[2] if len(parts) > 2 else ""
+        if sub2 == "":
+            policies = await user_policy.get_all_policies(pool)
+            if not policies:
+                reply = "无用户触发策略"
+            else:
+                lines = []
+                for p in policies:
+                    scope = f"{p.scope_type}:{p.scope_id}" if p.scope_type != "global" else "全局"
+                    flags = []
+                    if p.suppress_llm_trigger:
+                        flags.append("禁LLM触发")
+                    if p.rate_multiplier == 0.0:
+                        flags.append("概率=0")
+                    elif p.rate_multiplier != 1.0:
+                        flags.append(f"概率×{p.rate_multiplier}")
+                    if p.suppress_refresh:
+                        flags.append("禁刷新注入")
+                    flag_str = ", ".join(flags) if flags else "无限制"
+                    note_str = f" ({p.note})" if p.note else ""
+                    lines.append(f"  {p.user_id} [{scope}]: {flag_str}{note_str}")
+                reply = "用户触发策略:\n" + "\n".join(lines)
+        elif sub2.isdigit():
+            uid = int(sub2)
+            if len(parts) > 3:
+                field = parts[3]
+                valid_fields = {
+                    "suppress_llm_trigger", "rate_multiplier",
+                    "suppress_refresh", "note",
+                }
+                if field not in valid_fields:
+                    reply = f"未知字段: {field}\n可用: {', '.join(sorted(valid_fields))}"
+                elif len(parts) < 5:
+                    reply = f"用法: .trigger policy <QQ号> {field} <值>"
+                else:
+                    raw_val = " ".join(parts[4:]) if field == "note" else parts[4]
+                    try:
+                        parsed = _parse_policy_value(field, raw_val)
+                    except ValueError as e:
+                        reply = str(e)
+                    else:
+                        updated = await user_policy.update_field(
+                            pool, uid, "global", 0, field, parsed,
+                        )
+                        if updated:
+                            reply = f"用户 {uid} 的 {field} 已设为 {parsed}"
+                        else:
+                            reply = f"用户 {uid} 无策略，请先 .trigger mute {uid}"
+            else:
+                p = await user_policy.get_policy(pool, uid, "global", 0)
+                if p is None:
+                    reply = f"用户 {uid} 无触发策略"
+                else:
+                    reply = (
+                        f"用户 {uid} 的触发策略:\n"
+                        f"  抑制LLM触发: {'是' if p.suppress_llm_trigger else '否'}\n"
+                        f"  概率倍率: {p.rate_multiplier}\n"
+                        f"  抑制刷新注入: {'是' if p.suppress_refresh else '否'}\n"
+                        f"  备注: {p.note or '(无)'}"
+                    )
+        else:
+            reply = (
+                "用法:\n"
+                "  .trigger policy                              — 列出所有策略\n"
+                "  .trigger policy <QQ号>                       — 查看用户策略\n"
+                "  .trigger policy <QQ号> <字段> <值>            — 修改字段\n"
+                "字段: suppress_llm_trigger, rate_multiplier, suppress_refresh, note"
+            )
+
     else:
         reply = (
             "用法:\n"
@@ -352,11 +458,34 @@ async def handle_trigger_command(
             "  .trigger rate <0~1>   — 基础概率\n"
             "  .trigger at <on|off>  — @必回开关\n"
             "  .trigger add <词> <boost>\n"
-            "  .trigger remove <词>"
+            "  .trigger remove <词>\n"
+            "  .trigger mute <QQ号> [备注]  — 静默用户\n"
+            "  .trigger unmute <QQ号>       — 解除静默\n"
+            "  .trigger policy              — 用户策略管理"
         )
 
     await _reply(api, event, reply)
     return True
+
+
+def _parse_policy_value(field: str, raw: str) -> bool | float | str | None:
+    """解析策略字段值。"""
+    if field in ("suppress_llm_trigger", "suppress_refresh"):
+        if raw.lower() in ("true", "1", "on", "是"):
+            return True
+        if raw.lower() in ("false", "0", "off", "否"):
+            return False
+        raise ValueError("布尔值请输入 true/false")
+    if field == "rate_multiplier":
+        try:
+            v = float(raw)
+        except ValueError:
+            raise ValueError("倍率必须是数字")
+        if not 0.0 <= v <= 10.0:
+            raise ValueError("倍率范围 0~10")
+        return v
+    # note
+    return raw if raw != "clear" else None
 
 
 async def handle_memory_command(

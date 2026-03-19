@@ -481,6 +481,15 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
         user_id=ctx.user_id if ctx.message_type == "private" else None,
     )
 
+    # Pre-compute refresh-suppressed user set for filtering
+    from sophos import user_policy as _up
+    _up_cache = await _up._ensure_cache(get_pool())
+    _refresh_scope_type = "group" if ctx.message_type == "group" else "private"
+    _refresh_scope_id: int = ctx.group_id if ctx.message_type == "group" else ctx.user_id  # type: ignore[assignment]
+    _suppressed_uids = _up.get_refresh_suppressed_users(
+        _up_cache, _refresh_scope_type, _refresh_scope_id,
+    )
+
     async def _refresh_context() -> str | None:
         nonlocal _cursor_id
         new_rows = await ctx.store.get_messages_after(
@@ -506,6 +515,13 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
                 return None
 
         _cursor_id = max(r["id"] for r in new_rows)
+
+        # Filter out messages from refresh-suppressed users
+        if _suppressed_uids:
+            new_rows = [r for r in new_rows if r.get("user_id") not in _suppressed_uids]
+            if not new_rows:
+                return None
+
         return format_new_messages(new_rows, self_user_id=ctx.self_id)
 
     tool_context: dict[str, Any] = {
@@ -952,10 +968,15 @@ class TriggerLLMStage(Stage):
 
     async def execute(self, ctx: PipelineContext, next: NextFn) -> None:
         from sophos.trigger_engine import get_trigger_engine
+        from sophos import user_policy
 
         pool = get_pool()
         cfg = await trigger.load(pool)
         engine = get_trigger_engine()
+
+        scope_type = "group" if ctx.message_type == "group" else "private"
+        scope_id: int = ctx.group_id if ctx.message_type == "group" else ctx.user_id  # type: ignore[assignment]
+        policy = await user_policy.get_policy(pool, ctx.user_id, scope_type, scope_id)
 
         # 计算简易触发
         simple_triggered = False
@@ -975,6 +996,8 @@ class TriggerLLMStage(Stage):
                         max_boost = kw.boost
                         matched = kw.word
             rate = min(1.0, cfg.base_rate + max_boost)
+            if policy:
+                rate *= policy.rate_multiplier
             reason = f"keyword '{matched}'" if matched else "base"
 
             roll = random.random()
@@ -990,7 +1013,14 @@ class TriggerLLMStage(Stage):
                     reason, rate, roll,
                 )
 
-        await engine.on_message(ctx, simple_triggered=simple_triggered)
+        if simple_triggered:
+            await engine.on_message(ctx, simple_triggered=True)
+        elif policy and policy.suppress_llm_trigger:
+            logger.debug(
+                "User %d LLM trigger suppressed by policy", ctx.user_id,
+            )
+        else:
+            await engine.on_message(ctx, simple_triggered=False)
 
 
 # ── 默认 stage 列表 ──────────────────────────────────────────
