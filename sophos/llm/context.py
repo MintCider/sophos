@@ -296,6 +296,7 @@ def format_new_messages(
 
     for row in rows:
         ts = format_timestamp(row)
+        img_text = _format_image_descriptions(row)
         if row.get("source") == "sophos":
             line = apply_schema(
                 runtime_config.get("llm_bot_schema"),
@@ -314,6 +315,8 @@ def format_new_messages(
                 uid=str(row.get("user_id", "")),
                 message=row.get("plain_text", ""),
             )
+        if img_text:
+            line = f"{line} {img_text}" if line else img_text
         lines.append(line)
 
     return "[新消息 - 以下是你处理期间新到达的消息]\n" + "\n".join(lines)

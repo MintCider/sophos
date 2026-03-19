@@ -20,12 +20,13 @@ from sophos.llm.provider_manager import ProviderManager
 from sophos.memory.store import MemoryStore
 from sophos.message_store import MessageStore
 from sophos.onebot_api import OneBotAPI
-from sophos.pipeline import DEFAULT_STAGES, Pipeline, PipelineContext
+from sophos.pipeline import INGEST_STAGES, RESPONSE_STAGES, Pipeline, PipelineContext
 from sophos import runtime_config
 
 logger = logging.getLogger("sophos")
 
-_pipeline = Pipeline(DEFAULT_STAGES)
+_ingest = Pipeline(INGEST_STAGES)
+_response = Pipeline(RESPONSE_STAGES)
 
 
 async def handle_event(
@@ -42,7 +43,8 @@ async def handle_event(
         return
     if memory_store is not None:
         ctx.state["memory_store"] = memory_store
-    await _pipeline.run(ctx)
+    await _ingest.run(ctx)
+    await _response.run(ctx)
 
 
 async def ws_loop(

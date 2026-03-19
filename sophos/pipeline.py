@@ -41,6 +41,7 @@ from sophos.tools.registry import ToolRegistry
 from sophos.tools.vision import VISION_TOOLS
 from sophos.tools.web import WEB_TOOLS
 from sophos import trigger
+from sophos.enrichment import get_enrichment_registry
 from sophos.vision import process_message_images
 
 logger = logging.getLogger("sophos")
@@ -460,10 +461,10 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
     system_prompt += meta
 
     # 等待图片处理完成（如有），确保 LLM 能拿到图片描述
-    image_task: asyncio.Task[None] | None = ctx.state.get("image_task")
-    if image_task and not image_task.done():
+    msg_id = ctx.event.get("message_id")
+    if msg_id is not None:
         try:
-            await image_task
+            await get_enrichment_registry().wait_for([msg_id])
         except Exception:
             logger.warning("Image processing failed, continuing without descriptions")
 
@@ -489,6 +490,21 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
         )
         if not new_rows:
             return None
+
+        # Wait for pending enrichment (image processing) on new messages,
+        # then re-fetch so we get updated extra.images data.
+        registry = get_enrichment_registry()
+        msg_ids = [r["message_id"] for r in new_rows if r.get("message_id")]
+        had_pending = await registry.wait_for(msg_ids)
+        if had_pending:
+            new_rows = await ctx.store.get_messages_after(
+                group_id=ctx.group_id,
+                user_id=ctx.user_id if ctx.message_type == "private" else None,
+                after_id=_cursor_id,
+            )
+            if not new_rows:
+                return None
+
         _cursor_id = max(r["id"] for r in new_rows)
         return format_new_messages(new_rows, self_user_id=ctx.self_id)
 
@@ -616,7 +632,11 @@ class ProcessImagesStage(Stage):
         return "异步处理消息中的图片（VLM 识别）"
 
     async def execute(self, ctx: PipelineContext, next: NextFn) -> None:
-        ctx.state["image_task"] = asyncio.create_task(_process_event_images(ctx))
+        task = asyncio.create_task(_process_event_images(ctx))
+        ctx.state["image_task"] = task
+        msg_id = ctx.event.get("message_id")
+        if msg_id is not None:
+            get_enrichment_registry().register(msg_id, task)
         await next()
 
 
@@ -975,12 +995,17 @@ class TriggerLLMStage(Stage):
 
 # ── 默认 stage 列表 ──────────────────────────────────────────
 
-DEFAULT_STAGES: list[Stage] = [
+INGEST_STAGES: list[Stage] = [
     StoreMessageStage(),
     EnrichMessageStage(),
     ProcessImagesStage(),
+]
+
+RESPONSE_STAGES: list[Stage] = [
     FilterSelfStage(),
     CheckScopeStage(),
     HandleCommandStage(),
     TriggerLLMStage(),
 ]
+
+DEFAULT_STAGES: list[Stage] = INGEST_STAGES + RESPONSE_STAGES
