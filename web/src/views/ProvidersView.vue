@@ -44,11 +44,8 @@ interface ProviderItem {
   preferred_api_type: ApiType
   preferred_base_url: string
   api_key_masked: string
-  api_key: string
   models: string[]
   model_count: number
-  is_active: boolean
-  active_model: string
   active_slots: ActiveSlot[]
 }
 
@@ -60,7 +57,7 @@ const loading = ref(false)
 const refreshingModels = ref(new Set<string>())
 
 const expandedAlias = ref('')
-const revealedKeys = ref(new Set<string>())
+const revealedKeys = reactive<Record<string, string>>({})
 const editingAliases = ref(new Set<string>())
 const advancedAddOpen = ref(false)
 const addDrawerOpen = ref(false)
@@ -104,12 +101,17 @@ function toggleExpanded(alias: string) {
   expandedAlias.value = alias
 }
 
-function toggleReveal(alias: string) {
-  if (revealedKeys.value.has(alias)) {
-    revealedKeys.value.delete(alias)
+async function toggleReveal(alias: string) {
+  if (alias in revealedKeys) {
+    delete revealedKeys[alias]
     return
   }
-  revealedKeys.value.add(alias)
+  try {
+    const { data } = await api.get(`/providers/${encodeURIComponent(alias)}/api-key`)
+    revealedKeys[alias] = data.api_key
+  } catch (error: any) {
+    message.error(error?.response?.data?.message ?? '获取 API Key 失败')
+  }
 }
 
 function isEditing(alias: string) {
@@ -345,8 +347,8 @@ onMounted(loadProviders)
           <div class="provider-meta-item">
             <span class="provider-meta-label">API Key</span>
             <button class="provider-key-button" type="button" @click="toggleReveal(provider.alias)">
-              <span>{{ revealedKeys.has(provider.alias) ? provider.api_key : provider.api_key_masked }}</span>
-              <component :is="revealedKeys.has(provider.alias) ? EyeOff : Eye" :size="16" />
+              <span>{{ provider.alias in revealedKeys ? revealedKeys[provider.alias] : provider.api_key_masked }}</span>
+              <component :is="provider.alias in revealedKeys ? EyeOff : Eye" :size="16" />
             </button>
           </div>
           <div class="provider-meta-item">

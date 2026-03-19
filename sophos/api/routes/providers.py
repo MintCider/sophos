@@ -1,38 +1,10 @@
 """Provider 管理 API。"""
 
-import json
-from typing import Any
-
 from aiohttp import web
 
-from sophos.llm.provider_manager import ProviderManager, resolve_base_url
+from sophos.llm.provider_manager import ProviderManager, _normalize_base_urls, resolve_base_url
 
 routes = web.RouteTableDef()
-
-_VALID_API_TYPES = {"openai", "gemini", "anthropic"}
-
-
-def _mask_api_key(api_key: str) -> str:
-    """将 API Key 打码展示。"""
-    if len(api_key) <= 8:
-        return "*" * len(api_key)
-    return f"{api_key[:4]}{'*' * max(len(api_key) - 8, 4)}{api_key[-4:]}"
-
-
-def _normalize_base_urls(base_urls: Any) -> dict[str, str]:
-    """归一化 base_urls。"""
-    if isinstance(base_urls, str):
-        base_urls = json.loads(base_urls)
-    if not isinstance(base_urls, dict):
-        return {}
-    result: dict[str, str] = {}
-    for key, value in base_urls.items():
-        if key not in _VALID_API_TYPES or not isinstance(value, str):
-            continue
-        stripped = value.strip()
-        if stripped:
-            result[key] = stripped
-    return result
 
 
 def _preferred_api_type(base_urls: dict[str, str]) -> str:
@@ -47,44 +19,34 @@ def _preferred_api_type(base_urls: dict[str, str]) -> str:
 
 @routes.get("/api/providers")
 async def list_providers(request: web.Request) -> web.Response:
-    """列出 provider，供 WebUI 展示。"""
+    """列出 provider，供 WebUI 展示（不含明文 API Key）。"""
     provider_mgr: ProviderManager = request.app["provider_mgr"]
     providers = await provider_mgr.list_providers()
-    active_rows = await provider_mgr._pool.fetch(  # noqa: SLF001
-        """
-        SELECT a.key, p.alias, a.model, a.api_type
-        FROM llm_active a
-        JOIN llm_providers p ON p.id = a.provider_id
-        """
-    )
-    active_by_alias: dict[str, list[dict[str, str]]] = {}
-    for row in active_rows:
-        active_by_alias.setdefault(row["alias"], []).append({
-            "key": row["key"],
-            "model": row["model"],
-            "api_type": row.get("api_type", "openai") or "openai",
-        })
 
     detailed = []
     for item in providers:
-        row = await provider_mgr._pool.fetchrow(  # noqa: SLF001
-            "SELECT api_key FROM llm_providers WHERE alias = $1",
-            item["alias"],
-        )
-        api_key = row["api_key"] if row else ""
-        base_urls = _normalize_base_urls(item["base_urls"])
+        base_urls = item["base_urls"]
         preferred_type = _preferred_api_type(base_urls)
         detailed.append({
             **item,
-            "base_urls": base_urls,
             "preferred_api_type": preferred_type,
             "preferred_base_url": resolve_base_url(base_urls, preferred_type),
-            "api_key_masked": _mask_api_key(api_key),
-            "api_key": api_key,
-            "active_slots": active_by_alias.get(item["alias"], []),
         })
 
     return web.json_response({"providers": detailed})
+
+
+@routes.get("/api/providers/{alias}/api-key")
+async def reveal_api_key(request: web.Request) -> web.Response:
+    """获取 provider 的明文 API Key。"""
+    provider_mgr: ProviderManager = request.app["provider_mgr"]
+    alias = request.match_info["alias"]
+    api_key = await provider_mgr.get_provider_api_key(alias)
+    if api_key is None:
+        return web.json_response(
+            {"message": f"provider '{alias}' 不存在"}, status=404,
+        )
+    return web.json_response({"api_key": api_key})
 
 
 @routes.post("/api/providers/{alias}/models/refresh")

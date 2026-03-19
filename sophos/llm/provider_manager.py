@@ -25,11 +25,18 @@ from sophos import runtime_config
 logger = logging.getLogger(__name__)
 
 
-def _normalize_base_urls(base_urls: dict[str, Any] | None) -> dict[str, str]:
-    """清理 base_urls：去空值、去首尾空白，只保留字符串值。"""
+_VALID_API_TYPES = {"openai", "gemini", "anthropic"}
+
+
+def _normalize_base_urls(raw: Any) -> dict[str, str]:
+    """清理 base_urls：JSON 字符串自动解析，去空值/首尾空白，只保留合法 API 类型。"""
+    if isinstance(raw, str):
+        raw = json.loads(raw)
+    if not isinstance(raw, dict):
+        return {}
     normalized: dict[str, str] = {}
-    for key, value in (base_urls or {}).items():
-        if not isinstance(value, str):
+    for key, value in raw.items():
+        if key not in _VALID_API_TYPES or not isinstance(value, str):
             continue
         stripped = value.strip()
         if stripped:
@@ -37,7 +44,7 @@ def _normalize_base_urls(base_urls: dict[str, Any] | None) -> dict[str, str]:
     return normalized
 
 
-def resolve_base_url(base_urls: dict[str, str], api_type: str) -> str:
+def resolve_base_url(base_urls: Any, api_type: str) -> str:
     """从 base_urls 字典解析出指定 api_type 的 base URL。
 
     优先级：
@@ -187,11 +194,9 @@ class ProviderManager:
             extra_body = row.get("extra_body")
             if isinstance(extra_body, str):
                 extra_body = json.loads(extra_body)
-            base_urls = row.get("base_urls") or {}
-            if isinstance(base_urls, str):
-                base_urls = json.loads(base_urls)
+            emb_urls = _normalize_base_urls(row.get("base_urls"))
             self._embedding_provider = EmbeddingProvider(
-                base_url=base_urls.get("openai", ""),
+                base_url=emb_urls.get("openai", ""),
                 api_key=row["api_key"],
                 model=row["model"],
                 endpoint=endpoint,
@@ -372,10 +377,7 @@ class ProviderManager:
         )
         if not row:
             return f"provider '{alias}' 不存在"
-        base_urls = row["base_urls"]
-        if isinstance(base_urls, str):
-            base_urls = json.loads(base_urls)
-        base_urls = _normalize_base_urls(base_urls)
+        base_urls = _normalize_base_urls(row["base_urls"])
         if url is None:
             base_urls.pop(api_type, None)
         else:
@@ -402,10 +404,7 @@ class ProviderManager:
         )
         if not row:
             return f"provider '{alias}' 不存在"
-        base_urls = row["base_urls"]
-        if isinstance(base_urls, str):
-            base_urls = json.loads(base_urls)
-        return _normalize_base_urls(base_urls)
+        return _normalize_base_urls(row["base_urls"])
 
     async def update_provider(
         self,
@@ -454,35 +453,57 @@ class ProviderManager:
             return f"provider '{alias}' 不存在"
         return f"已删除 provider '{alias}'"
 
+    @staticmethod
+    def _mask_api_key(api_key: str) -> str:
+        if len(api_key) <= 8:
+            return "*" * len(api_key)
+        return f"{api_key[:4]}{'*' * max(len(api_key) - 8, 4)}{api_key[-4:]}"
+
     async def list_providers(self) -> list[dict[str, Any]]:
-        """列出所有 provider。"""
+        """列出所有 provider（含 active slots、masked key）。"""
         rows = await self._pool.fetch(
             """
-            SELECT p.alias, p.base_urls, p.models,
-                   (p.id = a.provider_id) AS is_active,
-                   a.model AS active_model
+            SELECT p.alias, p.base_urls, p.api_key, p.models
             FROM llm_providers p
-            LEFT JOIN llm_active a ON a.key = 'default' AND a.provider_id = p.id
             ORDER BY p.created_at
             """,
         )
+        active_rows = await self._pool.fetch(
+            """
+            SELECT a.key, p.alias, a.model, a.api_type
+            FROM llm_active a
+            JOIN llm_providers p ON p.id = a.provider_id
+            """,
+        )
+        active_by_alias: dict[str, list[dict[str, str]]] = {}
+        for ar in active_rows:
+            active_by_alias.setdefault(ar["alias"], []).append({
+                "key": ar["key"],
+                "model": ar["model"],
+                "api_type": ar.get("api_type", "openai") or "openai",
+            })
+
         result = []
         for r in rows:
             models_raw = r["models"]
             if isinstance(models_raw, str):
                 models_raw = json.loads(models_raw)
-            lp_base_urls = r["base_urls"]
-            if isinstance(lp_base_urls, str):
-                lp_base_urls = json.loads(lp_base_urls)
+            base_urls = _normalize_base_urls(r["base_urls"])
             result.append({
                 "alias": r["alias"],
-                "base_urls": _normalize_base_urls(lp_base_urls),
+                "base_urls": base_urls,
+                "api_key_masked": self._mask_api_key(r["api_key"]),
                 "models": models_raw or [],
                 "model_count": len(models_raw) if models_raw else 0,
-                "is_active": bool(r["is_active"]),
-                "active_model": r["active_model"] or "",
+                "active_slots": active_by_alias.get(r["alias"], []),
             })
         return result
+
+    async def get_provider_api_key(self, alias: str) -> str | None:
+        """获取 provider 的原始 API Key，不存在则返回 None。"""
+        return await self._pool.fetchval(
+            "SELECT api_key FROM llm_providers WHERE alias = $1", alias,
+        )
 
     # ── 模型列表 ─────────────────────────────────────────────
 
@@ -497,10 +518,7 @@ class ProviderManager:
         if not row:
             return f"provider '{alias}' 不存在"
 
-        fm_base_urls = row.get("base_urls") or {}
-        if isinstance(fm_base_urls, str):
-            fm_base_urls = json.loads(fm_base_urls)
-        fm_base_urls = _normalize_base_urls(fm_base_urls)
+        fm_base_urls = _normalize_base_urls(row.get("base_urls"))
         openai_url = fm_base_urls.get("openai", "").rstrip("/")
         if not openai_url:
             return f"provider '{alias}' 未配置 OpenAI Base URL，无法拉取 /models"
@@ -606,8 +624,10 @@ class ProviderManager:
 
     # ── 热切换 ───────────────────────────────────────────────
 
-    async def switch(self, alias: str, model: str, *, api_type: str = "openai") -> str:
-        """热切换到指定 provider + model。返回确认信息。"""
+    async def _fetch_and_validate(
+        self, alias: str, api_type: str, slot: str,
+    ) -> tuple[asyncpg.Record, None] | tuple[None, str]:
+        """拉取 provider 行并校验 base_url，返回 (row, None) 或 (None, err)。"""
         row = await self._pool.fetchrow(
             """
             SELECT id, alias, base_urls, api_key, stream
@@ -616,17 +636,18 @@ class ProviderManager:
             alias,
         )
         if not row:
-            return f"provider '{alias}' 不存在"
-        base_urls = row.get("base_urls") or {}
-        if isinstance(base_urls, str):
-            base_urls = json.loads(base_urls)
-        if not resolve_base_url(base_urls, api_type):
-            if api_type == "openai":
-                return (
-                    f"provider '{alias}' 未配置 OpenAI Base URL。"
-                    "请补充 openai URL，或使用 --type gemini/anthropic 切换。"
-                )
-            return f"provider '{alias}' 未配置可用的 {api_type} Base URL"
+            return None, f"provider '{alias}' 不存在"
+        if not resolve_base_url(row.get("base_urls"), api_type):
+            hint = f"，或使用 --type gemini/anthropic 切换 {slot}" if api_type == "openai" else ""
+            kind = "OpenAI " if api_type == "openai" else f"{api_type} "
+            return None, f"provider '{alias}' 未配置可用的 {kind}Base URL{hint}"
+        return row, None
+
+    async def switch(self, alias: str, model: str, *, api_type: str = "openai") -> str:
+        """热切换到指定 provider + model。返回确认信息。"""
+        row, err = await self._fetch_and_validate(alias, api_type, "default")
+        if err:
+            return err
 
         # 读取当前 slot 的 timeout（切换时保留）
         existing_timeout = await self._pool.fetchval(
@@ -663,25 +684,9 @@ class ProviderManager:
 
     async def switch_vision(self, alias: str, model: str, *, api_type: str = "openai") -> str:
         """热切换 vision slot 到指定 provider + model。"""
-        row = await self._pool.fetchrow(
-            """
-            SELECT id, alias, base_urls, api_key, stream
-            FROM llm_providers WHERE alias = $1
-            """,
-            alias,
-        )
-        if not row:
-            return f"provider '{alias}' 不存在"
-        base_urls = row.get("base_urls") or {}
-        if isinstance(base_urls, str):
-            base_urls = json.loads(base_urls)
-        if not resolve_base_url(base_urls, api_type):
-            if api_type == "openai":
-                return (
-                    f"provider '{alias}' 未配置 OpenAI Base URL。"
-                    "请补充 openai URL，或使用 --type gemini/anthropic 切换 vision。"
-                )
-            return f"provider '{alias}' 未配置可用的 {api_type} Base URL"
+        row, err = await self._fetch_and_validate(alias, api_type, "vision")
+        if err:
+            return err
 
         existing_timeout = await self._pool.fetchval(
             "SELECT request_timeout FROM llm_active WHERE key = 'vision'",
@@ -725,25 +730,9 @@ class ProviderManager:
 
     async def switch_trigger(self, alias: str, model: str, *, api_type: str = "openai") -> str:
         """热切换 trigger slot 到指定 provider + model。"""
-        row = await self._pool.fetchrow(
-            """
-            SELECT id, alias, base_urls, api_key, stream
-            FROM llm_providers WHERE alias = $1
-            """,
-            alias,
-        )
-        if not row:
-            return f"provider '{alias}' 不存在"
-        base_urls = row.get("base_urls") or {}
-        if isinstance(base_urls, str):
-            base_urls = json.loads(base_urls)
-        if not resolve_base_url(base_urls, api_type):
-            if api_type == "openai":
-                return (
-                    f"provider '{alias}' 未配置 OpenAI Base URL。"
-                    "请补充 openai URL，或使用 --type gemini/anthropic 切换 trigger。"
-                )
-            return f"provider '{alias}' 未配置可用的 {api_type} Base URL"
+        row, err = await self._fetch_and_validate(alias, api_type, "trigger")
+        if err:
+            return err
 
         existing_timeout = await self._pool.fetchval(
             "SELECT request_timeout FROM llm_active WHERE key = 'trigger'",
@@ -811,10 +800,7 @@ class ProviderManager:
             timeout = active_row.get("request_timeout") or 30
 
         # 创建临时 provider 检测维度
-        base_urls = row.get("base_urls") or {}
-        if isinstance(base_urls, str):
-            base_urls = json.loads(base_urls)
-        emb_base_url = base_urls.get("openai", "")
+        emb_base_url = _normalize_base_urls(row.get("base_urls")).get("openai", "")
         tmp = EmbeddingProvider(
             base_url=emb_base_url, api_key=row["api_key"], model=model,
             endpoint=endpoint, extra_body=extra_body,
@@ -904,11 +890,9 @@ class ProviderManager:
             extra_body = json.loads(eb_raw) if isinstance(eb_raw, str) else eb_raw
             timeout = active_row.get("request_timeout") or 30
 
-        mig_base_urls = prov_row.get("base_urls") or {}
-        if isinstance(mig_base_urls, str):
-            mig_base_urls = json.loads(mig_base_urls)
         new_provider = EmbeddingProvider(
-            base_url=mig_base_urls.get("openai", ""), api_key=prov_row["api_key"],
+            base_url=_normalize_base_urls(prov_row.get("base_urls")).get("openai", ""),
+            api_key=prov_row["api_key"],
             model=cfg["pending_model"],
             endpoint=endpoint, extra_body=extra_body,
             request_timeout=timeout,
@@ -1063,9 +1047,7 @@ class ProviderManager:
         extra_body = row.get("extra_body")
         if isinstance(extra_body, str):
             extra_body = json.loads(extra_body)
-        reb_base_urls = row.get("base_urls") or {}
-        if isinstance(reb_base_urls, str):
-            reb_base_urls = json.loads(reb_base_urls)
+        reb_base_urls = _normalize_base_urls(row.get("base_urls"))
         if endpoint is None:
             cfg = await self._pool.fetchrow(
                 "SELECT endpoint FROM embedding_config WHERE id = 1",
@@ -1087,11 +1069,7 @@ class ProviderManager:
         if isinstance(extra_body, str):
             extra_body = json.loads(extra_body)
 
-        base_urls = row.get("base_urls") or {}
-        if isinstance(base_urls, str):
-            base_urls = json.loads(base_urls)
-        base_urls = _normalize_base_urls(base_urls)
-        base_url = resolve_base_url(base_urls, api_type)
+        base_url = resolve_base_url(row.get("base_urls"), api_type)
 
         kwargs = {
             "base_url": base_url,
@@ -1179,11 +1157,7 @@ class ProviderManager:
         if isinstance(extra_body, str):
             extra_body = json.loads(extra_body)
 
-        base_urls = row.get("base_urls") or {}
-        if isinstance(base_urls, str):
-            base_urls = json.loads(base_urls)
-        base_urls = _normalize_base_urls(base_urls)
-        base_url = resolve_base_url(base_urls, api_type)
+        base_url = resolve_base_url(row.get("base_urls"), api_type)
 
         kwargs = {
             "base_url": base_url,
@@ -1280,11 +1254,7 @@ class ProviderManager:
         if isinstance(extra_body, str):
             extra_body = json.loads(extra_body)
 
-        base_urls = row.get("base_urls") or {}
-        if isinstance(base_urls, str):
-            base_urls = json.loads(base_urls)
-        base_urls = _normalize_base_urls(base_urls)
-        base_url = resolve_base_url(base_urls, api_type)
+        base_url = resolve_base_url(row.get("base_urls"), api_type)
 
         kwargs = {
             "base_url": base_url,
