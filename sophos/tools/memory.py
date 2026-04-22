@@ -13,6 +13,10 @@ class SetProfileSelfTool(Tool):
         return "output"
 
     @property
+    def group(self) -> str:
+        return "memory"
+
+    @property
     def name(self) -> str:
         return "set_profile_self"
 
@@ -45,6 +49,10 @@ class SetProfileContextTool(Tool):
     @property
     def category(self) -> str:
         return "output"
+
+    @property
+    def group(self) -> str:
+        return "memory"
 
     @property
     def name(self) -> str:
@@ -81,6 +89,10 @@ class SetProfileUserTool(Tool):
     @property
     def category(self) -> str:
         return "output"
+
+    @property
+    def group(self) -> str:
+        return "memory"
 
     @property
     def name(self) -> str:
@@ -125,6 +137,10 @@ class WriteMemoryTool(Tool):
         return "output"
 
     @property
+    def group(self) -> str:
+        return "memory"
+
+    @property
     def name(self) -> str:
         return "write_memory"
 
@@ -152,6 +168,10 @@ class WriteMemoryTool(Tool):
 
 class SearchMemoryTool(Tool):
     """搜索长期记忆。"""
+
+    @property
+    def group(self) -> str:
+        return "memory"
 
     @property
     def name(self) -> str:
@@ -195,6 +215,10 @@ class DeleteMemoryTool(Tool):
     @property
     def category(self) -> str:
         return "output"
+
+    @property
+    def group(self) -> str:
+        return "memory"
 
     @property
     def name(self) -> str:

@@ -13,6 +13,10 @@ class CorrectImageDescriptionTool(Tool):
     """
 
     @property
+    def group(self) -> str:
+        return "vision"
+
+    @property
     def name(self) -> str:
         return "correct_image_description"
 

@@ -19,6 +19,10 @@ class WebSearchTool(Tool):
     """Tavily 联网搜索。"""
 
     @property
+    def group(self) -> str:
+        return "web"
+
+    @property
     def name(self) -> str:
         return "web_search"
 
@@ -75,6 +79,10 @@ class WebFetchTool(Tool):
     """Tavily 网页内容提取。"""
 
     @property
+    def group(self) -> str:
+        return "web"
+
+    @property
     def name(self) -> str:
         return "web_fetch"
 
@@ -121,6 +129,10 @@ class WebFetchTool(Tool):
 
 class ViewImageTool(Tool):
     """抓取网络图片并通过 VLM 描述。"""
+
+    @property
+    def group(self) -> str:
+        return "vision"
 
     @property
     def name(self) -> str:

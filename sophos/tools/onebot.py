@@ -39,6 +39,7 @@ class OneBotTool(Tool):
         parameters: dict[str, Any],
         category: str = "input",
         scope: str = "all",
+        group: str = "messaging",
     ) -> None:
         self._action = action
         self._name = name
@@ -46,6 +47,7 @@ class OneBotTool(Tool):
         self._parameters = parameters
         self._category = category
         self._scope = scope
+        self._group = group
 
     @property
     def category(self) -> str:
@@ -54,6 +56,10 @@ class OneBotTool(Tool):
     @property
     def scope(self) -> str:
         return self._scope
+
+    @property
+    def group(self) -> str:
+        return self._group
 
     @property
     def name(self) -> str:
@@ -85,6 +91,10 @@ class SendMessageTool(Tool):
     @property
     def category(self) -> str:
         return "output"
+
+    @property
+    def group(self) -> str:
+        return "messaging"
 
     @property
     def name(self) -> str:
@@ -208,6 +218,7 @@ _delete_msg = OneBotTool(
     name="delete_msg",
     description="撤回一条消息",
     category="output",
+    group="messaging",
     parameters={
         "type": "object",
         "properties": {
@@ -243,6 +254,10 @@ class GroupAdminTool(Tool):
     @property
     def scope(self) -> str:
         return "group"
+
+    @property
+    def group(self) -> str:
+        return "admin"
 
     @property
     def name(self) -> str:
@@ -324,6 +339,10 @@ class QueryMessagesTool(Tool):
     用于跨 context 场景：LLM 看到背景摘要后，可以用此工具回溯原始对话。
     也可用于一般性的历史消息查询。
     """
+
+    @property
+    def group(self) -> str:
+        return "messaging"
 
     @property
     def name(self) -> str:
@@ -442,6 +461,7 @@ _get_stranger_info = OneBotTool(
     action="get_stranger_info",
     name="get_stranger_info",
     description="获取指定 QQ 号的昵称、性别、年龄等信息",
+    group="admin",
     parameters={
         "type": "object",
         "properties": {
@@ -462,6 +482,7 @@ _get_group_info = OneBotTool(
     action="get_group_info",
     name="get_group_info",
     description="获取指定群的名称、成员数等信息",
+    group="admin",
     parameters={
         "type": "object",
         "properties": {
@@ -475,6 +496,7 @@ _get_group_list = OneBotTool(
     action="get_group_list",
     name="get_group_list",
     description="获取已加入的群聊列表",
+    group="admin",
     parameters={"type": "object", "properties": {}},
 )
 
@@ -482,6 +504,7 @@ _get_group_member_info = OneBotTool(
     action="get_group_member_info",
     name="get_group_member_info",
     description="获取指定群成员的详细信息（昵称、群名片、角色、入群时间等）",
+    group="admin",
     parameters={
         "type": "object",
         "properties": {
@@ -496,6 +519,7 @@ _get_group_member_list = OneBotTool(
     action="get_group_member_list",
     name="get_group_member_list",
     description="获取指定群的全部成员列表",
+    group="admin",
     parameters={
         "type": "object",
         "properties": {

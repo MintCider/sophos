@@ -260,6 +260,34 @@ CREATE TABLE IF NOT EXISTS user_trigger_policy (
 );
 """
 
+_CREATE_CUSTOM_TOOLS_TABLE = """\
+CREATE TABLE IF NOT EXISTS custom_tools (
+    id              SERIAL          PRIMARY KEY,
+    name            TEXT            UNIQUE NOT NULL,
+    display_name    TEXT            NOT NULL,
+    description     TEXT            NOT NULL,
+    category        TEXT            NOT NULL DEFAULT 'input',
+    scope           TEXT            NOT NULL DEFAULT 'all',
+    tool_type       TEXT            NOT NULL DEFAULT 'image_generation',
+    provider_alias  TEXT,
+    model_name      TEXT,
+    api_type        TEXT            DEFAULT 'openai',
+    send_as         TEXT            DEFAULT 'image_url',
+    parameters      JSONB,
+    enabled         BOOLEAN         DEFAULT FALSE,
+    created_at      TIMESTAMPTZ     DEFAULT now(),
+    updated_at      TIMESTAMPTZ     DEFAULT now()
+);
+"""
+
+_CREATE_TOOL_DESCRIPTION_OVERRIDES_TABLE = """\
+CREATE TABLE IF NOT EXISTS tool_description_overrides (
+    tool_name       TEXT            PRIMARY KEY,
+    description     TEXT            NOT NULL,
+    updated_at      TIMESTAMPTZ     DEFAULT now()
+);
+"""
+
 _CREATE_INDEXES = [
     # 按群聊查最近消息（最常用）
     """\
@@ -335,5 +363,8 @@ async def _init_schema(pool: asyncpg.Pool) -> None:
         await conn.execute(_CREATE_PERM_TOOL_TABLE)
         # 用户触发策略
         await conn.execute(_CREATE_USER_TRIGGER_POLICY_TABLE)
+        # 自定义工具
+        await conn.execute(_CREATE_CUSTOM_TOOLS_TABLE)
+        await conn.execute(_CREATE_TOOL_DESCRIPTION_OVERRIDES_TABLE)
         for ddl in _CREATE_INDEXES:
             await conn.execute(ddl)

@@ -27,6 +27,11 @@ const router = createRouter({
           name: 'providers',
           component: () => import('@/views/ProvidersView.vue'),
         },
+        {
+          path: 'tools',
+          name: 'tools',
+          component: () => import('@/views/ToolsView.vue'),
+        },
       ],
     },
     {

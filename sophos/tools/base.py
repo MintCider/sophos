@@ -16,24 +16,30 @@ class Tool(ABC):
     可选覆盖：
     - category:    工具类别，"input"（查询）或 "output"（操作），默认 "input"
     - scope:       适用场景，"all" / "group" / "private"，默认 "all"
+    - group:       工具分组，用于 WebUI 展示分类，默认根据 category 推导
     """
 
     @property
     def category(self) -> str:
-        """工具类别："input"（查询信息）或 "output"（执行操作）。
-
-        默认 "input"（安全默认值，只读无副作用）。
-        输出工具需覆盖此属性返回 "output"。
-        """
         return "input"
 
     @property
     def scope(self) -> str:
-        """适用场景："all"（通用）、"group"（仅群聊）、"private"（仅私聊）。
-
-        默认 "all"。群管理工具应覆盖为 "group"。
-        """
         return "all"
+
+    @property
+    def group(self) -> str:
+        """工具分组：WebUI 按此字段归类展示。
+
+        内置工具应覆盖此属性返回具体分组名，如 "messaging"、"memory" 等。
+        自定义工具由 DB 的 tool_type 字段决定。
+        """
+        return "other"
+
+    @property
+    def is_builtin(self) -> bool:
+        """是否为内置工具（不可删除）。"""
+        return True
 
     @property
     @abstractmethod

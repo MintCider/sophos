@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 import aiohttp
 from aiohttp import web
 
+from sophos import runtime_config
 from sophos.api import create_app
 from sophos.cleanup import run_cleanup_loop
 from sophos.config import settings
@@ -20,8 +21,7 @@ from sophos.llm.provider_manager import ProviderManager
 from sophos.memory.store import MemoryStore
 from sophos.message_store import MessageStore
 from sophos.onebot_api import OneBotAPI
-from sophos.pipeline import INGEST_STAGES, RESPONSE_STAGES, Pipeline, PipelineContext
-from sophos import runtime_config
+from sophos.pipeline import INGEST_STAGES, RESPONSE_STAGES, Pipeline, PipelineContext, _get_registry
 
 logger = logging.getLogger("sophos")
 
@@ -111,7 +111,12 @@ async def start() -> None:
     memory_store = MemoryStore(pool, provider_mgr.get_embedding_provider())
 
     # 启动 HTTP API server（非阻塞）
-    app = await create_app(pool=pool, provider_mgr=provider_mgr, memory_store=memory_store)
+    app = await create_app(
+        pool=pool,
+        provider_mgr=provider_mgr,
+        memory_store=memory_store,
+        tool_registry=_get_registry(),
+    )
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, settings.api_host, settings.api_port)

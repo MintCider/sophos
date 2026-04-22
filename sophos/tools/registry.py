@@ -7,6 +7,8 @@ from sophos.tools.base import Tool
 
 logger = logging.getLogger(__name__)
 
+UNSAFE_DISABLE_TOOLS: frozenset[str] = frozenset({"send_msg"})
+
 
 class ToolRegistry:
     """管理所有已注册的工具。
@@ -25,6 +27,7 @@ class ToolRegistry:
 
     def __init__(self) -> None:
         self._tools: dict[str, Tool] = {}
+        self._disabled_tools: set[str] = set()
 
     def register(self, tool: Tool) -> None:
         """注册一个工具。重名会覆盖并警告。"""
@@ -40,6 +43,19 @@ class ToolRegistry:
     def list_tools(self) -> list[str]:
         """列出所有已注册工具的名称。"""
         return list(self._tools.keys())
+
+    def set_disabled(self, name: str, disabled: bool) -> bool:
+        """设置工具禁用状态。返回是否成功（send_msg 不可禁用）。"""
+        if disabled and name in UNSAFE_DISABLE_TOOLS:
+            return False
+        if disabled:
+            self._disabled_tools.add(name)
+        else:
+            self._disabled_tools.discard(name)
+        return True
+
+    def is_disabled(self, name: str) -> bool:
+        return name in self._disabled_tools
 
     async def execute(self, name: str, params: dict[str, Any], context: dict[str, Any]) -> Any:
         """按名称调用工具。
@@ -65,6 +81,7 @@ class ToolRegistry:
         *,
         category: str | None = None,
         scope: str | None = None,
+        description_overrides: dict[str, str] | None = None,
     ) -> list[dict[str, Any]]:
         """导出工具的 schema，用于传给 LLM 的 tools 字段。
 
@@ -72,10 +89,60 @@ class ToolRegistry:
             category: 按类别过滤，"input" 或 "output"。None 表示全部。
             scope: 按适用场景过滤，"group" 或 "private"。
                    None 表示全部；指定后会包含该 scope 和 "all" 的工具。
+            description_overrides: 工具描述覆盖 {tool_name: custom_description}。
         """
-        tools: list[Tool] = list(self._tools.values())
+        tools: list[Tool] = [
+            t for t in self._tools.values()
+            if t.name not in self._disabled_tools
+        ]
         if category is not None:
             tools = [t for t in tools if t.category == category]
         if scope is not None:
             tools = [t for t in tools if t.scope in (scope, "all")]
-        return [tool.to_function_schema() for tool in tools]
+
+        schemas = []
+        for tool in tools:
+            schema = tool.to_function_schema()
+            if description_overrides and tool.name in description_overrides:
+                schema = {
+                    **schema,
+                    "function": {
+                        **schema["function"],
+                        "description": description_overrides[tool.name],
+                    },
+                }
+            schemas.append(schema)
+        return schemas
+
+    def get_tools_info(self, *, description_overrides: dict[str, str] | None = None) -> list[dict[str, Any]]:
+        """导出所有工具的元信息，供 WebUI 展示。
+
+        Args:
+            description_overrides: 从 DB 加载的描述覆盖 {tool_name: custom_description}。
+
+        Returns:
+            工具信息列表，每个元素包含：
+            name, description, default_description, category, scope, group,
+            is_builtin, is_custom, enabled, parameters
+        """
+        result = []
+        for tool in self._tools.values():
+            default_desc = tool.description
+            custom_desc = description_overrides.get(tool.name) if description_overrides else None
+            effective_desc = custom_desc if custom_desc else default_desc
+
+            result.append({
+                "name": tool.name,
+                "description": effective_desc,
+                "default_description": default_desc,
+                "has_custom_description": custom_desc is not None,
+                "category": tool.category,
+                "scope": tool.scope,
+                "group": tool.group,
+                "is_builtin": tool.is_builtin,
+                "is_custom": not tool.is_builtin,
+                "enabled": tool.name not in self._disabled_tools,
+                "parameters": tool.parameters,
+                "can_disable": tool.name not in UNSAFE_DISABLE_TOOLS,
+            })
+        return result

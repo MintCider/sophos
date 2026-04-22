@@ -21,6 +21,7 @@ import {
   Gauge,
   ScrollText,
   Orbit,
+  Wrench,
   LogOut,
   Sun,
   Moon,
@@ -62,6 +63,7 @@ const menuOptions = [
   { label: '仪表盘', key: 'dashboard', icon: renderIcon(Gauge) },
   { label: '日志', key: 'logs', icon: renderIcon(ScrollText) },
   { label: '模型服务商', key: 'providers', icon: renderIcon(Orbit) },
+  { label: '工具管理', key: 'tools', icon: renderIcon(Wrench) },
 ]
 
 function handleMenuUpdate(key: string) {

@@ -40,6 +40,7 @@ from sophos.tools.onebot import ALL_TOOLS
 from sophos.tools.registry import ToolRegistry
 from sophos.tools.vision import VISION_TOOLS
 from sophos.tools.web import WEB_TOOLS
+from sophos.tools.image_gen import IMAGE_GEN_TOOLS
 from sophos import trigger
 from sophos.enrichment import get_enrichment_registry
 from sophos.vision import process_message_images
@@ -317,15 +318,47 @@ def _get_registry() -> ToolRegistry:
     global _tool_registry
     if _tool_registry is None:
         _tool_registry = ToolRegistry()
-        for tool in ALL_TOOLS + MEMORY_TOOLS + VISION_TOOLS + WEB_TOOLS:
+        for tool in ALL_TOOLS + MEMORY_TOOLS + VISION_TOOLS + WEB_TOOLS + IMAGE_GEN_TOOLS:
             _tool_registry.register(tool)
     return _tool_registry
+
+
+_tool_disabled_loaded: bool = False
+
+
+async def _load_tool_disabled_state(registry: ToolRegistry) -> None:
+    """从 DB 加载工具禁用状态（仅首次调用时加载）。"""
+    global _tool_disabled_loaded
+    if _tool_disabled_loaded:
+        return
+    pool = get_pool()
+    rows = await pool.fetch("SELECT name, enabled FROM custom_tools")
+    for row in rows:
+        if not row["enabled"]:
+            registry.set_disabled(row["name"], True)
+    _tool_disabled_loaded = True
+
+
+def _invalidate_tool_disabled_cache() -> None:
+    """清除工具禁用状态缓存，下次触发时重新加载。"""
+    global _tool_disabled_loaded
+    _tool_disabled_loaded = False
+    # 同时清除 registry 中的禁用状态，以便重新从 DB 加载
+    if _tool_registry is not None:
+        _tool_registry._disabled_tools.clear()
+
+
+async def _load_description_overrides() -> dict[str, str]:
+    """从 DB 加载工具描述覆盖。"""
+    pool = get_pool()
+    rows = await pool.fetch("SELECT tool_name, description FROM tool_description_overrides")
+    return {r["tool_name"]: r["description"] for r in rows}
 
 
 _RAW_TOOL_CALL_RE = re.compile(
     r"^(send_msg|set_profile_self|set_profile_context|set_profile_user|write_memory|"
     r"search_memory|delete_memory|correct_image_description|"
-    r"query_messages|set_group_name|web_search|web_fetch|view_image)\s*[\(\{]",
+    r"query_messages|set_group_name|web_search|web_fetch|view_image|generate_image)\s*[\(\{]",
 )
 
 
@@ -375,6 +408,7 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
     """构建上下文 → tool loop → LLM 通过 send_msg tool 回复。"""
     provider = ctx.provider_mgr.get_provider()
     registry = _get_registry()
+    await _load_tool_disabled_state(registry)
 
     nickname = settings.bot_nickname or "Sophos"
     fmt_desc = describe_schema(runtime_config.get("llm_user_schema"))
@@ -531,6 +565,8 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
         "message_type": ctx.message_type,
         "group_id": ctx.group_id,
         "user_id": ctx.user_id,
+        "provider_mgr": ctx.provider_mgr,
+        "pool": get_pool(),
     }
     if memory_store:
         tool_context["memory_store"] = memory_store
@@ -547,7 +583,10 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
             sent_via_tool = True
         return result
 
-    tool_schemas = registry.get_function_schemas(scope=ctx.message_type)
+    tool_schemas = registry.get_function_schemas(
+        scope=ctx.message_type,
+        description_overrides=await _load_description_overrides(),
+    )
 
     # 工具白名单过滤
     from sophos import permission as _perm
