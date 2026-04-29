@@ -7,11 +7,16 @@
 import asyncio
 import base64
 import logging
+from collections import deque
+from datetime import UTC, datetime
 from typing import Any
+from uuid import uuid4
 
 import aiohttp
 
 from sophos.llm.provider_manager import resolve_base_url
+from sophos.message_store import MessageStore
+from sophos.onebot_api import OneBotAPI
 from sophos.tools.base import Tool
 
 logger = logging.getLogger(__name__)
@@ -34,6 +39,9 @@ _SIZE_OPTIONS = [
 _FORMAT_OPTIONS = ["png", "jpeg", "webp"]
 _QUALITY_OPTIONS = ["auto", "low", "medium", "high"]
 
+_IMAGE_QUEUE_PENDING: dict[str, dict[str, Any]] = {}
+_IMAGE_QUEUE_COMPLETED: deque[dict[str, Any]] = deque(maxlen=3)
+
 _DEFAULT_PARAMETERS: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -55,9 +63,147 @@ _DEFAULT_PARAMETERS: dict[str, Any] = {
             "enum": _QUALITY_OPTIONS,
             "description": "图片画质",
         },
+        "callback_text": {
+            "type": "string",
+            "description": "图片发送成功后，再单独发送到当前对话的文本消息（可选）",
+        },
     },
     "required": ["prompt"],
 }
+
+
+def _now_iso() -> str:
+    return datetime.now(tz=UTC).isoformat()
+
+
+def _session_from_context(context: dict[str, Any]) -> dict[str, Any]:
+    msg_type = context.get("message_type", "group")
+    if msg_type == "group":
+        return {"message_type": "group", "group_id": context.get("group_id")}
+    return {"message_type": "private", "user_id": context.get("user_id")}
+
+
+def _clone_queue_record(record: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **record,
+        "session": dict(record.get("session") or {}),
+    }
+
+
+def _image_queue_snapshot() -> dict[str, Any]:
+    pending = [_clone_queue_record(record) for record in _IMAGE_QUEUE_PENDING.values()]
+    completed = [_clone_queue_record(record) for record in _IMAGE_QUEUE_COMPLETED]
+    return {
+        "pending": pending,
+        "completed": completed,
+        "pending_count": len(pending),
+        "completed_count": len(completed),
+    }
+
+
+def _register_queue_task(
+    *,
+    session: dict[str, Any],
+    prompt: str,
+    callback_text: str | None,
+) -> str:
+    task_id = f"img_{uuid4().hex[:12]}"
+    _IMAGE_QUEUE_PENDING[task_id] = {
+        "task_id": task_id,
+        "status": "pending",
+        "created_at": _now_iso(),
+        "completed_at": None,
+        "session": dict(session),
+        "prompt": prompt,
+        "callback_text": callback_text,
+        "ok": None,
+        "image_message_id": None,
+        "callback_message_id": None,
+        "error": None,
+    }
+    return task_id
+
+
+def _complete_queue_task(
+    task_id: str,
+    *,
+    ok: bool,
+    image_message_id: int | None = None,
+    callback_message_id: int | None = None,
+    error: str | None = None,
+) -> None:
+    record = _IMAGE_QUEUE_PENDING.pop(task_id, None)
+    if record is None:
+        logger.warning("generate_image: queue task %s is missing from pending", task_id)
+        return
+    record.update(
+        {
+            "status": "completed",
+            "completed_at": _now_iso(),
+            "ok": ok,
+            "image_message_id": image_message_id,
+            "callback_message_id": callback_message_id,
+            "error": error,
+        }
+    )
+    _IMAGE_QUEUE_COMPLETED.appendleft(record)
+
+
+def _self_message_user_id(msg_type: str, target_id: int, context: dict[str, Any]) -> int:
+    if msg_type == "private":
+        return target_id
+    return context.get("self_id", 0)
+
+
+def _build_send_params(
+    *,
+    msg_type: str,
+    target_id: int,
+    segments: list[dict[str, Any]],
+) -> dict[str, Any]:
+    send_params: dict[str, Any] = {
+        "message_type": msg_type,
+        "message": segments,
+    }
+    if msg_type == "group":
+        send_params["group_id"] = target_id
+    else:
+        send_params["user_id"] = target_id
+    return send_params
+
+
+async def _send_callback_text(
+    *,
+    api: OneBotAPI,
+    store: MessageStore,
+    msg_type: str,
+    target_id: int,
+    callback_text: str,
+    context: dict[str, Any],
+) -> int:
+    segments = [{"type": "text", "data": {"text": callback_text}}]
+    result = await api.call(
+        "send_msg",
+        _build_send_params(msg_type=msg_type, target_id=target_id, segments=segments),
+    )
+    message_id = result.get("message_id")
+    if message_id is None:
+        raise RuntimeError(f"send_msg returned no message_id (result={result})")
+
+    await store.save_self_message(
+        message_id=message_id,
+        message_type=msg_type,
+        group_id=target_id if msg_type == "group" else None,
+        user_id=_self_message_user_id(msg_type, target_id, context),
+        raw_message=segments,
+    )
+    logger.info(
+        "generate_image: callback text sent (message_id=%s, target=%s:%s)",
+        message_id,
+        msg_type,
+        target_id,
+    )
+    return message_id
 
 
 class ImageGenerationTool(Tool):
@@ -97,6 +243,10 @@ class ImageGenerationTool(Tool):
         size = params.get("size") or _DEFAULT_SIZE
         fmt = params.get("format") or _DEFAULT_FORMAT
         quality = params.get("quality") or _DEFAULT_QUALITY
+        raw_callback_text = params.get("callback_text")
+        callback_text = raw_callback_text.strip() if isinstance(raw_callback_text, str) else None
+        if not callback_text:
+            callback_text = None
 
         row = await pool.fetchrow(
             "SELECT provider_alias, model_name, api_type, send_as FROM custom_tools WHERE name = 'generate_image'"
@@ -130,9 +280,17 @@ class ImageGenerationTool(Tool):
             return {"error": f"供应商 '{provider_alias}' 未配置 {api_type} Base URL"}
 
         api_key = prov_row["api_key"]
+        session = _session_from_context(context)
+        task_id = _register_queue_task(
+            session=session,
+            prompt=prompt,
+            callback_text=callback_text,
+        )
 
         logger.info(
-            "generate_image: dispatching async task %s (%s) model=%s size=%s fmt=%s quality=%s prompt[:60]=%r",
+            "generate_image: dispatching async task %s provider=%s (%s) "
+            "model=%s size=%s fmt=%s quality=%s prompt[:60]=%r",
+            task_id,
             provider_alias,
             api_type,
             model_name,
@@ -144,19 +302,22 @@ class ImageGenerationTool(Tool):
 
         asyncio.create_task(
             _generate_and_send(
+                task_id=task_id,
                 base_url=base_url,
                 api_key=api_key,
                 model_name=model_name,
                 api_type=api_type,
                 prompt=prompt,
+                callback_text=callback_text,
                 size=size,
                 fmt=fmt,
                 quality=quality,
                 context=context,
-            )
+            ),
+            name=task_id,
         )
 
-        return {"status": "generating", "prompt": prompt}
+        return {"status": "generating", "task_id": task_id, "prompt": prompt, "callback_text": callback_text}
 
     async def _call_openai(
         self,
@@ -244,13 +405,49 @@ class ImageGenerationTool(Tool):
         return None, image_b64
 
 
+class CheckImageQueueTool(Tool):
+    """查看当前进程内的图像生成队列。"""
+
+    @property
+    def category(self) -> str:
+        return "input"
+
+    @property
+    def scope(self) -> str:
+        return "all"
+
+    @property
+    def group(self) -> str:
+        return "image_generation"
+
+    @property
+    def name(self) -> str:
+        return "check_image_queue"
+
+    @property
+    def description(self) -> str:
+        return "检查当前绘图队列，返回所有 pending 任务和最近三个 completed 任务"
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {},
+        }
+
+    async def execute(self, params: dict[str, Any], context: dict[str, Any]) -> Any:
+        return _image_queue_snapshot()
+
+
 async def _generate_and_send(
     *,
+    task_id: str,
     base_url: str,
     api_key: str,
     model_name: str,
     api_type: str,
     prompt: str,
+    callback_text: str | None,
     size: str,
     fmt: str,
     quality: str,
@@ -280,16 +477,18 @@ async def _generate_and_send(
                 fmt,
                 quality,
             )
-    except Exception:
+    except Exception as e:
         logger.exception(
             "generate_image: API call failed (model=%s api_type=%s)",
             model_name,
             api_type,
         )
+        _complete_queue_task(task_id, ok=False, error=f"image API call failed: {e}")
         return
 
     if not image_url and not image_b64:
         logger.warning("generate_image: API returned no image data (model=%s)", model_name)
+        _complete_queue_task(task_id, ok=False, error=f"image API returned no image data: {model_name}")
         return
 
     logger.debug(
@@ -303,6 +502,10 @@ async def _generate_and_send(
     pool = context["pool"]
     msg_type = context.get("message_type", "group")
     target_id = context.get("group_id") if msg_type == "group" else context.get("user_id")
+    if target_id is None:
+        logger.warning("generate_image: current %s target id is missing", msg_type)
+        _complete_queue_task(task_id, ok=False, error=f"current {msg_type} target id is missing")
+        return
 
     segments: list[dict[str, Any]] = []
     if image_b64:
@@ -310,19 +513,13 @@ async def _generate_and_send(
     else:
         segments.append({"type": "image", "data": {"url": image_url}})
 
-    send_params: dict[str, Any] = {
-        "message_type": msg_type,
-        "message": segments,
-    }
-    if msg_type == "group":
-        send_params["group_id"] = target_id
-    else:
-        send_params["user_id"] = target_id
+    send_params = _build_send_params(msg_type=msg_type, target_id=target_id, segments=segments)
 
     try:
         result = await api.call("send_msg", send_params)
-    except Exception:
+    except Exception as e:
         logger.exception("generate_image: failed to send image to OneBot")
+        _complete_queue_task(task_id, ok=False, error=f"failed to send image to OneBot: {e}")
         return
 
     message_id = result.get("message_id")
@@ -332,7 +529,7 @@ async def _generate_and_send(
             message_id=message_id,
             message_type=msg_type,
             group_id=target_id if msg_type == "group" else None,
-            user_id=context.get("self_id", 0),
+            user_id=_self_message_user_id(msg_type, target_id, context),
             raw_message=segments,
         )
         logger.info(
@@ -346,7 +543,32 @@ async def _generate_and_send(
             "generate_image: send_msg returned no message_id (result=%s)",
             result,
         )
+        _complete_queue_task(task_id, ok=False, error=f"send_msg returned no message_id (result={result})")
         return
+
+    callback_message_id: int | None = None
+    callback_error: str | None = None
+    if callback_text:
+        try:
+            callback_message_id = await _send_callback_text(
+                api=api,
+                store=store,
+                msg_type=msg_type,
+                target_id=target_id,
+                callback_text=callback_text,
+                context=context,
+            )
+        except Exception as e:
+            callback_error = f"failed to send callback text: {e}"
+            logger.exception("generate_image: failed to send callback text")
+
+    _complete_queue_task(
+        task_id,
+        ok=callback_error is None,
+        image_message_id=message_id,
+        callback_message_id=callback_message_id,
+        error=callback_error,
+    )
 
     # VLM 描述
     image_data: bytes | None = None
@@ -402,4 +624,4 @@ async def _generate_and_send(
                 logger.exception("generate_image: VLM description failed")
 
 
-IMAGE_GEN_TOOLS: list[Tool] = [ImageGenerationTool()]
+IMAGE_GEN_TOOLS: list[Tool] = [ImageGenerationTool(), CheckImageQueueTool()]
