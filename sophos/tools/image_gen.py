@@ -6,6 +6,7 @@
 
 import asyncio
 import base64
+import json
 import logging
 from collections import deque
 from datetime import UTC, datetime
@@ -25,6 +26,7 @@ _DEFAULT_DESCRIPTION = "根据文本描述生成图像，并将图片发送到�
 _DEFAULT_SIZE = "auto"
 _DEFAULT_FORMAT = "png"
 _DEFAULT_QUALITY = "auto"
+_DEFAULT_REQUEST_TIMEOUT = 600
 
 _SIZE_OPTIONS = [
     "auto",
@@ -74,6 +76,27 @@ _DEFAULT_PARAMETERS: dict[str, Any] = {
 
 def _now_iso() -> str:
     return datetime.now(tz=UTC).isoformat()
+
+
+def _normalize_config(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _request_timeout_from_config(raw: Any) -> int:
+    config = _normalize_config(raw)
+    value = config.get("request_timeout", _DEFAULT_REQUEST_TIMEOUT)
+    try:
+        timeout = int(value)
+    except (TypeError, ValueError):
+        return _DEFAULT_REQUEST_TIMEOUT
+    if not 5 <= timeout <= 3600:
+        return _DEFAULT_REQUEST_TIMEOUT
+    return timeout
 
 
 def _session_from_context(context: dict[str, Any]) -> dict[str, Any]:
@@ -249,7 +272,11 @@ class ImageGenerationTool(Tool):
             callback_text = None
 
         row = await pool.fetchrow(
-            "SELECT provider_alias, model_name, api_type, send_as FROM custom_tools WHERE name = 'generate_image'"
+            """
+            SELECT provider_alias, model_name, api_type, send_as, config
+            FROM custom_tools
+            WHERE name = 'generate_image'
+            """
         )
         if not row or not row["provider_alias"] or not row["model_name"]:
             logger.warning("generate_image called but tool is not configured")
@@ -258,6 +285,7 @@ class ImageGenerationTool(Tool):
         provider_alias = row["provider_alias"]
         model_name = row["model_name"]
         api_type = row["api_type"] or "openai"
+        request_timeout = _request_timeout_from_config(row.get("config"))
 
         prov_row = await pool.fetchrow(
             "SELECT base_urls, api_key FROM llm_providers WHERE alias = $1",
@@ -309,6 +337,7 @@ class ImageGenerationTool(Tool):
                 api_type=api_type,
                 prompt=prompt,
                 callback_text=callback_text,
+                request_timeout=request_timeout,
                 size=size,
                 fmt=fmt,
                 quality=quality,
@@ -317,7 +346,13 @@ class ImageGenerationTool(Tool):
             name=task_id,
         )
 
-        return {"status": "generating", "task_id": task_id, "prompt": prompt, "callback_text": callback_text}
+        return {
+            "status": "generating",
+            "task_id": task_id,
+            "prompt": prompt,
+            "callback_text": callback_text,
+            "request_timeout": request_timeout,
+        }
 
     async def _call_openai(
         self,
@@ -328,6 +363,7 @@ class ImageGenerationTool(Tool):
         size: str = _DEFAULT_SIZE,
         fmt: str = _DEFAULT_FORMAT,
         quality: str = _DEFAULT_QUALITY,
+        request_timeout: int = _DEFAULT_REQUEST_TIMEOUT,
     ) -> tuple[str | None, str | None]:
         url = f"{base_url.rstrip('/')}/images/generations"
         payload: dict[str, Any] = {
@@ -349,7 +385,7 @@ class ImageGenerationTool(Tool):
                 url,
                 json=payload,
                 headers=headers,
-                timeout=aiohttp.ClientTimeout(total=300),
+                timeout=aiohttp.ClientTimeout(total=request_timeout),
             ) as resp,
         ):
             if resp.status != 200:
@@ -369,6 +405,7 @@ class ImageGenerationTool(Tool):
         size: str = _DEFAULT_SIZE,
         fmt: str = _DEFAULT_FORMAT,
         quality: str = _DEFAULT_QUALITY,
+        request_timeout: int = _DEFAULT_REQUEST_TIMEOUT,
     ) -> tuple[str | None, str | None]:
         url = f"{base_url.rstrip('/')}/models/{model}:generateImages?key={api_key}"
         config: dict[str, Any] = {"numberOfImages": 1}
@@ -390,7 +427,7 @@ class ImageGenerationTool(Tool):
                 url,
                 json=payload,
                 headers=headers,
-                timeout=aiohttp.ClientTimeout(total=300),
+                timeout=aiohttp.ClientTimeout(total=request_timeout),
             ) as resp,
         ):
             if resp.status != 200:
@@ -448,6 +485,7 @@ async def _generate_and_send(
     api_type: str,
     prompt: str,
     callback_text: str | None,
+    request_timeout: int,
     size: str,
     fmt: str,
     quality: str,
@@ -466,6 +504,7 @@ async def _generate_and_send(
                 size,
                 fmt,
                 quality,
+                request_timeout,
             )
         else:
             image_url, image_b64 = await tool._call_openai(
@@ -476,6 +515,7 @@ async def _generate_and_send(
                 size,
                 fmt,
                 quality,
+                request_timeout,
             )
     except Exception as e:
         logger.exception(

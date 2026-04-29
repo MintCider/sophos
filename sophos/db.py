@@ -274,6 +274,7 @@ CREATE TABLE IF NOT EXISTS custom_tools (
     api_type        TEXT            DEFAULT 'openai',
     send_as         TEXT            DEFAULT 'image_url',
     parameters      JSONB,
+    config          JSONB           NOT NULL DEFAULT '{}'::jsonb,
     enabled         BOOLEAN         DEFAULT FALSE,
     created_at      TIMESTAMPTZ     DEFAULT now(),
     updated_at      TIMESTAMPTZ     DEFAULT now()

@@ -3,6 +3,7 @@ import {
   NButton,
   NCard,
   NInput,
+  NInputNumber,
   NSelect,
   NSpace,
   NSwitch,
@@ -27,6 +28,7 @@ interface CustomConfig {
   model_name: string | null
   api_type: ApiType
   send_as: string
+  request_timeout: number
 }
 
 interface ToolInfo {
@@ -56,6 +58,7 @@ interface ImageConfig {
   model_name: string
   api_type: ApiType
   send_as: string
+  request_timeout: number
   description: string
   available_providers: string[]
 }
@@ -78,6 +81,7 @@ const imageConfig = reactive<ImageConfig>({
   model_name: '',
   api_type: 'openai',
   send_as: 'image_url',
+  request_timeout: 600,
   description: '',
   available_providers: [],
 })
@@ -176,6 +180,7 @@ async function loadImageConfig() {
     imageConfig.model_name = cfg.model_name ?? ''
     imageConfig.api_type = (cfg.api_type ?? 'openai') as ApiType
     imageConfig.send_as = cfg.send_as ?? 'image_url'
+    imageConfig.request_timeout = cfg.request_timeout ?? 600
     imageConfig.description = cfg.description ?? ''
     imageConfig.available_providers = cfg.available_providers ?? []
     imageConfigLoaded.value = true
@@ -192,6 +197,7 @@ async function saveImageConfig(tool: ToolInfo) {
       model_name: imageConfig.model_name || null,
       api_type: imageConfig.api_type,
       send_as: imageConfig.send_as,
+      request_timeout: imageConfig.request_timeout,
       description: imageConfig.description,
       enabled: tool.enabled,
     })
@@ -343,6 +349,16 @@ onMounted(loadTools)
                       <NSelect
                         v-model:value="imageConfig.send_as"
                         :options="sendAsOptions"
+                      />
+                    </label>
+
+                    <label class="config-label">
+                      <span>请求超时（秒）</span>
+                      <NInputNumber
+                        v-model:value="imageConfig.request_timeout"
+                        :min="5"
+                        :max="3600"
+                        :step="30"
                       />
                     </label>
                   </div>

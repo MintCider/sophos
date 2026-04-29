@@ -1,9 +1,11 @@
 """工具管理 API。"""
 
+import json
+
 import asyncpg
 from aiohttp import web
 
-from sophos.tools.image_gen import _DEFAULT_DESCRIPTION
+from sophos.tools.image_gen import _DEFAULT_DESCRIPTION, _DEFAULT_REQUEST_TIMEOUT
 from sophos.tools.registry import UNSAFE_DISABLE_TOOLS, ToolRegistry
 
 routes = web.RouteTableDef()
@@ -27,6 +29,25 @@ _GROUP_ORDER: list[str] = [
     "image_generation",
     "other",
 ]
+
+
+def _json_object(raw: object) -> dict:
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _coerce_request_timeout(value: object) -> int:
+    try:
+        timeout = int(value) if value is not None else _DEFAULT_REQUEST_TIMEOUT
+    except (TypeError, ValueError):
+        raise web.HTTPBadRequest(reason="request_timeout 必须是整数秒") from None
+    if not 5 <= timeout <= 3600:
+        raise web.HTTPBadRequest(reason="request_timeout 范围必须是 5~3600 秒")
+    return timeout
 
 
 @routes.get("/api/tools")
@@ -205,7 +226,7 @@ async def get_image_generation_config(request: web.Request) -> web.Response:
     row = await pool.fetchrow(
         """
         SELECT name, display_name, description, provider_alias, model_name,
-               api_type, send_as, enabled
+               api_type, send_as, config, enabled
         FROM custom_tools
         WHERE name = 'generate_image'
         """
@@ -213,6 +234,8 @@ async def get_image_generation_config(request: web.Request) -> web.Response:
 
     if row:
         config = dict(row)
+        custom_config = _json_object(config.pop("config", None))
+        config["request_timeout"] = _coerce_request_timeout(custom_config.get("request_timeout"))
     else:
         config = {
             "name": "generate_image",
@@ -222,6 +245,7 @@ async def get_image_generation_config(request: web.Request) -> web.Response:
             "model_name": None,
             "api_type": "openai",
             "send_as": "image_url",
+            "request_timeout": _DEFAULT_REQUEST_TIMEOUT,
             "enabled": False,
         }
 
@@ -243,6 +267,7 @@ async def update_image_generation_config(request: web.Request) -> web.Response:
     api_type = payload.get("api_type", "openai")
     send_as = payload.get("send_as", "image_url")
     description = payload.get("description") or _DEFAULT_DESCRIPTION
+    request_timeout = _coerce_request_timeout(payload.get("request_timeout"))
     enabled = bool(payload.get("enabled", False))
 
     if api_type not in ("openai", "gemini"):
@@ -260,22 +285,24 @@ async def update_image_generation_config(request: web.Request) -> web.Response:
         """
         INSERT INTO custom_tools (
             name, display_name, description, category, scope, tool_type,
-            provider_alias, model_name, api_type, send_as, enabled
+            provider_alias, model_name, api_type, send_as, config, enabled
         )
         VALUES (
             'generate_image', '图像生成', $1, 'output', 'all', 'image_generation',
-            $2, $3, $4, $5, $6
+            $2, $3, $4, $5, $6::jsonb, $7
         )
         ON CONFLICT (name) DO UPDATE SET
             description = $1, provider_alias = $2, model_name = $3,
             api_type = $4, send_as = $5,
-            enabled = $6, updated_at = now()
+            config = COALESCE(custom_tools.config, '{}'::jsonb) || $6::jsonb,
+            enabled = $7, updated_at = now()
         """,
         description,
         provider_alias,
         model_name,
         api_type,
         send_as,
+        json.dumps({"request_timeout": request_timeout}, ensure_ascii=False),
         enabled,
     )
 
