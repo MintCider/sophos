@@ -4,7 +4,6 @@
 multimodal 端点的请求格式自动适配（input 从字符串列表变为嵌套对象列表）。
 """
 
-import json
 import logging
 from typing import Any
 

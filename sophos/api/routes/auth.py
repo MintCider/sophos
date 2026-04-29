@@ -22,8 +22,8 @@ async def login(request: web.Request) -> web.Response:
     """验证密码，成功则设置 httpOnly session cookie。"""
     try:
         body = await request.json()
-    except (json.JSONDecodeError, Exception):
-        raise web.HTTPBadRequest(reason="Invalid JSON")
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise web.HTTPBadRequest(reason="Invalid JSON") from exc
 
     password = body.get("password", "")
     if not settings.webui_password or password != settings.webui_password:
@@ -62,7 +62,9 @@ async def check(request: web.Request) -> web.Response:
 
     token = request.cookies.get("sophos_session")
     authenticated = bool(token and validate_session(token))
-    return web.json_response({
-        "authenticated": authenticated,
-        "required": True,
-    })
+    return web.json_response(
+        {
+            "authenticated": authenticated,
+            "required": True,
+        }
+    )

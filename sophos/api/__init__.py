@@ -28,14 +28,17 @@ async def create_app(
     app["tool_registry"] = tool_registry
 
     # CORS — 开发阶段 Vite(5173) → API(8080) 跨域
-    cors = aiohttp_cors.setup(app, defaults={
-        "*": aiohttp_cors.ResourceOptions(
-            allow_credentials=True,
-            expose_headers="*",
-            allow_headers="*",
-            allow_methods="*",
-        )
-    })
+    cors = aiohttp_cors.setup(
+        app,
+        defaults={
+            "*": aiohttp_cors.ResourceOptions(
+                allow_credentials=True,
+                expose_headers="*",
+                allow_headers="*",
+                allow_methods="*",
+            )
+        },
+    )
 
     setup_routes(app, cors)
     return app

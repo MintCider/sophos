@@ -139,8 +139,13 @@ async def set_policy(
         "ON CONFLICT (user_id, scope_type, scope_id) DO UPDATE SET "
         "suppress_llm_trigger = $4, rate_multiplier = $5, "
         "suppress_refresh = $6, note = $7, updated_at = now()",
-        user_id, scope_type, scope_id,
-        suppress_llm_trigger, rate_multiplier, suppress_refresh, note,
+        user_id,
+        scope_type,
+        scope_id,
+        suppress_llm_trigger,
+        rate_multiplier,
+        suppress_refresh,
+        note,
     )
     invalidate()
 
@@ -160,7 +165,10 @@ async def update_field(
     result = await pool.execute(
         f"UPDATE user_trigger_policy SET {field} = $1, updated_at = now() "  # noqa: S608
         "WHERE user_id = $2 AND scope_type = $3 AND scope_id = $4",
-        value, user_id, scope_type, scope_id,
+        value,
+        user_id,
+        scope_type,
+        scope_id,
     )
     invalidate()
     return result == "UPDATE 1"
@@ -174,9 +182,10 @@ async def remove_policy(
 ) -> bool:
     """移除用户触发策略。返回是否存在并已删除。"""
     result = await pool.execute(
-        "DELETE FROM user_trigger_policy "
-        "WHERE user_id = $1 AND scope_type = $2 AND scope_id = $3",
-        user_id, scope_type, scope_id,
+        "DELETE FROM user_trigger_policy WHERE user_id = $1 AND scope_type = $2 AND scope_id = $3",
+        user_id,
+        scope_type,
+        scope_id,
     )
     invalidate()
     return result == "DELETE 1"

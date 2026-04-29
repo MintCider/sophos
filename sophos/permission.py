@@ -9,7 +9,6 @@ Master 隐式拥有所有权限。缓存策略：首次访问全量加载，写�
 """
 
 import logging
-from typing import Any
 
 import asyncpg
 
@@ -69,9 +68,7 @@ async def _ensure_grant_cache(
     global _grant_cache  # noqa: PLW0603
     if _grant_cache is not None:
         return _grant_cache
-    rows = await pool.fetch(
-        "SELECT user_id, scope_type, scope_id, permission FROM perm_grant"
-    )
+    rows = await pool.fetch("SELECT user_id, scope_type, scope_id, permission FROM perm_grant")
     cache: dict[tuple[int, str, int], set[str]] = {}
     for r in rows:
         key = (r["user_id"], r["scope_type"], r["scope_id"])
@@ -84,7 +81,9 @@ async def _ensure_grant_cache(
 
 
 async def is_scope_enabled(
-    pool: asyncpg.Pool, scope_type: str, scope_id: int,
+    pool: asyncpg.Pool,
+    scope_type: str,
+    scope_id: int,
 ) -> bool:
     """检查会话是否启用。行不存在 = 禁用。"""
     cache = await _ensure_scope_cache(pool)
@@ -115,7 +114,10 @@ async def has_permission(
 
 
 async def set_scope_enabled(
-    pool: asyncpg.Pool, scope_type: str, scope_id: int, enabled: bool,
+    pool: asyncpg.Pool,
+    scope_type: str,
+    scope_id: int,
+    enabled: bool,
 ) -> None:
     """启用/禁用会话。"""
     await pool.execute(
@@ -123,7 +125,9 @@ async def set_scope_enabled(
         "VALUES ($1, $2, $3) "
         "ON CONFLICT (scope_type, scope_id) "
         "DO UPDATE SET enabled = $3, updated_at = now()",
-        scope_type, scope_id, enabled,
+        scope_type,
+        scope_id,
+        enabled,
     )
     invalidate()
 
@@ -140,7 +144,11 @@ async def grant(
     await pool.execute(
         "INSERT INTO perm_grant (user_id, scope_type, scope_id, permission, granted_by) "
         "VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
-        user_id, scope_type, scope_id, permission, granted_by,
+        user_id,
+        scope_type,
+        scope_id,
+        permission,
+        granted_by,
     )
     invalidate()
 
@@ -154,9 +162,11 @@ async def revoke(
 ) -> bool:
     """撤销权限。返回是否存在并已删除。"""
     result = await pool.execute(
-        "DELETE FROM perm_grant "
-        "WHERE user_id=$1 AND scope_type=$2 AND scope_id=$3 AND permission=$4",
-        user_id, scope_type, scope_id, permission,
+        "DELETE FROM perm_grant WHERE user_id=$1 AND scope_type=$2 AND scope_id=$3 AND permission=$4",
+        user_id,
+        scope_type,
+        scope_id,
+        permission,
     )
     invalidate()
     return result == "DELETE 1"
@@ -178,7 +188,11 @@ async def batch_grant(
         result = await pool.execute(
             "INSERT INTO perm_grant (user_id, scope_type, scope_id, permission, granted_by) "
             "VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
-            uid, scope_type, scope_id, permission, granted_by,
+            uid,
+            scope_type,
+            scope_id,
+            permission,
+            granted_by,
         )
         if result == "INSERT 0 1":
             count += 1
@@ -199,9 +213,11 @@ async def batch_revoke(
     count = 0
     for uid in user_ids:
         result = await pool.execute(
-            "DELETE FROM perm_grant "
-            "WHERE user_id=$1 AND scope_type=$2 AND scope_id=$3 AND permission=$4",
-            uid, scope_type, scope_id, permission,
+            "DELETE FROM perm_grant WHERE user_id=$1 AND scope_type=$2 AND scope_id=$3 AND permission=$4",
+            uid,
+            scope_type,
+            scope_id,
+            permission,
         )
         if result == "DELETE 1":
             count += 1
@@ -210,19 +226,24 @@ async def batch_revoke(
 
 
 async def list_grants(
-    pool: asyncpg.Pool, scope_type: str, scope_id: int,
+    pool: asyncpg.Pool,
+    scope_type: str,
+    scope_id: int,
 ) -> list[tuple[int, str]]:
     """列出某个 scope 下所有授权。返回 [(user_id, permission), ...]。"""
     rows = await pool.fetch(
-        "SELECT user_id, permission FROM perm_grant "
-        "WHERE scope_type=$1 AND scope_id=$2 ORDER BY user_id, permission",
-        scope_type, scope_id,
+        "SELECT user_id, permission FROM perm_grant WHERE scope_type=$1 AND scope_id=$2 ORDER BY user_id, permission",
+        scope_type,
+        scope_id,
     )
     return [(r["user_id"], r["permission"]) for r in rows]
 
 
 async def list_user_grants(
-    pool: asyncpg.Pool, user_id: int, scope_type: str, scope_id: int,
+    pool: asyncpg.Pool,
+    user_id: int,
+    scope_type: str,
+    scope_id: int,
 ) -> list[str]:
     """列出用户在某个 scope 下的所有权限。"""
     cache = await _ensure_grant_cache(pool)
@@ -236,12 +257,15 @@ async def list_user_grants(
 
 
 async def get_tool_whitelist(
-    pool: asyncpg.Pool, scope_type: str, scope_id: int,
+    pool: asyncpg.Pool,
+    scope_type: str,
+    scope_id: int,
 ) -> list[str] | None:
     """获取工具白名单。None = 全部可用（无行）。"""
     rows = await pool.fetch(
         "SELECT tool_name FROM perm_tool WHERE scope_type=$1 AND scope_id=$2",
-        scope_type, scope_id,
+        scope_type,
+        scope_id,
     )
     if not rows:
         return None
@@ -258,9 +282,10 @@ async def add_tools(
     count = 0
     for name in tool_names:
         result = await pool.execute(
-            "INSERT INTO perm_tool (scope_type, scope_id, tool_name) "
-            "VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
-            scope_type, scope_id, name,
+            "INSERT INTO perm_tool (scope_type, scope_id, tool_name) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+            scope_type,
+            scope_id,
+            name,
         )
         if result == "INSERT 0 1":
             count += 1
@@ -277,9 +302,10 @@ async def remove_tools(
     count = 0
     for name in tool_names:
         result = await pool.execute(
-            "DELETE FROM perm_tool "
-            "WHERE scope_type=$1 AND scope_id=$2 AND tool_name=$3",
-            scope_type, scope_id, name,
+            "DELETE FROM perm_tool WHERE scope_type=$1 AND scope_id=$2 AND tool_name=$3",
+            scope_type,
+            scope_id,
+            name,
         )
         if result == "DELETE 1":
             count += 1
@@ -287,10 +313,13 @@ async def remove_tools(
 
 
 async def reset_tools(
-    pool: asyncpg.Pool, scope_type: str, scope_id: int,
+    pool: asyncpg.Pool,
+    scope_type: str,
+    scope_id: int,
 ) -> None:
     """重置工具白名单（删除所有行 = 全部可用）。"""
     await pool.execute(
         "DELETE FROM perm_tool WHERE scope_type=$1 AND scope_id=$2",
-        scope_type, scope_id,
+        scope_type,
+        scope_id,
     )

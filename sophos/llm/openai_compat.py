@@ -89,7 +89,9 @@ class OpenAICompatProvider(LLMProvider):
             payload["stream"] = True
             logger.debug(
                 "LLM request (stream): model=%s, messages=%d, tools=%s",
-                self._model, len(messages), len(tools) if tools else 0,
+                self._model,
+                len(messages),
+                len(tools) if tools else 0,
             )
             # sock_read = request_timeout：TTFT / 两个 chunk 之间的最大等待
             # total = sock_read × 5：宽松总超时，防止无限挂起
@@ -105,7 +107,9 @@ class OpenAICompatProvider(LLMProvider):
         else:
             logger.debug(
                 "LLM request: model=%s, messages=%d, tools=%s",
-                self._model, len(messages), len(tools) if tools else 0,
+                self._model,
+                len(messages),
+                len(tools) if tools else 0,
             )
             timeout = aiohttp.ClientTimeout(total=self._request_timeout)
             async with session.post(url, json=payload, timeout=timeout) as resp:
@@ -217,7 +221,10 @@ class OpenAICompatProvider(LLMProvider):
 
         logger.debug(
             "Stream complete: %d chunks, content_len=%d, tool_calls=%d, finish=%s",
-            chunk_count, len(content), len(tool_calls_map), finish_reason,
+            chunk_count,
+            len(content),
+            len(tool_calls_map),
+            finish_reason,
         )
         result: ChatResponse = {"message": message, "usage": usage_info, "finish_reason": finish_reason}
         logger.log(TRACE, "LLM response:\n%s", json.dumps(result, ensure_ascii=False, indent=2, default=str))

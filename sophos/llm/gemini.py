@@ -10,7 +10,6 @@ import logging
 import uuid
 from typing import Any
 
-
 import aiohttp
 
 from sophos.llm.provider import ChatResponse, LLMProvider, Message, UsageInfo
@@ -76,10 +75,12 @@ class GeminiProvider(LLMProvider):
                 continue
 
             if role == "user":
-                contents.append({
-                    "role": "user",
-                    "parts": [{"text": msg.get("content", "")}],
-                })
+                contents.append(
+                    {
+                        "role": "user",
+                        "parts": [{"text": msg.get("content", "")}],
+                    }
+                )
                 continue
 
             if role == "assistant":
@@ -122,8 +123,10 @@ class GeminiProvider(LLMProvider):
                     },
                 }
                 # 合并到上一个 user content（如果上一个也是 functionResponse）
-                if contents and contents[-1]["role"] == "user" and any(
-                    "functionResponse" in p for p in contents[-1]["parts"]
+                if (
+                    contents
+                    and contents[-1]["role"] == "user"
+                    and any("functionResponse" in p for p in contents[-1]["parts"])
                 ):
                     contents[-1]["parts"].append(fr_part)
                 else:
@@ -187,7 +190,8 @@ class GeminiProvider(LLMProvider):
                     "function": {
                         "name": fc.get("name", ""),
                         "arguments": json.dumps(
-                            fc.get("args", {}), ensure_ascii=False,
+                            fc.get("args", {}),
+                            ensure_ascii=False,
                         ),
                     },
                 }
@@ -275,13 +279,12 @@ class GeminiProvider(LLMProvider):
         )
 
         if self._stream:
-            url = (
-                f"{self._root}/v1beta/models/{self._model}"
-                f":streamGenerateContent?alt=sse"
-            )
+            url = f"{self._root}/v1beta/models/{self._model}:streamGenerateContent?alt=sse"
             logger.debug(
                 "Gemini request (stream): model=%s, messages=%d, tools=%s",
-                self._model, len(messages), len(tools) if tools else 0,
+                self._model,
+                len(messages),
+                len(tools) if tools else 0,
             )
             timeout = aiohttp.ClientTimeout(
                 total=self._request_timeout * 5,
@@ -293,13 +296,12 @@ class GeminiProvider(LLMProvider):
                     raise RuntimeError(f"Gemini API error {resp.status}: {body}")
                 return await self._consume_stream(resp)
         else:
-            url = (
-                f"{self._root}/v1beta/models/{self._model}"
-                f":generateContent"
-            )
+            url = f"{self._root}/v1beta/models/{self._model}:generateContent"
             logger.debug(
                 "Gemini request: model=%s, messages=%d, tools=%s",
-                self._model, len(messages), len(tools) if tools else 0,
+                self._model,
+                len(messages),
+                len(tools) if tools else 0,
             )
             timeout = aiohttp.ClientTimeout(total=self._request_timeout)
             async with session.post(url, json=payload, timeout=timeout) as resp:
@@ -312,7 +314,8 @@ class GeminiProvider(LLMProvider):
     # ── Streaming ─────────────────────────────────────────
 
     async def _consume_stream(
-        self, resp: aiohttp.ClientResponse,
+        self,
+        resp: aiohttp.ClientResponse,
     ) -> ChatResponse:
         """读取 Gemini SSE stream，累积为完整 ChatResponse。
 
@@ -362,7 +365,8 @@ class GeminiProvider(LLMProvider):
                             "function": {
                                 "name": fc.get("name", ""),
                                 "arguments": json.dumps(
-                                    fc.get("args", {}), ensure_ascii=False,
+                                    fc.get("args", {}),
+                                    ensure_ascii=False,
                                 ),
                             },
                         }
@@ -402,7 +406,10 @@ class GeminiProvider(LLMProvider):
 
         logger.debug(
             "Gemini stream complete: %d chunks, content_len=%d, tool_calls=%d, finish=%s",
-            chunk_count, len(content), len(tool_calls), finish_reason,
+            chunk_count,
+            len(content),
+            len(tool_calls),
+            finish_reason,
         )
         result: ChatResponse = {
             "message": message,

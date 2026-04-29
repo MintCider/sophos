@@ -9,17 +9,16 @@
 """
 
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from sophos import runtime_config
 from sophos.config import settings
 from sophos.llm.context import apply_schema, format_timestamp, get_display_name
 from sophos.message_store import MessageStore
 from sophos.onebot_api import OneBotAPI
 from sophos.tools.base import Tool
-from sophos import runtime_config
-
 
 # ── 通用 OneBot 工具类 ──────────────────────────────────────
 
@@ -76,9 +75,8 @@ class OneBotTool(Tool):
     async def execute(self, params: dict[str, Any], context: dict[str, Any]) -> Any:
         api: OneBotAPI = context["api"]
         # 自动注入 group_id：schema 中有此字段但调用时未提供，从 context 补全
-        if "group_id" not in params and "group_id" in context:
-            if "group_id" in self._parameters.get("properties", {}):
-                params["group_id"] = context["group_id"]
+        if "group_id" not in params and "group_id" in context and "group_id" in self._parameters.get("properties", {}):
+            params["group_id"] = context["group_id"]
         return await api.call(self._action, params)
 
 
@@ -145,24 +143,19 @@ class SendMessageTool(Tool):
 
         # 从 context 补全 message_type 和 target_id
         msg_type = params.get("message_type") or context.get("message_type", "group")
-        target_id: int = params.get("target_id") or (
-            context.get("group_id") if msg_type == "group" else context.get("user_id")
-        ) or 0
+        target_id: int = (
+            params.get("target_id") or (context.get("group_id") if msg_type == "group" else context.get("user_id")) or 0
+        )
 
         # 跨 context 检测：目标与当前会话不同时，必须提供 background
-        is_cross = False
-        if msg_type != context.get("message_type"):
-            is_cross = True
-        elif msg_type == "group" and target_id != context.get("group_id"):
-            is_cross = True
-        elif msg_type == "private" and target_id != context.get("user_id"):
-            is_cross = True
+        is_cross = (
+            msg_type != context.get("message_type")
+            or (msg_type == "group" and target_id != context.get("group_id"))
+            or (msg_type == "private" and target_id != context.get("user_id"))
+        )
 
         if is_cross and not params.get("background"):
-            return {
-                "error": "跨 context 发消息必须提供 background 参数，"
-                         "简要说明对话背景（来源、原因、关键信息）"
-            }
+            return {"error": "跨 context 发消息必须提供 background 参数，简要说明对话背景（来源、原因、关键信息）"}
 
         # 构建消息段：reply → at → text
         text = re.sub(r"^\[回复[^\]]*\]\s*", "", params["text"])
@@ -394,7 +387,7 @@ class QueryMessagesTool(Tool):
         try:
             local_tz = ZoneInfo(settings.timezone)
             local_dt = datetime.strptime(anchor_str, "%Y-%m-%d %H:%M").replace(tzinfo=local_tz)
-            anchor_utc = local_dt.astimezone(timezone.utc)
+            anchor_utc = local_dt.astimezone(UTC)
         except ValueError:
             return {"error": f"时间格式错误，应为 YYYY-MM-DD HH:MM，收到: {anchor_str}"}
 
@@ -539,11 +532,11 @@ ALL_TOOLS: list[Tool] = [
     GroupAdminTool(),
     # 输入工具
     QueryMessagesTool(),
-    #_get_login_info,
+    # _get_login_info,
     _get_stranger_info,
-    #_get_friend_list,
+    # _get_friend_list,
     _get_group_info,
-    #_get_group_list,
+    # _get_group_list,
     _get_group_member_info,
     _get_group_member_list,
 ]

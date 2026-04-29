@@ -157,21 +157,25 @@ async def read_log(request: web.Request) -> web.Response:
         tail_entries = entries[-n:]
         # 展平回行列表
         result_lines = [line for entry in tail_entries for line in entry]
-        return web.json_response({
-            "filename": filename,
-            "total": total_lines,
-            "entries": len(entries),
-            "lines": result_lines,
-        })
+        return web.json_response(
+            {
+                "filename": filename,
+                "total": total_lines,
+                "entries": len(entries),
+                "lines": result_lines,
+            }
+        )
 
     start = int(offset) if offset else 0
     count = int(limit) if limit else 200
     sliced = raw_lines[start : start + count]
 
-    return web.json_response({
-        "filename": filename,
-        "total": total_lines,
-        "offset": start,
-        "limit": count,
-        "lines": sliced,
-    })
+    return web.json_response(
+        {
+            "filename": filename,
+            "total": total_lines,
+            "offset": start,
+            "limit": count,
+            "lines": sliced,
+        }
+    )

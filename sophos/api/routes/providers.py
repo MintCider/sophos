@@ -27,11 +27,13 @@ async def list_providers(request: web.Request) -> web.Response:
     for item in providers:
         base_urls = item["base_urls"]
         preferred_type = _preferred_api_type(base_urls)
-        detailed.append({
-            **item,
-            "preferred_api_type": preferred_type,
-            "preferred_base_url": resolve_base_url(base_urls, preferred_type),
-        })
+        detailed.append(
+            {
+                **item,
+                "preferred_api_type": preferred_type,
+                "preferred_base_url": resolve_base_url(base_urls, preferred_type),
+            }
+        )
 
     return web.json_response({"providers": detailed})
 
@@ -44,7 +46,8 @@ async def reveal_api_key(request: web.Request) -> web.Response:
     api_key = await provider_mgr.get_provider_api_key(alias)
     if api_key is None:
         return web.json_response(
-            {"message": f"provider '{alias}' 不存在"}, status=404,
+            {"message": f"provider '{alias}' 不存在"},
+            status=404,
         )
     return web.json_response({"api_key": api_key})
 
@@ -57,10 +60,12 @@ async def refresh_provider_models(request: web.Request) -> web.Response:
     result = await provider_mgr.fetch_models(alias)
     if isinstance(result, str):
         return web.json_response({"message": result}, status=400)
-    return web.json_response({
-        "message": f"已刷新 {alias} 的可用模型列表（{len(result)} 个）",
-        "models": result,
-    })
+    return web.json_response(
+        {
+            "message": f"已刷新 {alias} 的可用模型列表（{len(result)} 个）",
+            "models": result,
+        }
+    )
 
 
 @routes.post("/api/providers")

@@ -66,7 +66,10 @@ async def run_tool_loop(
             # 第一步：全同重试（处理超时等瞬时错误）
             try:
                 response = await provider.chat(
-                    messages, tools=tools, temperature=temperature, max_tokens=max_tokens,
+                    messages,
+                    tools=tools,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
                 )
             except Exception:
                 # 第二步：上一轮的 assistant message 可能包含畸形 tool_calls，
@@ -90,7 +93,9 @@ async def run_tool_loop(
         _tc = assistant_msg.get("tool_calls") or []
         logger.debug(
             "LLM round %d: content[:%d]=%r, tools=%s",
-            round_num, min(len(_content), 200), _content[:200],
+            round_num,
+            min(len(_content), 200),
+            _content[:200],
             [tc["function"]["name"] for tc in _tc] if _tc else "none",
         )
 
@@ -121,7 +126,8 @@ async def run_tool_loop(
                 except (json.JSONDecodeError, TypeError):
                     logger.warning(
                         "Malformed tool call arguments for %s, raw: %s",
-                        tool_name, raw_args[:500],
+                        tool_name,
+                        raw_args[:500],
                     )
                     # 修复 assistant message 中的畸形 arguments，确保对话历史合法
                     func["arguments"] = "{}"

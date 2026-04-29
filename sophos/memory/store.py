@@ -48,7 +48,10 @@ class MemoryStore:
     # ── 档案：会话 ────────────────────────────────────────────
 
     async def set_profile_context(
-        self, scope_type: str, scope_id: int, content: str,
+        self,
+        scope_type: str,
+        scope_id: int,
+        content: str,
     ) -> dict[str, Any]:
         """整体替换会话档案。"""
         await self._pool.execute(
@@ -58,22 +61,30 @@ class MemoryStore:
             ON CONFLICT (scope_type, scope_id)
             DO UPDATE SET content = EXCLUDED.content, updated_at = now()
             """,
-            scope_type, scope_id, content,
+            scope_type,
+            scope_id,
+            content,
         )
         return {"status": "ok", "scope_type": scope_type, "scope_id": scope_id}
 
     async def get_profile_context(
-        self, scope_type: str, scope_id: int,
+        self,
+        scope_type: str,
+        scope_id: int,
     ) -> str | None:
         return await self._pool.fetchval(
             "SELECT content FROM memory_profile_context WHERE scope_type = $1 AND scope_id = $2",
-            scope_type, scope_id,
+            scope_type,
+            scope_id,
         )
 
     # ── 档案：用户 ────────────────────────────────────────────
 
     async def set_profile_user(
-        self, user_id: int, content: str, keywords: list[str] | None = None,
+        self,
+        user_id: int,
+        content: str,
+        keywords: list[str] | None = None,
     ) -> dict[str, Any]:
         """整体替换用户档案。"""
         kw_json = json.dumps(keywords or [], ensure_ascii=False)
@@ -84,7 +95,9 @@ class MemoryStore:
             ON CONFLICT (user_id)
             DO UPDATE SET content = EXCLUDED.content, keywords = EXCLUDED.keywords, updated_at = now()
             """,
-            user_id, content, kw_json,
+            user_id,
+            content,
+            kw_json,
         )
         return {"status": "ok", "user_id": user_id}
 
@@ -141,7 +154,10 @@ class MemoryStore:
     # ── 记忆 CRUD ─────────────────────────────────────────────
 
     async def write_memory(
-        self, content: str, source_scope: str | None = None, source_id: int | None = None,
+        self,
+        content: str,
+        source_scope: str | None = None,
+        source_id: int | None = None,
     ) -> dict[str, Any]:
         """写入记忆（自动嵌入 + 去重合并）。"""
         if self._embed is None:
@@ -164,7 +180,9 @@ class MemoryStore:
         if existing:
             await self._pool.execute(
                 "UPDATE memories SET content = $2, embedding = $3::vector, last_hit = now() WHERE id = $1",
-                existing["id"], content, vec_str,
+                existing["id"],
+                content,
+                vec_str,
             )
             logger.debug("Memory merged into id=%d", existing["id"])
             return {"status": "merged", "id": existing["id"]}
@@ -175,7 +193,10 @@ class MemoryStore:
             VALUES ($1, $2::vector, $3, $4)
             RETURNING id
             """,
-            content, vec_str, source_scope, source_id,
+            content,
+            vec_str,
+            source_scope,
+            source_id,
         )
         logger.debug("Memory created id=%d", row_id)
         return {"status": "created", "id": row_id}
@@ -188,7 +209,11 @@ class MemoryStore:
         return {"status": "deleted", "id": memory_id}
 
     async def search_hybrid(
-        self, query_text: str, query_vec: list[float] | None = None, *, limit: int = 10,
+        self,
+        query_text: str,
+        query_vec: list[float] | None = None,
+        *,
+        limit: int = 10,
     ) -> list[dict[str, Any]]:
         """混合搜索：关键词 + 向量，RRF 融合。"""
         fetch_n = limit * 2
@@ -203,7 +228,8 @@ class MemoryStore:
             ORDER BY score DESC
             LIMIT $2
             """,
-            query_text, fetch_n,
+            query_text,
+            fetch_n,
         )
 
         # 向量路
@@ -219,7 +245,8 @@ class MemoryStore:
                 ORDER BY embedding <=> $1::vector
                 LIMIT $2
                 """,
-                vec_str, fetch_n,
+                vec_str,
+                fetch_n,
             )
 
         # RRF 融合
@@ -265,10 +292,18 @@ class MemoryStore:
 
     async def get_memory_stats(self) -> dict[str, int]:
         """各表行数统计。"""
-        self_count = await self._pool.fetchval(
-            "SELECT CASE WHEN content != '' THEN 1 ELSE 0 END FROM memory_profile_self WHERE id = 1",
-        ) or 0
+        self_count = (
+            await self._pool.fetchval(
+                "SELECT CASE WHEN content != '' THEN 1 ELSE 0 END FROM memory_profile_self WHERE id = 1",
+            )
+            or 0
+        )
         ctx_count = await self._pool.fetchval("SELECT count(*) FROM memory_profile_context") or 0
         user_count = await self._pool.fetchval("SELECT count(*) FROM memory_profile_user") or 0
         mem_count = await self._pool.fetchval("SELECT count(*) FROM memories") or 0
-        return {"profile_self": self_count, "profile_context": ctx_count, "profile_user": user_count, "memories": mem_count}
+        return {
+            "profile_self": self_count,
+            "profile_context": ctx_count,
+            "profile_user": user_count,
+            "memories": mem_count,
+        }

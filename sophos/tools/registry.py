@@ -91,10 +91,7 @@ class ToolRegistry:
                    None 表示全部；指定后会包含该 scope 和 "all" 的工具。
             description_overrides: 工具描述覆盖 {tool_name: custom_description}。
         """
-        tools: list[Tool] = [
-            t for t in self._tools.values()
-            if t.name not in self._disabled_tools
-        ]
+        tools: list[Tool] = [t for t in self._tools.values() if t.name not in self._disabled_tools]
         if category is not None:
             tools = [t for t in tools if t.category == category]
         if scope is not None:
@@ -131,18 +128,20 @@ class ToolRegistry:
             custom_desc = description_overrides.get(tool.name) if description_overrides else None
             effective_desc = custom_desc if custom_desc else default_desc
 
-            result.append({
-                "name": tool.name,
-                "description": effective_desc,
-                "default_description": default_desc,
-                "has_custom_description": custom_desc is not None,
-                "category": tool.category,
-                "scope": tool.scope,
-                "group": tool.group,
-                "is_builtin": tool.is_builtin,
-                "is_custom": not tool.is_builtin,
-                "enabled": tool.name not in self._disabled_tools,
-                "parameters": tool.parameters,
-                "can_disable": tool.name not in UNSAFE_DISABLE_TOOLS,
-            })
+            result.append(
+                {
+                    "name": tool.name,
+                    "description": effective_desc,
+                    "default_description": default_desc,
+                    "has_custom_description": custom_desc is not None,
+                    "category": tool.category,
+                    "scope": tool.scope,
+                    "group": tool.group,
+                    "is_builtin": tool.is_builtin,
+                    "is_custom": not tool.is_builtin,
+                    "enabled": tool.name not in self._disabled_tools,
+                    "parameters": tool.parameters,
+                    "can_disable": tool.name not in UNSAFE_DISABLE_TOOLS,
+                }
+            )
         return result

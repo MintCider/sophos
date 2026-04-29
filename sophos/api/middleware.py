@@ -10,11 +10,13 @@ from sophos.config import settings
 logger = logging.getLogger(__name__)
 
 # 无需鉴权的 API 路径
-_AUTH_WHITELIST = frozenset({
-    "/api/auth/login",
-    "/api/auth/check",
-    "/api/health",
-})
+_AUTH_WHITELIST = frozenset(
+    {
+        "/api/auth/login",
+        "/api/auth/check",
+        "/api/health",
+    }
+)
 
 
 @web.middleware

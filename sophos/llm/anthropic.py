@@ -9,7 +9,6 @@ import json
 import logging
 from typing import Any
 
-
 import aiohttp
 
 from sophos.llm.provider import ChatResponse, LLMProvider, Message, UsageInfo
@@ -89,16 +88,20 @@ class AnthropicProvider(LLMProvider):
                         inp = json.loads(fn.get("arguments", "{}"))
                     except json.JSONDecodeError:
                         inp = {}
-                    content_blocks.append({
-                        "type": "tool_use",
-                        "id": tc.get("id", ""),
-                        "name": fn.get("name", ""),
-                        "input": inp,
-                    })
-                result.append({
-                    "role": "assistant",
-                    "content": content_blocks if content_blocks else "",
-                })
+                    content_blocks.append(
+                        {
+                            "type": "tool_use",
+                            "id": tc.get("id", ""),
+                            "name": fn.get("name", ""),
+                            "input": inp,
+                        }
+                    )
+                result.append(
+                    {
+                        "role": "assistant",
+                        "content": content_blocks if content_blocks else "",
+                    }
+                )
                 continue
 
             if role == "tool":
@@ -109,11 +112,11 @@ class AnthropicProvider(LLMProvider):
                     "content": msg.get("content", ""),
                 }
                 # 合并连续 tool results 到同一个 user message
-                if result and result[-1]["role"] == "user" and isinstance(
-                    result[-1]["content"], list
-                ) and all(
-                    isinstance(b, dict) and b.get("type") == "tool_result"
-                    for b in result[-1]["content"]
+                if (
+                    result
+                    and result[-1]["role"] == "user"
+                    and isinstance(result[-1]["content"], list)
+                    and all(isinstance(b, dict) and b.get("type") == "tool_result" for b in result[-1]["content"])
                 ):
                     result[-1]["content"].append(tr_block)
                 else:
@@ -152,16 +155,19 @@ class AnthropicProvider(LLMProvider):
             if block.get("type") == "text":
                 text_parts.append(block.get("text", ""))
             elif block.get("type") == "tool_use":
-                tool_calls.append({
-                    "id": block.get("id", ""),
-                    "type": "function",
-                    "function": {
-                        "name": block.get("name", ""),
-                        "arguments": json.dumps(
-                            block.get("input", {}), ensure_ascii=False,
-                        ),
-                    },
-                })
+                tool_calls.append(
+                    {
+                        "id": block.get("id", ""),
+                        "type": "function",
+                        "function": {
+                            "name": block.get("name", ""),
+                            "arguments": json.dumps(
+                                block.get("input", {}),
+                                ensure_ascii=False,
+                            ),
+                        },
+                    }
+                )
 
         message: Message = {"role": "assistant"}  # type: ignore[typeddict-item]
         content = "".join(text_parts)
@@ -241,7 +247,9 @@ class AnthropicProvider(LLMProvider):
             payload["stream"] = True
             logger.debug(
                 "Anthropic request (stream): model=%s, messages=%d, tools=%s",
-                self._model, len(messages), len(tools) if tools else 0,
+                self._model,
+                len(messages),
+                len(tools) if tools else 0,
             )
             timeout = aiohttp.ClientTimeout(
                 total=self._request_timeout * 5,
@@ -255,7 +263,9 @@ class AnthropicProvider(LLMProvider):
         else:
             logger.debug(
                 "Anthropic request: model=%s, messages=%d, tools=%s",
-                self._model, len(messages), len(tools) if tools else 0,
+                self._model,
+                len(messages),
+                len(tools) if tools else 0,
             )
             timeout = aiohttp.ClientTimeout(total=self._request_timeout)
             async with session.post(url, json=payload, timeout=timeout) as resp:
@@ -268,7 +278,8 @@ class AnthropicProvider(LLMProvider):
     # ── Streaming ─────────────────────────────────────────
 
     async def _consume_stream(
-        self, resp: aiohttp.ClientResponse,
+        self,
+        resp: aiohttp.ClientResponse,
     ) -> ChatResponse:
         """读取 Anthropic SSE stream，累积为完整 ChatResponse。
 
@@ -361,14 +372,16 @@ class AnthropicProvider(LLMProvider):
                     inp = json.loads(raw_json) if raw_json else {}
                 except json.JSONDecodeError:
                     inp = {}
-                tool_calls.append({
-                    "id": b.get("id", ""),
-                    "type": "function",
-                    "function": {
-                        "name": b.get("name", ""),
-                        "arguments": json.dumps(inp, ensure_ascii=False),
-                    },
-                })
+                tool_calls.append(
+                    {
+                        "id": b.get("id", ""),
+                        "type": "function",
+                        "function": {
+                            "name": b.get("name", ""),
+                            "arguments": json.dumps(inp, ensure_ascii=False),
+                        },
+                    }
+                )
 
         message: Message = {"role": "assistant"}  # type: ignore[typeddict-item]
         content = "".join(text_parts)
@@ -385,7 +398,9 @@ class AnthropicProvider(LLMProvider):
 
         logger.debug(
             "Anthropic stream complete: content_len=%d, tool_calls=%d, finish=%s",
-            len(content), len(tool_calls), stop_reason,
+            len(content),
+            len(tool_calls),
+            stop_reason,
         )
         result: ChatResponse = {
             "message": message,

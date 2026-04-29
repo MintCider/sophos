@@ -7,6 +7,7 @@ await pending enrichment for messages it didn't originate.
 
 import asyncio
 import logging
+from contextlib import suppress
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -32,12 +33,7 @@ class EnrichmentRegistry:
 
         Returns True if any tasks were actually awaited.
         """
-        pending = [
-            t
-            for mid in message_ids
-            for t in self._tasks.get(mid, [])
-            if not t.done()
-        ]
+        pending = [t for mid in message_ids for t in self._tasks.get(mid, []) if not t.done()]
         if not pending:
             return False
         logger.debug("Waiting for %d enrichment task(s) on %d message(s)", len(pending), len(message_ids))
@@ -54,10 +50,8 @@ class EnrichmentRegistry:
         tasks = self._tasks.get(message_id)
         if tasks is None:
             return
-        try:
+        with suppress(ValueError):
             tasks.remove(task)
-        except ValueError:
-            pass
         if not tasks:
             self._tasks.pop(message_id, None)
 

@@ -13,7 +13,8 @@ logger = logging.getLogger(__name__)
 async def _table_size(pool: asyncpg.Pool, table: str) -> int:
     """返回表的总大小（含索引和 TOAST），单位字节。"""
     row = await pool.fetchrow(
-        "SELECT pg_total_relation_size($1) AS size_bytes", table,
+        "SELECT pg_total_relation_size($1) AS size_bytes",
+        table,
     )
     return int(row["size_bytes"]) if row else 0
 
@@ -30,7 +31,9 @@ async def cleanup_messages(pool: asyncpg.Pool, max_bytes: int) -> None:
         batch = max(count // 20, 1)
         logger.info(
             "messages cleanup: %d MB / %d MB, deleting %d rows",
-            size // (1024 * 1024), max_bytes // (1024 * 1024), batch,
+            size // (1024 * 1024),
+            max_bytes // (1024 * 1024),
+            batch,
         )
         await pool.execute(
             """
@@ -56,7 +59,9 @@ async def cleanup_memories(pool: asyncpg.Pool, max_bytes: int) -> None:
         batch = max(count // 20, 1)
         logger.info(
             "memories cleanup: %d MB / %d MB, deleting %d rows",
-            size // (1024 * 1024), max_bytes // (1024 * 1024), batch,
+            size // (1024 * 1024),
+            max_bytes // (1024 * 1024),
+            batch,
         )
         await pool.execute(
             """

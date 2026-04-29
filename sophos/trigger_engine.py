@@ -187,6 +187,7 @@ class TriggerEngine:
             return
         async with lock:
             from sophos.pipeline import _handle_llm_trigger
+
             await _handle_llm_trigger(ctx)
 
     # ── LLM 触发器 ────────────────────────────────────────────
@@ -251,6 +252,7 @@ class TriggerEngine:
                         return
                     async with lock:
                         from sophos.pipeline import _handle_llm_trigger
+
                         await _handle_llm_trigger(ctx)
                     cs.state = TriggerState.IDLE
                     return
@@ -263,7 +265,7 @@ class TriggerEngine:
 
                 try:
                     await asyncio.wait_for(cs.new_message_event.wait(), timeout=timeout)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     # 超时无新消息 → 触发
                     logger.debug("WAITING timeout for %s, triggering", key)
                     cs.state = TriggerState.TRIGGERED
@@ -279,6 +281,7 @@ class TriggerEngine:
                         return
                     async with lock:
                         from sophos.pipeline import _handle_llm_trigger
+
                         await _handle_llm_trigger(ctx)
                     cs.state = TriggerState.IDLE
                     return
@@ -331,10 +334,7 @@ class TriggerEngine:
         if persona:
             persona = persona.replace("{nickname}", nickname)
         fmt = _WAITING_FORMAT if waiting else _EVAL_FORMAT
-        if persona:
-            system_prompt = f"{persona}\n\n{fmt}"
-        else:
-            system_prompt = fmt
+        system_prompt = f"{persona}\n\n{fmt}" if persona else fmt
 
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": system_prompt},

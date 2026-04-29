@@ -74,10 +74,16 @@ class MessageStore:
                 {conflict_clause}
                 RETURNING id
                 """,
-                message_id, message_type, group_id, user_id,
-                nickname, card, source,
+                message_id,
+                message_type,
+                group_id,
+                user_id,
+                nickname,
+                card,
+                source,
                 json.dumps(raw_message, ensure_ascii=False),
-                plain_text, timestamp,
+                plain_text,
+                timestamp,
             )
 
             if row_id is not None:
@@ -110,9 +116,7 @@ class MessageStore:
         """
         try:
             plain_text = "".join(
-                seg["data"]["text"]
-                for seg in raw_message
-                if isinstance(seg, dict) and seg.get("type") == "text"
+                seg["data"]["text"] for seg in raw_message if isinstance(seg, dict) and seg.get("type") == "text"
             )
             ts = timestamp or datetime.now(tz=UTC)
             extra_json = json.dumps(extra, ensure_ascii=False) if extra else None
@@ -137,9 +141,14 @@ class MessageStore:
                 {conflict_clause}
                 RETURNING id
                 """,
-                message_id, message_type, group_id, user_id,
+                message_id,
+                message_type,
+                group_id,
+                user_id,
                 json.dumps(raw_message, ensure_ascii=False),
-                plain_text, ts, extra_json,
+                plain_text,
+                ts,
+                extra_json,
             )
             logger.debug("Saved self message id=%s (message_id=%s)", row_id, message_id)
             return row_id
@@ -179,7 +188,8 @@ class MessageStore:
                 ORDER BY timestamp DESC
                 LIMIT $2
                 """,
-                group_id, max_messages,
+                group_id,
+                max_messages,
             )
         elif user_id is not None:
             rows = await self._pool.fetch(
@@ -189,7 +199,8 @@ class MessageStore:
                 ORDER BY timestamp DESC
                 LIMIT $2
                 """,
-                user_id, max_messages,
+                user_id,
+                max_messages,
             )
         else:
             raise ValueError("Must provide either group_id or user_id")
@@ -213,13 +224,16 @@ class MessageStore:
         """更新消息的 plain_text（段展开后的富文本）。"""
         await self._pool.execute(
             "UPDATE messages SET plain_text = $2 WHERE message_id = $1",
-            message_id, plain_text,
+            message_id,
+            plain_text,
         )
 
     # ── 图片描述更新 ────────────────────────────────────────
 
     async def update_image_extra(
-        self, message_id: int, image_infos: list[dict[str, str]],
+        self,
+        message_id: int,
+        image_infos: list[dict[str, str]],
     ) -> None:
         """将图片描述写入消息的 extra.images 字段。
 
@@ -232,7 +246,8 @@ class MessageStore:
             SET extra = COALESCE(extra, '{}'::jsonb) || jsonb_build_object('images', $2::jsonb)
             WHERE message_id = $1
             """,
-            message_id, images_json,
+            message_id,
+            images_json,
         )
 
     # ── 按时间范围查询 ────────────────────────────────────
@@ -258,10 +273,7 @@ class MessageStore:
         Returns:
             按时间正序排列的消息列表
         """
-        if message_type == "group":
-            where = "group_id = $1"
-        else:
-            where = "user_id = $1 AND group_id IS NULL"
+        where = "group_id = $1" if message_type == "group" else "user_id = $1 AND group_id IS NULL"
 
         rows = await self._pool.fetch(
             f"""
@@ -270,7 +282,10 @@ class MessageStore:
             ORDER BY timestamp ASC
             LIMIT $4
             """,
-            target_id, start, end, limit,
+            target_id,
+            start,
+            end,
+            limit,
         )
         return [dict(r) for r in rows]
 
@@ -465,7 +480,8 @@ class MessageStore:
                 WHERE group_id = $1 AND id > $2 {source_filter}
                 ORDER BY id ASC
                 """,
-                group_id, after_id,
+                group_id,
+                after_id,
             )
         elif user_id is not None:
             rows = await self._pool.fetch(
@@ -474,7 +490,8 @@ class MessageStore:
                 WHERE user_id = $1 AND group_id IS NULL AND id > $2 {source_filter}
                 ORDER BY id ASC
                 """,
-                user_id, after_id,
+                user_id,
+                after_id,
             )
         else:
             raise ValueError("Must provide either group_id or user_id")
@@ -499,9 +516,7 @@ class MessageStore:
 
         raw_message = event.get("message", [])
         plain_text = "".join(
-            seg["data"]["text"]
-            for seg in raw_message
-            if isinstance(seg, dict) and seg.get("type") == "text"
+            seg["data"]["text"] for seg in raw_message if isinstance(seg, dict) and seg.get("type") == "text"
         )
 
         ts = event.get("time")

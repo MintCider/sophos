@@ -22,10 +22,7 @@ class CorrectImageDescriptionTool(Tool):
 
     @property
     def description(self) -> str:
-        return (
-            "纠正图片描述。从聊天记录中的 [图片(hash): ...] 获取 hash，"
-            "提供正确描述后，下次该图片出现时会重新识别"
-        )
+        return "纠正图片描述。从聊天记录中的 [图片(hash): ...] 获取 hash，提供正确描述后，下次该图片出现时会重新识别"
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -55,7 +52,8 @@ class CorrectImageDescriptionTool(Tool):
             SET correction_hint = $2, pending_correction = true
             WHERE hash = $1
             """,
-            image_hash, correction,
+            image_hash,
+            correction,
         )
         if result == "UPDATE 0":
             return {"error": f"未找到哈希为 {image_hash} 的图片缓存"}

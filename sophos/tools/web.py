@@ -59,12 +59,14 @@ class WebSearchTool(Tool):
             "max_results": runtime_config.get("tavily_max_results"),
             "include_answer": runtime_config.get("tavily_include_answer"),
         }
-        async with aiohttp.ClientSession() as session:
-            async with session.post(_TAVILY_SEARCH_URL, json=payload, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                if resp.status != 200:
-                    text = await resp.text()
-                    return {"error": f"Tavily search failed ({resp.status}): {text[:200]}"}
-                data = await resp.json()
+        async with (
+            aiohttp.ClientSession() as session,
+            session.post(_TAVILY_SEARCH_URL, json=payload, timeout=aiohttp.ClientTimeout(total=30)) as resp,
+        ):
+            if resp.status != 200:
+                text = await resp.text()
+                return {"error": f"Tavily search failed ({resp.status}): {text[:200]}"}
+            data = await resp.json()
         results = [
             {"title": r.get("title", ""), "url": r.get("url", ""), "content": r.get("content", "")}
             for r in data.get("results", [])
@@ -110,16 +112,15 @@ class WebFetchTool(Tool):
             return {"error": "tavily_api_key 未配置"}
         urls = params["urls"][:5]
         payload = {"api_key": api_key, "urls": urls}
-        async with aiohttp.ClientSession() as session:
-            async with session.post(_TAVILY_EXTRACT_URL, json=payload, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                if resp.status != 200:
-                    text = await resp.text()
-                    return {"error": f"Tavily extract failed ({resp.status}): {text[:200]}"}
-                data = await resp.json()
-        results = [
-            {"url": r.get("url", ""), "content": r.get("raw_content", "")}
-            for r in data.get("results", [])
-        ]
+        async with (
+            aiohttp.ClientSession() as session,
+            session.post(_TAVILY_EXTRACT_URL, json=payload, timeout=aiohttp.ClientTimeout(total=30)) as resp,
+        ):
+            if resp.status != 200:
+                text = await resp.text()
+                return {"error": f"Tavily extract failed ({resp.status}): {text[:200]}"}
+            data = await resp.json()
+        results = [{"url": r.get("url", ""), "content": r.get("raw_content", "")} for r in data.get("results", [])]
         failed = data.get("failed_results", [])
         out: dict[str, Any] = {"results": results}
         if failed:
@@ -158,20 +159,23 @@ class ViewImageTool(Tool):
             return {"error": "vision provider 未配置"}
         url = params["url"]
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                    if resp.status != 200:
-                        return {"error": f"HTTP {resp.status}"}
-                    ct = resp.content_type or ""
-                    if not ct.startswith("image/"):
-                        return {"error": f"非图片类型: {ct}"}
-                    data = await resp.read()
-                    if len(data) > _IMAGE_MAX_BYTES:
-                        return {"error": "图片过大（>10MB）"}
+            async with (
+                aiohttp.ClientSession() as session,
+                session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp,
+            ):
+                if resp.status != 200:
+                    return {"error": f"HTTP {resp.status}"}
+                ct = resp.content_type or ""
+                if not ct.startswith("image/"):
+                    return {"error": f"非图片类型: {ct}"}
+                data = await resp.read()
+                if len(data) > _IMAGE_MAX_BYTES:
+                    return {"error": "图片过大（>10MB）"}
         except Exception as e:
             return {"error": f"抓取失败: {e}"}
         mime_type = ct.split(";")[0].strip()
         from sophos.vision import describe_image
+
         try:
             desc = await describe_image(vision_provider, data, mime_type)
         except Exception as e:

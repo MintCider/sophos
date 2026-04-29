@@ -9,9 +9,9 @@ import logging
 import random
 import re
 from abc import ABC, abstractmethod
-from datetime import datetime
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -19,30 +19,41 @@ from zoneinfo import ZoneInfo
 import aiohttp
 import asyncpg
 
+from sophos import runtime_config, trigger
 from sophos.commands import (
-    handle_bot_command, handle_config_command, handle_help_command,
-    handle_llm_command, handle_memory_command, handle_perm_command,
-    handle_prompt_command, handle_tools_command, handle_trigger_command,
+    handle_bot_command,
+    handle_config_command,
+    handle_help_command,
+    handle_llm_command,
+    handle_memory_command,
+    handle_perm_command,
+    handle_prompt_command,
+    handle_tools_command,
+    handle_trigger_command,
 )
 from sophos.config import settings
 from sophos.db import get_pool
-from sophos.llm.context import build_chat_context, describe_schema, format_new_messages, format_timestamp, get_display_name
+from sophos.enrichment import get_enrichment_registry
+from sophos.llm.context import (
+    build_chat_context,
+    describe_schema,
+    format_new_messages,
+    format_timestamp,
+    get_display_name,
+)
 from sophos.llm.provider_manager import ProviderManager
 from sophos.llm.tool_loop import run_tool_loop
 from sophos.memory.association import auto_retrieve, format_association_block
 from sophos.memory.profile import build_profile_block
 from sophos.message_store import MessageStore
 from sophos.onebot_api import OneBotAPI
-from sophos import runtime_config
 from sophos.segment import expand_segments, has_expandable_segments
+from sophos.tools.image_gen import IMAGE_GEN_TOOLS
 from sophos.tools.memory import MEMORY_TOOLS
 from sophos.tools.onebot import ALL_TOOLS
 from sophos.tools.registry import ToolRegistry
 from sophos.tools.vision import VISION_TOOLS
 from sophos.tools.web import WEB_TOOLS
-from sophos.tools.image_gen import IMAGE_GEN_TOOLS
-from sophos import trigger
-from sophos.enrichment import get_enrichment_registry
 from sophos.vision import process_message_images
 
 logger = logging.getLogger("sophos")
@@ -87,9 +98,7 @@ class PipelineContext:
         if post_type not in ("message", "message_sent"):
             return None
         segments: list[dict[str, Any]] = event.get("message", [])
-        text = "".join(
-            seg["data"]["text"] for seg in segments if seg.get("type") == "text"
-        ).strip()
+        text = "".join(seg["data"]["text"] for seg in segments if seg.get("type") == "text").strip()
         return cls(
             event=event,
             post_type=post_type,
@@ -133,8 +142,8 @@ class Stage(ABC):
         return True
 
     @abstractmethod
-    async def execute(self, ctx: PipelineContext, next: NextFn) -> None:
-        """执行 stage 逻辑。调用 await next() 继续链。"""
+    async def execute(self, ctx: PipelineContext, next_stage: NextFn) -> None:
+        """执行 stage 逻辑。调用 await next_stage() 继续链。"""
         ...
 
 
@@ -195,8 +204,7 @@ async def _process_event_images(
         )
         if rows:
             context_messages = [
-                {"role": "user", "content": r.get("plain_text", "")}
-                for r in rows if r.get("plain_text")
+                {"role": "user", "content": r.get("plain_text", "")} for r in rows if r.get("plain_text")
             ]
 
     try:
@@ -220,7 +228,8 @@ async def _process_event_images(
             await ctx.store.update_image_extra(message_id, image_infos)
             logger.debug(
                 "Stored %d image description(s) for message_id=%s",
-                len(image_infos), message_id,
+                len(image_infos),
+                message_id,
             )
 
 
@@ -281,27 +290,18 @@ def _format_recent_global_block(
 
     groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for r in rows:
-        if r.get("message_type") == "group":
-            key = f"group:{r.get('group_id', 0)}"
-        else:
-            key = f"private:{r.get('user_id', 0)}"
+        key = f"group:{r.get('group_id', 0)}" if r.get("message_type") == "group" else f"private:{r.get('user_id', 0)}"
         groups[key].append(r)
 
     sections: list[str] = []
     for key, msgs in groups.items():
         kind, id_str = key.split(":", 1)
-        if kind == "group":
-            header = f"## 群聊 {id_str}"
-        else:
-            header = f"## 私聊 {id_str}"
+        header = f"## 群聊 {id_str}" if kind == "group" else f"## 私聊 {id_str}"
 
         lines: list[str] = [header]
         for m in msgs:
             ts = format_timestamp(m)
-            if m.get("source") == "sophos":
-                name = nickname
-            else:
-                name = get_display_name(m)
+            name = nickname if m.get("source") == "sophos" else get_display_name(m)
             uid = m.get("user_id", "")
             text = m.get("plain_text", "")
             if m.get("source") == "sophos":
@@ -518,11 +518,14 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
 
     # Pre-compute refresh-suppressed user set for filtering
     from sophos import user_policy as _up
+
     _up_cache = await _up._ensure_cache(get_pool())
     _refresh_scope_type = "group" if ctx.message_type == "group" else "private"
     _refresh_scope_id: int = ctx.group_id if ctx.message_type == "group" else ctx.user_id  # type: ignore[assignment]
     _suppressed_uids = _up.get_refresh_suppressed_users(
-        _up_cache, _refresh_scope_type, _refresh_scope_id,
+        _up_cache,
+        _refresh_scope_type,
+        _refresh_scope_id,
     )
 
     async def _refresh_context() -> str | None:
@@ -591,6 +594,7 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
 
     # 工具白名单过滤
     from sophos import permission as _perm
+
     _pool = get_pool()
     _scope_type = "group" if ctx.message_type == "group" else "private"
     _scope_id: int = ctx.group_id if ctx.message_type == "group" else ctx.user_id  # type: ignore[assignment]
@@ -671,9 +675,9 @@ class StoreMessageStage(Stage):
     def description(self) -> str:
         return "将消息事件存入数据库"
 
-    async def execute(self, ctx: PipelineContext, next: NextFn) -> None:
+    async def execute(self, ctx: PipelineContext, next_stage: NextFn) -> None:
         await ctx.store.save_event_message(ctx.event, self_id=ctx.self_id)
-        await next()
+        await next_stage()
 
 
 class ProcessImagesStage(Stage):
@@ -687,13 +691,13 @@ class ProcessImagesStage(Stage):
     def description(self) -> str:
         return "异步处理消息中的图片（VLM 识别）"
 
-    async def execute(self, ctx: PipelineContext, next: NextFn) -> None:
+    async def execute(self, ctx: PipelineContext, next_stage: NextFn) -> None:
         task = asyncio.create_task(_process_event_images(ctx))
         ctx.state["image_task"] = task
         msg_id = ctx.event.get("message_id")
         if msg_id is not None:
             get_enrichment_registry().register(msg_id, task)
-        await next()
+        await next_stage()
 
 
 class EnrichMessageStage(Stage):
@@ -707,9 +711,9 @@ class EnrichMessageStage(Stage):
     def description(self) -> str:
         return "展开消息段（@、回复、转发、卡片等）为富文本"
 
-    async def execute(self, ctx: PipelineContext, next: NextFn) -> None:
+    async def execute(self, ctx: PipelineContext, next_stage: NextFn) -> None:
         if not has_expandable_segments(ctx.segments):
-            await next()
+            await next_stage()
             return
         try:
             enriched = await expand_segments(
@@ -728,7 +732,7 @@ class EnrichMessageStage(Stage):
                 ctx.text = enriched
         except Exception:
             logger.warning("Message enrichment failed", exc_info=True)
-        await next()
+        await next_stage()
 
 
 class FilterSelfStage(Stage):
@@ -742,10 +746,10 @@ class FilterSelfStage(Stage):
     def description(self) -> str:
         return "跳过 bot 自身发出的消息"
 
-    async def execute(self, ctx: PipelineContext, next: NextFn) -> None:
+    async def execute(self, ctx: PipelineContext, next_stage: NextFn) -> None:
         if ctx.user_id == ctx.self_id:
             return
-        await next()
+        await next_stage()
 
 
 def _strip_at_prefix(ctx: PipelineContext) -> str:
@@ -759,7 +763,7 @@ def _strip_at_prefix(ctx: PipelineContext) -> str:
     if str(first.get("data", {}).get("qq")) != str(ctx.self_id):
         return text
     m = re.match(r"^@\S+\s*", text)
-    return text[m.end():] if m else text
+    return text[m.end() :] if m else text
 
 
 class CheckScopeStage(Stage):
@@ -773,7 +777,7 @@ class CheckScopeStage(Stage):
     def description(self) -> str:
         return "检查会话开关（权限系统）"
 
-    async def execute(self, ctx: PipelineContext, next: NextFn) -> None:
+    async def execute(self, ctx: PipelineContext, next_stage: NextFn) -> None:
         from sophos import permission as _perm
 
         scope_type = "group" if ctx.message_type == "group" else "private"
@@ -782,7 +786,7 @@ class CheckScopeStage(Stage):
 
         # 会话已启用 → 放行
         if await _perm.is_scope_enabled(pool, scope_type, scope_id):
-            await next()
+            await next_stage()
             return
 
         # 会话禁用 — 仅放行 .bot 命令
@@ -796,33 +800,41 @@ class CheckScopeStage(Stage):
         # .bot（查看状态）和 .bot off — 无条件放行
         if sub in ("", "off"):
             ctx.state["_cmd_text"] = cmd_text
-            await next()
+            await next_stage()
             return
 
         # .bot on — 需要权限
         if sub == "on":
             if _perm.is_master(ctx.user_id):
                 ctx.state["_cmd_text"] = cmd_text
-                await next()
+                await next_stage()
                 return
             # bot 权限（全局开关权限）
             if await _perm.has_permission(pool, ctx.user_id, "global", 0, "bot"):
                 ctx.state["_cmd_text"] = cmd_text
-                await next()
+                await next_stage()
                 return
             # 群聊：bot.group 权限
             if scope_type == "group" and await _perm.has_permission(
-                pool, ctx.user_id, scope_type, scope_id, "bot.group",
+                pool,
+                ctx.user_id,
+                scope_type,
+                scope_id,
+                "bot.group",
             ):
                 ctx.state["_cmd_text"] = cmd_text
-                await next()
+                await next_stage()
                 return
             # 私聊：bot.private 权限
             if scope_type == "private" and await _perm.has_permission(
-                pool, ctx.user_id, "global", 0, "bot.private",
+                pool,
+                ctx.user_id,
+                "global",
+                0,
+                "bot.private",
             ):
                 ctx.state["_cmd_text"] = cmd_text
-                await next()
+                await next_stage()
                 return
         # 无权限 → 静默丢弃
 
@@ -832,9 +844,12 @@ class HandleCommandStage(Stage):
 
     _COMMAND_PERMS: dict[str, str] = {
         ".tools": "cmd.tools",
-        ".llm": "cmd.llm", ".trigger": "cmd.trigger",
-        ".memory": "cmd.memory", ".config": "cmd.config",
-        ".prompt": "cmd.prompt", ".perm": "delegate",
+        ".llm": "cmd.llm",
+        ".trigger": "cmd.trigger",
+        ".memory": "cmd.memory",
+        ".config": "cmd.config",
+        ".prompt": "cmd.prompt",
+        ".perm": "delegate",
     }
 
     @property
@@ -845,7 +860,7 @@ class HandleCommandStage(Stage):
     def description(self) -> str:
         return "处理 dot 命令（权限检查 + 分发）"
 
-    async def execute(self, ctx: PipelineContext, next: NextFn) -> None:
+    async def execute(self, ctx: PipelineContext, next_stage: NextFn) -> None:
         from sophos import permission as _perm
 
         text = ctx.state.get("_cmd_text") or _strip_at_prefix(ctx)
@@ -859,8 +874,13 @@ class HandleCommandStage(Stage):
             return
         if text.startswith(".help"):
             await handle_help_command(
-                text, api=ctx.api, event=ctx.event, pool=pool,
-                user_id=ctx.user_id, scope_type=scope_type, scope_id=scope_id,
+                text,
+                api=ctx.api,
+                event=ctx.event,
+                pool=pool,
+                user_id=ctx.user_id,
+                scope_type=scope_type,
+                scope_id=scope_id,
             )
             return
 
@@ -871,8 +891,12 @@ class HandleCommandStage(Stage):
             # .bot（状态查看）和 .bot off — 无需权限
             if sub in ("", "off"):
                 await self._dispatch(
-                    ".bot", text, ctx=ctx, pool=pool,
-                    scope_type=scope_type, scope_id=scope_id,
+                    ".bot",
+                    text,
+                    ctx=ctx,
+                    pool=pool,
+                    scope_type=scope_type,
+                    scope_id=scope_id,
                 )
                 return
             # .bot on — 需要 bot / bot.group / bot.private 权限
@@ -880,17 +904,25 @@ class HandleCommandStage(Stage):
                 can = (
                     _perm.is_master(ctx.user_id)
                     or await _perm.has_permission(pool, ctx.user_id, "global", 0, "bot")
-                    or (scope_type == "group" and await _perm.has_permission(
-                        pool, ctx.user_id, scope_type, scope_id, "bot.group"))
-                    or (scope_type == "private" and await _perm.has_permission(
-                        pool, ctx.user_id, "global", 0, "bot.private"))
+                    or (
+                        scope_type == "group"
+                        and await _perm.has_permission(pool, ctx.user_id, scope_type, scope_id, "bot.group")
+                    )
+                    or (
+                        scope_type == "private"
+                        and await _perm.has_permission(pool, ctx.user_id, "global", 0, "bot.private")
+                    )
                 )
                 if not can:
                     await self._send_text(ctx, "权限不足")
                     return
             await self._dispatch(
-                ".bot", text, ctx=ctx, pool=pool,
-                scope_type=scope_type, scope_id=scope_id,
+                ".bot",
+                text,
+                ctx=ctx,
+                pool=pool,
+                scope_type=scope_type,
+                scope_id=scope_id,
             )
             return
 
@@ -901,56 +933,93 @@ class HandleCommandStage(Stage):
                     await self._send_text(ctx, "权限不足")
                     return
                 await self._dispatch(
-                    prefix, text, ctx=ctx, pool=pool,
-                    scope_type=scope_type, scope_id=scope_id,
+                    prefix,
+                    text,
+                    ctx=ctx,
+                    pool=pool,
+                    scope_type=scope_type,
+                    scope_id=scope_id,
                 )
                 return
 
-        await next()
+        await next_stage()
 
     async def _dispatch(
-        self, prefix: str, text: str, *, ctx: PipelineContext,
-        pool: asyncpg.Pool, scope_type: str, scope_id: int,
+        self,
+        prefix: str,
+        text: str,
+        *,
+        ctx: PipelineContext,
+        pool: asyncpg.Pool,
+        scope_type: str,
+        scope_id: int,
     ) -> None:
         if prefix == ".bot":
             await handle_bot_command(
-                text, api=ctx.api, event=ctx.event, pool=pool,
-                scope_type=scope_type, scope_id=scope_id,
+                text,
+                api=ctx.api,
+                event=ctx.event,
+                pool=pool,
+                scope_type=scope_type,
+                scope_id=scope_id,
             )
         elif prefix == ".tools":
             registry = _get_registry()
             all_names = [s["function"]["name"] for s in registry.get_function_schemas()]
             await handle_tools_command(
-                text, api=ctx.api, event=ctx.event, pool=pool,
-                scope_type=scope_type, scope_id=scope_id, all_tool_names=all_names,
+                text,
+                api=ctx.api,
+                event=ctx.event,
+                pool=pool,
+                scope_type=scope_type,
+                scope_id=scope_id,
+                all_tool_names=all_names,
             )
         elif prefix == ".llm":
             await handle_llm_command(
-                text, api=ctx.api, event=ctx.event, provider_mgr=ctx.provider_mgr,
+                text,
+                api=ctx.api,
+                event=ctx.event,
+                provider_mgr=ctx.provider_mgr,
             )
         elif prefix == ".trigger":
             await handle_trigger_command(
-                text, api=ctx.api, event=ctx.event, pool=pool,
+                text,
+                api=ctx.api,
+                event=ctx.event,
+                pool=pool,
                 provider_mgr=ctx.provider_mgr,
             )
         elif prefix == ".memory":
             await handle_memory_command(
-                text, api=ctx.api, event=ctx.event,
-                provider_mgr=ctx.provider_mgr, pool=pool,
+                text,
+                api=ctx.api,
+                event=ctx.event,
+                provider_mgr=ctx.provider_mgr,
+                pool=pool,
             )
         elif prefix == ".config":
             await handle_config_command(
-                text, api=ctx.api, event=ctx.event,
+                text,
+                api=ctx.api,
+                event=ctx.event,
             )
         elif prefix == ".prompt":
             await handle_prompt_command(
-                text, api=ctx.api, event=ctx.event,
+                text,
+                api=ctx.api,
+                event=ctx.event,
             )
         elif prefix == ".perm":
             await handle_perm_command(
-                text, api=ctx.api, event=ctx.event, pool=pool,
-                user_id=ctx.user_id, scope_type=scope_type,
-                scope_id=scope_id, group_id=ctx.group_id,
+                text,
+                api=ctx.api,
+                event=ctx.event,
+                pool=pool,
+                user_id=ctx.user_id,
+                scope_type=scope_type,
+                scope_id=scope_id,
+                group_id=ctx.group_id,
             )
 
     async def _send_text(self, ctx: PipelineContext, text: str) -> None:
@@ -1001,14 +1070,11 @@ class TriggerLLMStage(Stage):
 
     def _is_at_bot(self, ctx: PipelineContext) -> bool:
         self_qq = str(ctx.self_id)
-        return any(
-            seg.get("type") == "at" and str(seg.get("data", {}).get("qq")) == self_qq
-            for seg in ctx.segments
-        )
+        return any(seg.get("type") == "at" and str(seg.get("data", {}).get("qq")) == self_qq for seg in ctx.segments)
 
-    async def execute(self, ctx: PipelineContext, next: NextFn) -> None:
-        from sophos.trigger_engine import get_trigger_engine
+    async def execute(self, ctx: PipelineContext, next_stage: NextFn) -> None:
         from sophos import user_policy
+        from sophos.trigger_engine import get_trigger_engine
 
         pool = get_pool()
         cfg = await trigger.load(pool)
@@ -1031,10 +1097,9 @@ class TriggerLLMStage(Stage):
             max_boost = 0.0
             matched = ""
             for kw in cfg.keywords:
-                if kw.word in ctx.text:
-                    if kw.boost > max_boost:
-                        max_boost = kw.boost
-                        matched = kw.word
+                if kw.word in ctx.text and kw.boost > max_boost:
+                    max_boost = kw.boost
+                    matched = kw.word
             rate = min(1.0, cfg.base_rate + max_boost)
             if policy:
                 rate *= policy.rate_multiplier
@@ -1045,19 +1110,24 @@ class TriggerLLMStage(Stage):
                 simple_triggered = True
                 logger.debug(
                     "Simple trigger fired: reason=%s rate=%.3f roll=%.3f",
-                    reason, rate, roll,
+                    reason,
+                    rate,
+                    roll,
                 )
             else:
                 logger.debug(
                     "Simple trigger skipped: reason=%s rate=%.3f roll=%.3f",
-                    reason, rate, roll,
+                    reason,
+                    rate,
+                    roll,
                 )
 
         if simple_triggered:
             await engine.on_message(ctx, simple_triggered=True)
         elif policy and policy.suppress_llm_trigger:
             logger.debug(
-                "User %d LLM trigger suppressed by policy", ctx.user_id,
+                "User %d LLM trigger suppressed by policy",
+                ctx.user_id,
             )
         else:
             await engine.on_message(ctx, simple_triggered=False)

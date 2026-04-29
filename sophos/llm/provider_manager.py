@@ -9,18 +9,19 @@
 import json
 import logging
 import re
+from contextlib import suppress
 from typing import Any
 
 import aiohttp
 import asyncpg
 
+from sophos import runtime_config
 from sophos.config import settings
 from sophos.llm.anthropic import AnthropicProvider
 from sophos.llm.embedding import EmbeddingProvider
 from sophos.llm.gemini import GeminiProvider
 from sophos.llm.openai_compat import OpenAICompatProvider
 from sophos.llm.provider import LLMProvider
-from sophos import runtime_config
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +59,7 @@ def resolve_base_url(base_urls: Any, api_type: str) -> str:
     openai_url = base_urls.get("openai", "").rstrip("/")
     if api_type == "openai" or not openai_url:
         return openai_url
-    return re.sub(r'/v\d+(?:beta\d*)?$', '', openai_url)
+    return re.sub(r"/v\d+(?:beta\d*)?$", "", openai_url)
 
 
 class ProviderManager:
@@ -103,7 +104,8 @@ class ProviderManager:
             self._apply_row(row, api_type=row.get("api_type", "openai") or "openai")
             logger.info(
                 "Loaded LLM provider from DB: %s / %s",
-                self._current_alias, self._current_model,
+                self._current_alias,
+                self._current_model,
             )
             await self._init_vision()
             await self._init_trigger()
@@ -139,7 +141,8 @@ class ProviderManager:
             self._apply_vision_row(row, api_type=row.get("api_type", "openai") or "openai")
             logger.info(
                 "Loaded vision provider from DB: %s / %s",
-                self._vision_alias, self._vision_model,
+                self._vision_alias,
+                self._vision_model,
             )
             return
 
@@ -165,7 +168,8 @@ class ProviderManager:
             self._apply_trigger_row(row, api_type=row.get("api_type", "openai") or "openai")
             logger.info(
                 "Loaded trigger provider from DB: %s / %s",
-                self._trigger_alias, self._trigger_model,
+                self._trigger_alias,
+                self._trigger_model,
             )
             return
 
@@ -190,7 +194,7 @@ class ProviderManager:
             cfg = await self._pool.fetchrow(
                 "SELECT endpoint FROM embedding_config WHERE id = 1",
             )
-            endpoint = (cfg["endpoint"] if cfg and cfg["endpoint"] else "/embeddings")
+            endpoint = cfg["endpoint"] if cfg and cfg["endpoint"] else "/embeddings"
             extra_body = row.get("extra_body")
             if isinstance(extra_body, str):
                 extra_body = json.loads(extra_body)
@@ -207,7 +211,9 @@ class ProviderManager:
             self._embedding_model = row["model"]
             logger.info(
                 "Loaded embedding provider from DB: %s / %s (endpoint=%s)",
-                self._embedding_alias, self._embedding_model, endpoint,
+                self._embedding_alias,
+                self._embedding_model,
+                endpoint,
             )
             return
 
@@ -230,7 +236,8 @@ class ProviderManager:
         # 查找或创建 provider
         existing = await self._pool.fetchval(
             "SELECT id FROM llm_providers WHERE base_urls->>'openai' = $1 AND api_key = $2",
-            settings.embedding_base_url, settings.embedding_api_key,
+            settings.embedding_base_url,
+            settings.embedding_api_key,
         )
         if existing:
             provider_id = existing
@@ -275,17 +282,23 @@ class ProviderManager:
             VALUES ('embedding', $1, $2, $3::jsonb, $4)
             ON CONFLICT (key) DO NOTHING
             """,
-            provider_id, settings.embedding_model, extra_json,
+            provider_id,
+            settings.embedding_model,
+            extra_json,
             settings.embedding_request_timeout,
         )
         await self._pool.execute(
             "UPDATE embedding_config SET dimension = $1, endpoint = $2, updated_at = now() WHERE id = 1",
-            dim, endpoint,
+            dim,
+            endpoint,
         )
 
         logger.info(
             "Seeded embedding provider from .env: %s / %s (dim=%d, endpoint=%s)",
-            settings.embedding_base_url, settings.embedding_model, dim, endpoint,
+            settings.embedding_base_url,
+            settings.embedding_model,
+            dim,
+            endpoint,
         )
 
     async def close(self) -> None:
@@ -364,7 +377,10 @@ class ProviderManager:
                 INSERT INTO llm_providers (alias, base_urls, api_key, stream)
                 VALUES ($1, $2::jsonb, $3, $4)
                 """,
-                alias, base_urls_json, api_key, stream,
+                alias,
+                base_urls_json,
+                api_key,
+                stream,
             )
         except asyncpg.UniqueViolationError:
             return f"provider '{alias}' 已存在"
@@ -373,7 +389,8 @@ class ProviderManager:
     async def set_provider_url(self, alias: str, api_type: str, url: str | None) -> str:
         """设置或清除 provider 的 per-type base URL。url=None 表示清除。"""
         row = await self._pool.fetchrow(
-            "SELECT base_urls FROM llm_providers WHERE alias = $1", alias,
+            "SELECT base_urls FROM llm_providers WHERE alias = $1",
+            alias,
         )
         if not row:
             return f"provider '{alias}' 不存在"
@@ -391,7 +408,8 @@ class ProviderManager:
         base_urls_json = json.dumps(base_urls, ensure_ascii=False)
         await self._pool.execute(
             "UPDATE llm_providers SET base_urls = $1::jsonb WHERE alias = $2",
-            base_urls_json, alias,
+            base_urls_json,
+            alias,
         )
         if url is None:
             return f"已清除 '{alias}' 的 {api_type} URL（回退到自动推导）"
@@ -400,7 +418,8 @@ class ProviderManager:
     async def get_provider_urls(self, alias: str) -> dict[str, str] | str:
         """获取 provider 的所有 base URLs。"""
         row = await self._pool.fetchrow(
-            "SELECT base_urls FROM llm_providers WHERE alias = $1", alias,
+            "SELECT base_urls FROM llm_providers WHERE alias = $1",
+            alias,
         )
         if not row:
             return f"provider '{alias}' 不存在"
@@ -447,7 +466,8 @@ class ProviderManager:
             slots = ", ".join(row["key"] for row in active_rows)
             return f"无法删除 provider '{alias}'，仍被以下 slot 使用: {slots}"
         result = await self._pool.execute(
-            "DELETE FROM llm_providers WHERE alias = $1", alias,
+            "DELETE FROM llm_providers WHERE alias = $1",
+            alias,
         )
         if result == "DELETE 0":
             return f"provider '{alias}' 不存在"
@@ -477,11 +497,13 @@ class ProviderManager:
         )
         active_by_alias: dict[str, list[dict[str, str]]] = {}
         for ar in active_rows:
-            active_by_alias.setdefault(ar["alias"], []).append({
-                "key": ar["key"],
-                "model": ar["model"],
-                "api_type": ar.get("api_type", "openai") or "openai",
-            })
+            active_by_alias.setdefault(ar["alias"], []).append(
+                {
+                    "key": ar["key"],
+                    "model": ar["model"],
+                    "api_type": ar.get("api_type", "openai") or "openai",
+                }
+            )
 
         result = []
         for r in rows:
@@ -489,20 +511,23 @@ class ProviderManager:
             if isinstance(models_raw, str):
                 models_raw = json.loads(models_raw)
             base_urls = _normalize_base_urls(r["base_urls"])
-            result.append({
-                "alias": r["alias"],
-                "base_urls": base_urls,
-                "api_key_masked": self._mask_api_key(r["api_key"]),
-                "models": models_raw or [],
-                "model_count": len(models_raw) if models_raw else 0,
-                "active_slots": active_by_alias.get(r["alias"], []),
-            })
+            result.append(
+                {
+                    "alias": r["alias"],
+                    "base_urls": base_urls,
+                    "api_key_masked": self._mask_api_key(r["api_key"]),
+                    "models": models_raw or [],
+                    "model_count": len(models_raw) if models_raw else 0,
+                    "active_slots": active_by_alias.get(r["alias"], []),
+                }
+            )
         return result
 
     async def get_provider_api_key(self, alias: str) -> str | None:
         """获取 provider 的原始 API Key，不存在则返回 None。"""
         return await self._pool.fetchval(
-            "SELECT api_key FROM llm_providers WHERE alias = $1", alias,
+            "SELECT api_key FROM llm_providers WHERE alias = $1",
+            alias,
         )
 
     # ── 模型列表 ─────────────────────────────────────────────
@@ -513,7 +538,8 @@ class ProviderManager:
         返回模型名列表，或错误信息字符串。
         """
         row = await self._pool.fetchrow(
-            "SELECT base_urls, api_key FROM llm_providers WHERE alias = $1", alias,
+            "SELECT base_urls, api_key FROM llm_providers WHERE alias = $1",
+            alias,
         )
         if not row:
             return f"provider '{alias}' 不存在"
@@ -527,12 +553,14 @@ class ProviderManager:
             "Authorization": f"Bearer {row['api_key']}",
         }
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                    if resp.status != 200:
-                        body = await resp.text()
-                        return f"拉取失败 ({resp.status}): {body[:200]}"
-                    data = await resp.json()
+            async with (
+                aiohttp.ClientSession() as session,
+                session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as resp,
+            ):
+                if resp.status != 200:
+                    body = await resp.text()
+                    return f"拉取失败 ({resp.status}): {body[:200]}"
+                data = await resp.json()
         except Exception as e:
             return f"拉取失败: {e}"
 
@@ -540,7 +568,8 @@ class ProviderManager:
         models_json = json.dumps(model_ids, ensure_ascii=False)
         await self._pool.execute(
             "UPDATE llm_providers SET models = $1::jsonb WHERE alias = $2",
-            models_json, alias,
+            models_json,
+            alias,
         )
         return model_ids
 
@@ -549,7 +578,8 @@ class ProviderManager:
         models_json = json.dumps(models, ensure_ascii=False)
         result = await self._pool.execute(
             "UPDATE llm_providers SET models = $1::jsonb WHERE alias = $2",
-            models_json, alias,
+            models_json,
+            alias,
         )
         if result == "UPDATE 0":
             return f"provider '{alias}' 不存在"
@@ -564,7 +594,8 @@ class ProviderManager:
         extra_json = json.dumps(parsed, ensure_ascii=False) if parsed else None
         result = await self._pool.execute(
             "UPDATE llm_active SET extra_body = $1::jsonb WHERE key = $2",
-            extra_json, slot,
+            extra_json,
+            slot,
         )
         if result == "UPDATE 0":
             return f"slot '{slot}' 不存在"
@@ -589,7 +620,8 @@ class ProviderManager:
             return "timeout 范围: 5-600 秒"
         result = await self._pool.execute(
             "UPDATE llm_active SET request_timeout = $1 WHERE key = $2",
-            seconds, slot,
+            seconds,
+            slot,
         )
         if result == "UPDATE 0":
             return f"slot '{slot}' 不存在"
@@ -602,6 +634,7 @@ class ProviderManager:
         }.get(slot)
         if provider is not None:
             import aiohttp
+
             provider._timeout = aiohttp.ClientTimeout(total=seconds)
             logger.debug("Hot-reloaded timeout for %s slot: %ds", slot, seconds)
         return f"timeout 已更新: {seconds}s"
@@ -625,7 +658,10 @@ class ProviderManager:
     # ── 热切换 ───────────────────────────────────────────────
 
     async def _fetch_and_validate(
-        self, alias: str, api_type: str, slot: str,
+        self,
+        alias: str,
+        api_type: str,
+        slot: str,
     ) -> tuple[asyncpg.Record, None] | tuple[None, str]:
         """拉取 provider 行并校验 base_url，返回 (row, None) 或 (None, err)。"""
         row = await self._pool.fetchrow(
@@ -650,9 +686,12 @@ class ProviderManager:
             return err
 
         # 读取当前 slot 的 timeout（切换时保留）
-        existing_timeout = await self._pool.fetchval(
-            "SELECT request_timeout FROM llm_active WHERE key = 'default'",
-        ) or 60
+        existing_timeout = (
+            await self._pool.fetchval(
+                "SELECT request_timeout FROM llm_active WHERE key = 'default'",
+            )
+            or 60
+        )
 
         # 关闭旧 provider
         if self._provider is not None:
@@ -676,7 +715,10 @@ class ProviderManager:
                 extra_body = NULL,
                 updated_at = EXCLUDED.updated_at
             """,
-            row["id"], model, api_type, existing_timeout,
+            row["id"],
+            model,
+            api_type,
+            existing_timeout,
         )
 
         logger.info("Switched LLM to %s / %s (api_type=%s)", alias, model, api_type)
@@ -688,9 +730,12 @@ class ProviderManager:
         if err:
             return err
 
-        existing_timeout = await self._pool.fetchval(
-            "SELECT request_timeout FROM llm_active WHERE key = 'vision'",
-        ) or 30
+        existing_timeout = (
+            await self._pool.fetchval(
+                "SELECT request_timeout FROM llm_active WHERE key = 'vision'",
+            )
+            or 30
+        )
 
         if self._vision_provider is not None:
             await self._vision_provider.close()
@@ -711,7 +756,10 @@ class ProviderManager:
                 extra_body = NULL,
                 updated_at = EXCLUDED.updated_at
             """,
-            row["id"], model, api_type, existing_timeout,
+            row["id"],
+            model,
+            api_type,
+            existing_timeout,
         )
 
         logger.info("Switched vision to %s / %s (api_type=%s)", alias, model, api_type)
@@ -734,9 +782,12 @@ class ProviderManager:
         if err:
             return err
 
-        existing_timeout = await self._pool.fetchval(
-            "SELECT request_timeout FROM llm_active WHERE key = 'trigger'",
-        ) or 15
+        existing_timeout = (
+            await self._pool.fetchval(
+                "SELECT request_timeout FROM llm_active WHERE key = 'trigger'",
+            )
+            or 15
+        )
 
         if self._trigger_provider is not None:
             await self._trigger_provider.close()
@@ -757,7 +808,10 @@ class ProviderManager:
                 extra_body = NULL,
                 updated_at = EXCLUDED.updated_at
             """,
-            row["id"], model, api_type, existing_timeout,
+            row["id"],
+            model,
+            api_type,
+            existing_timeout,
         )
 
         logger.info("Switched trigger to %s / %s (api_type=%s)", alias, model, api_type)
@@ -787,7 +841,7 @@ class ProviderManager:
 
         # 从 embedding_config 读取 endpoint
         cfg = await self._pool.fetchrow("SELECT endpoint FROM embedding_config WHERE id = 1")
-        endpoint = (cfg["endpoint"] if cfg and cfg["endpoint"] else "/embeddings")
+        endpoint = cfg["endpoint"] if cfg and cfg["endpoint"] else "/embeddings"
         # 从 llm_active 读取 extra_body 和 request_timeout
         active_row = await self._pool.fetchrow(
             "SELECT extra_body, request_timeout FROM llm_active WHERE key = 'embedding'",
@@ -802,8 +856,11 @@ class ProviderManager:
         # 创建临时 provider 检测维度
         emb_base_url = _normalize_base_urls(row.get("base_urls")).get("openai", "")
         tmp = EmbeddingProvider(
-            base_url=emb_base_url, api_key=row["api_key"], model=model,
-            endpoint=endpoint, extra_body=extra_body,
+            base_url=emb_base_url,
+            api_key=row["api_key"],
+            model=model,
+            endpoint=endpoint,
+            extra_body=extra_body,
             request_timeout=timeout,
         )
         try:
@@ -822,7 +879,8 @@ class ProviderManager:
                 INSERT INTO llm_active (key, provider_id, model, updated_at)
                 VALUES ('embedding', $1, $2, now())
                 """,
-                row["id"], model,
+                row["id"],
+                model,
             )
             await self._pool.execute(
                 "UPDATE embedding_config SET dimension = $1, updated_at = now() WHERE id = 1",
@@ -854,7 +912,9 @@ class ProviderManager:
                 migration_status = 'pending', updated_at = now()
             WHERE id = 1
             """,
-            row["id"], model, dim,
+            row["id"],
+            model,
+            dim,
         )
         logger.info("Staged embedding switch: %s / %s (dim=%d)", alias, model, dim)
         return f"已暂存 {alias} / {model} (维度: {dim})，执行 .memory migrate 开始迁移"
@@ -894,7 +954,8 @@ class ProviderManager:
             base_url=_normalize_base_urls(prov_row.get("base_urls")).get("openai", ""),
             api_key=prov_row["api_key"],
             model=cfg["pending_model"],
-            endpoint=endpoint, extra_body=extra_body,
+            endpoint=endpoint,
+            extra_body=extra_body,
             request_timeout=timeout,
         )
 
@@ -905,12 +966,10 @@ class ProviderManager:
             )
 
             # 确保 staging 列存在
-            try:
+            with suppress(asyncpg.DuplicateColumnError):
                 await self._pool.execute(
-                    "ALTER TABLE memories ADD COLUMN embedding_new vector;"
+                    "ALTER TABLE memories ADD COLUMN embedding_new vector;",
                 )
-            except asyncpg.DuplicateColumnError:
-                pass  # 崩溃恢复：列已存在
 
             # 分批 re-embed
             batch_size = 50
@@ -925,10 +984,11 @@ class ProviderManager:
                 texts = [r["content"] for r in rows]
                 vectors = await new_provider.embed(texts)
                 async with self._pool.acquire() as conn:
-                    for row, vec in zip(rows, vectors):
+                    for row, vec in zip(rows, vectors, strict=True):
                         await conn.execute(
                             "UPDATE memories SET embedding_new = $2::vector WHERE id = $1",
-                            row["id"], str(vec),
+                            row["id"],
+                            str(vec),
                         )
                 total += len(rows)
                 logger.info("Migration progress: %d rows re-embedded", total)
@@ -940,8 +1000,7 @@ class ProviderManager:
                 await conn.execute("ALTER TABLE memories RENAME COLUMN embedding_new TO embedding;")
                 try:
                     await conn.execute(
-                        "CREATE INDEX idx_memories_embedding "
-                        "ON memories USING hnsw (embedding vector_cosine_ops);"
+                        "CREATE INDEX idx_memories_embedding ON memories USING hnsw (embedding vector_cosine_ops);"
                     )
                 except Exception:
                     logger.warning("Could not create HNSW index after migration")
@@ -962,7 +1021,8 @@ class ProviderManager:
                     UPDATE llm_active SET provider_id = $1, model = $2, updated_at = now()
                     WHERE key = 'embedding'
                     """,
-                    cfg["pending_provider_id"], cfg["pending_model"],
+                    cfg["pending_provider_id"],
+                    cfg["pending_model"],
                 )
 
             # 热替换
@@ -972,13 +1032,16 @@ class ProviderManager:
             self._embedding_model = cfg["pending_model"]
             # 查 alias
             alias_row = await self._pool.fetchrow(
-                "SELECT alias FROM llm_providers WHERE id = $1", cfg["pending_provider_id"],
+                "SELECT alias FROM llm_providers WHERE id = $1",
+                cfg["pending_provider_id"],
             )
             self._embedding_alias = alias_row["alias"] if alias_row else ""
 
             logger.info(
                 "Embedding migration complete: %s (dim=%d, %d rows)",
-                cfg["pending_model"], cfg["pending_dimension"], total,
+                cfg["pending_model"],
+                cfg["pending_dimension"],
+                total,
             )
             return f"迁移完成: {cfg['pending_model']} (维度: {cfg['pending_dimension']}, {total} 条记忆)"
 
@@ -996,10 +1059,8 @@ class ProviderManager:
         if not cfg or cfg["migration_status"] == "none":
             return "无需回滚"
 
-        try:
+        with suppress(Exception):
             await self._pool.execute("ALTER TABLE memories DROP COLUMN IF EXISTS embedding_new;")
-        except Exception:
-            pass
         await self._pool.execute(
             """
             UPDATE embedding_config
@@ -1028,7 +1089,9 @@ class ProviderManager:
         return await self.set_provider_extra_body("embedding", extra_body_json)
 
     async def _rebuild_embedding_provider(
-        self, *, endpoint: str | None = None,
+        self,
+        *,
+        endpoint: str | None = None,
     ) -> None:
         """重建当前 embedding provider（endpoint 变更后调用）。"""
         if self._embedding_provider is None:
@@ -1052,10 +1115,13 @@ class ProviderManager:
             cfg = await self._pool.fetchrow(
                 "SELECT endpoint FROM embedding_config WHERE id = 1",
             )
-            endpoint = (cfg["endpoint"] if cfg and cfg["endpoint"] else "/embeddings")
+            endpoint = cfg["endpoint"] if cfg and cfg["endpoint"] else "/embeddings"
         self._embedding_provider = EmbeddingProvider(
-            base_url=reb_base_urls.get("openai", ""), api_key=row["api_key"],
-            model=row["model"], endpoint=endpoint, extra_body=extra_body,
+            base_url=reb_base_urls.get("openai", ""),
+            api_key=row["api_key"],
+            model=row["model"],
+            endpoint=endpoint,
+            extra_body=extra_body,
             request_timeout=row.get("request_timeout", 30) or 30,
         )
         await old.close()
@@ -1121,7 +1187,10 @@ class ProviderManager:
             INSERT INTO llm_active (key, provider_id, model, api_type, extra_body, request_timeout)
             VALUES ('default', $1, $2, $3, $4::jsonb, $5)
             """,
-            provider_id, settings.llm_model, settings.llm_api_type, extra_json,
+            provider_id,
+            settings.llm_model,
+            settings.llm_api_type,
+            extra_json,
             settings.llm_request_timeout,
         )
 
@@ -1148,7 +1217,8 @@ class ProviderManager:
 
         logger.info(
             "Seeded default LLM provider from .env: %s / %s",
-            settings.llm_base_url, settings.llm_model,
+            settings.llm_base_url,
+            settings.llm_model,
         )
 
     def _apply_vision_row(self, row: dict[str, Any] | asyncpg.Record, api_type: str = "openai") -> None:
@@ -1193,7 +1263,8 @@ class ProviderManager:
         # 查找或创建 provider（vision 可能复用已有 provider）
         existing = await self._pool.fetchval(
             "SELECT id FROM llm_providers WHERE base_urls->>'openai' = $1 AND api_key = $2",
-            settings.vision_base_url, settings.vision_api_key,
+            settings.vision_base_url,
+            settings.vision_api_key,
         )
         if existing:
             provider_id = existing
@@ -1219,7 +1290,10 @@ class ProviderManager:
             VALUES ('vision', $1, $2, $3, $4::jsonb, $5)
             ON CONFLICT (key) DO NOTHING
             """,
-            provider_id, settings.vision_model, settings.vision_api_type, extra_json,
+            provider_id,
+            settings.vision_model,
+            settings.vision_api_type,
+            extra_json,
             settings.vision_request_timeout,
         )
 
@@ -1245,7 +1319,8 @@ class ProviderManager:
 
         logger.info(
             "Seeded vision provider from .env: %s / %s",
-            settings.vision_base_url, settings.vision_model,
+            settings.vision_base_url,
+            settings.vision_model,
         )
 
     def _apply_trigger_row(self, row: dict[str, Any] | asyncpg.Record, api_type: str = "openai") -> None:
@@ -1289,7 +1364,8 @@ class ProviderManager:
 
         existing = await self._pool.fetchval(
             "SELECT id FROM llm_providers WHERE base_urls->>'openai' = $1 AND api_key = $2",
-            settings.trigger_base_url, settings.trigger_api_key,
+            settings.trigger_base_url,
+            settings.trigger_api_key,
         )
         if existing:
             provider_id = existing
@@ -1314,7 +1390,10 @@ class ProviderManager:
             VALUES ('trigger', $1, $2, $3, $4::jsonb, $5)
             ON CONFLICT (key) DO NOTHING
             """,
-            provider_id, settings.trigger_model, settings.trigger_api_type, extra_json,
+            provider_id,
+            settings.trigger_model,
+            settings.trigger_api_type,
+            extra_json,
             settings.trigger_request_timeout,
         )
 
@@ -1340,5 +1419,6 @@ class ProviderManager:
 
         logger.info(
             "Seeded trigger provider from .env: %s / %s",
-            settings.trigger_base_url, settings.trigger_model,
+            settings.trigger_base_url,
+            settings.trigger_model,
         )

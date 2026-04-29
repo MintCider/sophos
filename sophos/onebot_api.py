@@ -83,7 +83,7 @@ class OneBotAPI:
 
         try:
             result = await asyncio.wait_for(future, timeout=timeout or self.DEFAULT_TIMEOUT)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning("API call %s timed out (echo=%s)", action, echo)
             raise
         finally:

@@ -6,7 +6,7 @@ import logging
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Any
+from typing import Any, override
 from zoneinfo import ZoneInfo
 
 import aiohttp
@@ -75,10 +75,16 @@ async def ws_loop(
                             event = api.dispatch(data)
                             if event is not None:
                                 # 事件处理放到独立 Task，不阻塞 WS 读取循环
-                                asyncio.create_task(handle_event(
-                                    api, event, store, provider_mgr, session,
-                                    memory_store=memory_store,
-                                ))
+                                asyncio.create_task(
+                                    handle_event(
+                                        api,
+                                        event,
+                                        store,
+                                        provider_mgr,
+                                        session,
+                                        memory_store=memory_store,
+                                    )
+                                )
 
                         elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
                             logger.warning("WebSocket closed or error: %s", msg.data)
@@ -139,8 +145,8 @@ def main() -> None:
     """CLI entry point."""
     # ── 日志配置 ──────────────────────────────────────────
     # 自定义 TRACE 级别（比 DEBUG 更低，记录完整 prompt/response）
-    TRACE = 5
-    logging.addLevelName(TRACE, "TRACE")
+    trace_level = 5
+    logging.addLevelName(trace_level, "TRACE")
 
     # 控制台：INFO 级别，人类可读
     # 文件：  TRACE 级别，包含完整 LLM 请求/响应
@@ -148,8 +154,10 @@ def main() -> None:
 
     class _TzFormatter(logging.Formatter):
         """用配置时区替代本地时间的 Formatter。"""
+
         _tz = ZoneInfo(settings.timezone)
 
+        @override
         def formatTime(self, record: logging.LogRecord, datefmt: str | None = None) -> str:
             dt = datetime.fromtimestamp(record.created, tz=self._tz)
             if datefmt:
@@ -157,7 +165,7 @@ def main() -> None:
             return dt.strftime("%Y-%m-%d %H:%M:%S") + f",{int(record.msecs):03d}"
 
     root_logger = logging.getLogger()
-    root_logger.setLevel(TRACE)
+    root_logger.setLevel(trace_level)
 
     # 控制台 handler
     console_handler = logging.StreamHandler()
@@ -169,10 +177,12 @@ def main() -> None:
     log_dir = Path("logs")
     log_dir.mkdir(exist_ok=True)
     file_handler = RotatingFileHandler(
-        log_dir / "sophos.log", maxBytes=settings.log_max_bytes,
-        backupCount=settings.log_backup_count, encoding="utf-8",
+        log_dir / "sophos.log",
+        maxBytes=settings.log_max_bytes,
+        backupCount=settings.log_backup_count,
+        encoding="utf-8",
     )
-    file_handler.setLevel(TRACE)
+    file_handler.setLevel(trace_level)
     file_handler.setFormatter(_TzFormatter(log_fmt))
     root_logger.addHandler(file_handler)
 

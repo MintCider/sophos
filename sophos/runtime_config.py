@@ -76,7 +76,7 @@ def get(key: str, default: Any = None) -> Any:
     return default
 
 
-async def set(key: str, value: Any) -> None:
+async def set_value(key: str, value: Any) -> None:
     """写入配置值。UPSERT DB + 刷新缓存。"""
     if _pool is None:
         raise RuntimeError("RuntimeConfig not initialized")
@@ -86,7 +86,8 @@ async def set(key: str, value: Any) -> None:
         INSERT INTO bot_config (key, value) VALUES ($1, $2::jsonb)
         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
         """,
-        key, value_json,
+        key,
+        value_json,
     )
     _cache[key] = value
     logger.info("RuntimeConfig set %s = %r", key, value)

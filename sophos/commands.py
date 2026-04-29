@@ -8,9 +8,9 @@ from typing import Any
 
 import asyncpg
 
+from sophos import permission, runtime_config, trigger
 from sophos.llm.provider_manager import ProviderManager
 from sophos.onebot_api import OneBotAPI
-from sophos import permission, runtime_config, trigger
 
 logger = logging.getLogger(__name__)
 
@@ -53,10 +53,7 @@ async def handle_llm_command(
                 extra_urls = [f"{k}={v}" for k, v in urls.items() if k != "openai"]
                 if extra_urls:
                     url_display += f" ({', '.join(extra_urls)})"
-                lines.append(
-                    f"  {p['alias']}: {url_display} "
-                    f"[{p['model_count']} models]{model_info}{marker}"
-                )
+                lines.append(f"  {p['alias']}: {url_display} [{p['model_count']} models]{model_info}{marker}")
             reply = "Providers:\n" + "\n".join(lines)
 
     elif sub == "add":
@@ -293,9 +290,7 @@ async def handle_trigger_command(
             f"触发配置:\n"
             f"  基础概率: {cfg.base_rate}\n"
             f"  @必回: {'开' if cfg.at_always else '关'}\n"
-            f"  关键词 ({len(cfg.keywords)}):\n"
-            + ("\n".join(kw_lines) if kw_lines else "    (无)")
-            + f"\n{llm_line}\n"
+            f"  关键词 ({len(cfg.keywords)}):\n" + ("\n".join(kw_lines) if kw_lines else "    (无)") + f"\n{llm_line}\n"
             f"  延迟: {delay}s | QPS: {qps} | 等待超时: {wait_timeout}s\n"
             f"  配额桶: {bucket_cap}/{bucket_refill}s"
         )
@@ -356,8 +351,10 @@ async def handle_trigger_command(
                 uid = int(target)
                 note = " ".join(parts[3:]) if len(parts) > 3 else None
                 from sophos import user_policy
+
                 await user_policy.set_policy(
-                    pool, uid,
+                    pool,
+                    uid,
                     suppress_llm_trigger=True,
                     rate_multiplier=0.0,
                     suppress_refresh=True,
@@ -377,11 +374,13 @@ async def handle_trigger_command(
             else:
                 uid = int(target)
                 from sophos import user_policy
+
                 removed = await user_policy.remove_policy(pool, uid)
                 reply = f"已解除用户 {uid} 的静默" if removed else f"用户 {uid} 无静默策略"
 
     elif sub == "policy":
         from sophos import user_policy
+
         sub2 = parts[2] if len(parts) > 2 else ""
         if sub2 == "":
             policies = await user_policy.get_all_policies(pool)
@@ -409,8 +408,10 @@ async def handle_trigger_command(
             if len(parts) > 3:
                 field = parts[3]
                 valid_fields = {
-                    "suppress_llm_trigger", "rate_multiplier",
-                    "suppress_refresh", "note",
+                    "suppress_llm_trigger",
+                    "rate_multiplier",
+                    "suppress_refresh",
+                    "note",
                 }
                 if field not in valid_fields:
                     reply = f"未知字段: {field}\n可用: {', '.join(sorted(valid_fields))}"
@@ -424,7 +425,12 @@ async def handle_trigger_command(
                         reply = str(e)
                     else:
                         updated = await user_policy.update_field(
-                            pool, uid, "global", 0, field, parsed,
+                            pool,
+                            uid,
+                            "global",
+                            0,
+                            field,
+                            parsed,
                         )
                         if updated:
                             reply = f"用户 {uid} 的 {field} 已设为 {parsed}"
@@ -480,7 +486,7 @@ def _parse_policy_value(field: str, raw: str) -> bool | float | str | None:
         try:
             v = float(raw)
         except ValueError:
-            raise ValueError("倍率必须是数字")
+            raise ValueError("倍率必须是数字") from None
         if not 0.0 <= v <= 10.0:
             raise ValueError("倍率范围 0~10")
         return v
@@ -564,7 +570,9 @@ async def handle_memory_command(
     elif sub == "migrate":
         sub2 = parts[2] if len(parts) > 2 else ""
         if sub2 == "status":
-            cfg = await pool.fetchrow("SELECT migration_status, pending_model, pending_dimension FROM embedding_config WHERE id = 1")
+            cfg = await pool.fetchrow(
+                "SELECT migration_status, pending_model, pending_dimension FROM embedding_config WHERE id = 1",
+            )
             if not cfg:
                 reply = "embedding 未配置"
             else:
@@ -614,7 +622,6 @@ async def handle_config_command(
     if sub == "":
         # 列出所有配置
         all_cfg = runtime_config.get_all()
-        defaults = runtime_config.get_defaults()
         lines = []
         for k, v in sorted(all_cfg.items()):
             marker = " *" if k in runtime_config._cache else ""
@@ -649,7 +656,7 @@ async def handle_config_command(
             except ValueError as e:
                 reply = str(e)
             else:
-                await runtime_config.set(key, parsed)
+                await runtime_config.set_value(key, parsed)
                 reply = f"{key} = {_format_value(parsed)}"
 
     else:
@@ -694,14 +701,14 @@ def _parse_value(raw: str, key: str) -> Any:
         try:
             v = int(raw)
         except ValueError:
-            raise ValueError("请输入整数")
+            raise ValueError("请输入整数") from None
         _validate(key, v)
         return v
     if isinstance(default, float):
         try:
             v = float(raw)
         except ValueError:
-            raise ValueError("请输入数字")
+            raise ValueError("请输入数字") from None
         _validate(key, v)
         return v
     # str
@@ -711,31 +718,29 @@ def _parse_value(raw: str, key: str) -> Any:
 
 # 每个 key 的合法性规则：(校验函数, 错误提示)
 _VALIDATORS: dict[str, tuple[Any, str]] = {
-    "llm_temperature":    (lambda v: 0 <= v <= 2,        "范围 0~2"),
-    "llm_max_tokens":     (lambda v: v > 0,              "必须 > 0"),
-    "llm_max_tool_rounds":(lambda v: v > 0,              "必须 > 0"),
-    "max_context_messages":(lambda v: v > 0,             "必须 > 0"),
-    "recent_global_limit":(lambda v: v >= 0,             "必须 >= 0"),
-    "recent_global_min_self":(lambda v: v >= 0,          "必须 >= 0"),
-    "cross_context_mode": (lambda v: v in ("system", "inline", "off"),
-                           "可选值: system / inline / off"),
-    "llm_user_schema":    (lambda v: "{{message}}" in v, "必须包含 {{message}} 占位符"),
-    "llm_bot_schema":     (lambda v: "{{message}}" in v, "必须包含 {{message}} 占位符"),
-    "vision_refine_prompt": (lambda v: "{prev_description}" in v,
-                             "必须包含 {prev_description} 占位符"),
-    "forward_head_count": (lambda v: v >= 1,  "必须 >= 1"),
-    "forward_tail_count": (lambda v: v >= 1,  "必须 >= 1"),
-    "forward_max_depth":  (lambda v: v >= 1,  "必须 >= 1"),
-    "reply_max_length":   (lambda v: v > 0,   "必须 > 0"),
-    "trigger_delay":      (lambda v: 0 <= v <= 30,  "范围 0~30"),
-    "trigger_qps":        (lambda v: 0.01 <= v <= 10, "范围 0.01~10"),
+    "llm_temperature": (lambda v: 0 <= v <= 2, "范围 0~2"),
+    "llm_max_tokens": (lambda v: v > 0, "必须 > 0"),
+    "llm_max_tool_rounds": (lambda v: v > 0, "必须 > 0"),
+    "max_context_messages": (lambda v: v > 0, "必须 > 0"),
+    "recent_global_limit": (lambda v: v >= 0, "必须 >= 0"),
+    "recent_global_min_self": (lambda v: v >= 0, "必须 >= 0"),
+    "cross_context_mode": (lambda v: v in ("system", "inline", "off"), "可选值: system / inline / off"),
+    "llm_user_schema": (lambda v: "{{message}}" in v, "必须包含 {{message}} 占位符"),
+    "llm_bot_schema": (lambda v: "{{message}}" in v, "必须包含 {{message}} 占位符"),
+    "vision_refine_prompt": (lambda v: "{prev_description}" in v, "必须包含 {prev_description} 占位符"),
+    "forward_head_count": (lambda v: v >= 1, "必须 >= 1"),
+    "forward_tail_count": (lambda v: v >= 1, "必须 >= 1"),
+    "forward_max_depth": (lambda v: v >= 1, "必须 >= 1"),
+    "reply_max_length": (lambda v: v > 0, "必须 > 0"),
+    "trigger_delay": (lambda v: 0 <= v <= 30, "范围 0~30"),
+    "trigger_qps": (lambda v: 0.01 <= v <= 10, "范围 0.01~10"),
     "trigger_wait_timeout": (lambda v: 5 <= v <= 300, "范围 5~300"),
     "trigger_eval_context_limit": (lambda v: v > 0, "必须 > 0"),
-    "trigger_eval_max_tokens": (lambda v: v > 0,    "必须 > 0"),
+    "trigger_eval_max_tokens": (lambda v: v > 0, "必须 > 0"),
     "trigger_eval_temperature": (lambda v: 0 <= v <= 2, "范围 0~2"),
-    "trigger_bucket_capacity": (lambda v: v > 0,    "必须 > 0"),
-    "trigger_bucket_refill": (lambda v: v > 0,      "必须 > 0"),
-    "tavily_max_results":   (lambda v: 1 <= v <= 20, "范围 1~20"),
+    "trigger_bucket_capacity": (lambda v: v > 0, "必须 > 0"),
+    "trigger_bucket_refill": (lambda v: v > 0, "必须 > 0"),
+    "tavily_max_results": (lambda v: 1 <= v <= 20, "范围 1~20"),
 }
 
 
@@ -763,10 +768,7 @@ async def handle_prompt_command(
 
     if sub == "":
         prompt = _load_system_prompt()
-        if len(prompt) > 500:
-            reply = prompt[:500] + f"\n... (共 {len(prompt)} 字，用 .prompt full 查看完整)"
-        else:
-            reply = prompt
+        reply = prompt[:500] + f"\n... (共 {len(prompt)} 字，用 .prompt full 查看完整)" if len(prompt) > 500 else prompt
 
     elif sub == "full":
         reply = _load_system_prompt()
@@ -790,23 +792,39 @@ async def handle_prompt_command(
 
 # ── 权限相关常量 ──────────────────────────────────────────
 
-_ALL_PERMS: frozenset[str] = frozenset({
-    "bot", "bot.group", "bot.private",
-    "cmd.tools", "cmd.config", "cmd.llm",
-    "cmd.trigger", "cmd.memory", "cmd.prompt",
-    "delegate",
-})
+_ALL_PERMS: frozenset[str] = frozenset(
+    {
+        "bot",
+        "bot.group",
+        "bot.private",
+        "cmd.tools",
+        "cmd.config",
+        "cmd.llm",
+        "cmd.trigger",
+        "cmd.memory",
+        "cmd.prompt",
+        "delegate",
+    }
+)
 
 _PERM_ALIASES: dict[str, str] = {
-    "bot": "bot", "bot.group": "bot.group", "bot.private": "bot.private",
-    "tools": "cmd.tools", "config": "cmd.config",
-    "llm": "cmd.llm", "trigger": "cmd.trigger", "memory": "cmd.memory",
-    "prompt": "cmd.prompt", "delegate": "delegate",
+    "bot": "bot",
+    "bot.group": "bot.group",
+    "bot.private": "bot.private",
+    "tools": "cmd.tools",
+    "config": "cmd.config",
+    "llm": "cmd.llm",
+    "trigger": "cmd.trigger",
+    "memory": "cmd.memory",
+    "prompt": "cmd.prompt",
+    "delegate": "delegate",
 }
 
 
 async def _resolve_targets(
-    api: OneBotAPI, target: str, group_id: int | None,
+    api: OneBotAPI,
+    target: str,
+    group_id: int | None,
 ) -> list[int] | str:
     """解析目标用户。返回 user_id 列表或错误消息字符串。"""
     if target == "admins":
@@ -815,10 +833,7 @@ async def _resolve_targets(
         members = await api.call("get_group_member_list", {"group_id": group_id})
         if not isinstance(members, list):
             return "获取群成员列表失败"
-        return [
-            m["user_id"] for m in members
-            if m.get("role") in ("owner", "admin")
-        ]
+        return [m["user_id"] for m in members if m.get("role") in ("owner", "admin")]
     if target == "all":
         if group_id is None:
             return "all 仅限群聊使用"
@@ -1023,6 +1038,7 @@ async def handle_perm_command(
         lines = [f"会话状态: {'启用' if enabled else '禁用'}"]
         if grants:
             from collections import defaultdict
+
             by_user: dict[int, list[str]] = defaultdict(list)
             for uid, perm in grants:
                 by_user[uid].append(perm)
@@ -1045,7 +1061,11 @@ async def handle_perm_command(
             elif perm_name == "bot.private" and not is_m:
                 reply = "仅 master 可授予 bot.private 权限"
             elif not is_m and not await _can_delegate_perm(
-                perm_name, user_id, scope_type, scope_id, pool,
+                perm_name,
+                user_id,
+                scope_type,
+                scope_id,
+                pool,
                 has_perm_fn=permission.has_permission,
             ):
                 reply = f"你没有权限授予 {perm_alias}"
@@ -1067,18 +1087,33 @@ async def handle_perm_command(
                         reply = "bot.group 仅限群聊中使用"
                     else:
                         count = await permission.batch_grant(
-                            pool, targets, "group", group_id, "bot.group", user_id,
+                            pool,
+                            targets,
+                            "group",
+                            group_id,
+                            "bot.group",
+                            user_id,
                         )
                         reply = f"已授予 {count} 人当前群 bot.group 权限"
                 elif perm_name == "bot":
                     # 全局 bot 权限
                     count = await permission.batch_grant(
-                        pool, targets, "global", 0, "bot", user_id,
+                        pool,
+                        targets,
+                        "global",
+                        0,
+                        "bot",
+                        user_id,
                     )
                     reply = f"已授予 {count} 人 bot 权限"
                 else:
                     count = await permission.batch_grant(
-                        pool, targets, scope_type, scope_id, perm_name, user_id,
+                        pool,
+                        targets,
+                        scope_type,
+                        scope_id,
+                        perm_name,
+                        user_id,
                     )
                     reply = f"已授予 {count} 人 {perm_alias} 权限"
 
@@ -1095,7 +1130,11 @@ async def handle_perm_command(
             elif perm_name == "bot.private" and not is_m:
                 reply = "仅 master 可撤销 bot.private 权限"
             elif not is_m and not await _can_delegate_perm(
-                perm_name, user_id, scope_type, scope_id, pool,
+                perm_name,
+                user_id,
+                scope_type,
+                scope_id,
+                pool,
                 has_perm_fn=permission.has_permission,
             ):
                 reply = f"你没有权限撤销 {perm_alias}"
@@ -1116,17 +1155,29 @@ async def handle_perm_command(
                         reply = "bot.group 仅限群聊中使用"
                     else:
                         count = await permission.batch_revoke(
-                            pool, targets, "group", group_id, "bot.group",
+                            pool,
+                            targets,
+                            "group",
+                            group_id,
+                            "bot.group",
                         )
                         reply = f"已撤销 {count} 人当前群 bot.group 权限"
                 elif perm_name == "bot":
                     count = await permission.batch_revoke(
-                        pool, targets, "global", 0, "bot",
+                        pool,
+                        targets,
+                        "global",
+                        0,
+                        "bot",
                     )
                     reply = f"已撤销 {count} 人 bot 权限"
                 else:
                     count = await permission.batch_revoke(
-                        pool, targets, scope_type, scope_id, perm_name,
+                        pool,
+                        targets,
+                        scope_type,
+                        scope_id,
+                        perm_name,
                     )
                     reply = f"已撤销 {count} 人的 {perm_alias} 权限"
 
@@ -1145,6 +1196,7 @@ async def handle_perm_command(
                 reply = "当前会话无授权"
             else:
                 from collections import defaultdict
+
                 by_user: dict[int, list[str]] = defaultdict(list)
                 for uid, perm in grants:
                     by_user[uid].append(perm)

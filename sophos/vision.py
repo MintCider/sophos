@@ -10,7 +10,6 @@
 import asyncio
 import base64
 import io
-import json
 import logging
 import random
 from typing import Any
@@ -18,9 +17,9 @@ from typing import Any
 import aiohttp
 import asyncpg
 
+from sophos import runtime_config
 from sophos.config import settings
 from sophos.llm.openai_compat import OpenAICompatProvider
-from sophos import runtime_config
 
 logger = logging.getLogger(__name__)
 
@@ -50,11 +49,14 @@ async def compute_hash(image_data: bytes) -> str | None:
     """计算感知哈希（CPU 密集，在 executor 中运行）。"""
     loop = asyncio.get_running_loop()
     try:
+
         def _hash() -> str:
-            from PIL import Image
             import imagehash
+            from PIL import Image
+
             img = Image.open(io.BytesIO(image_data))
             return str(imagehash.average_hash(img, hash_size=settings.vision_hash_size))
+
         return await loop.run_in_executor(None, _hash)
     except Exception:
         logger.exception("Image hash computation failed")
@@ -76,6 +78,7 @@ async def maybe_gif_to_grid(image_data: bytes, mime_type: str) -> tuple[bytes, s
 
     def _process() -> tuple[bytes, str]:
         from PIL import Image
+
         img = Image.open(io.BytesIO(image_data))
         n_frames = getattr(img, "n_frames", 1)
         if n_frames <= 2:
@@ -123,7 +126,7 @@ def should_explore(entry: dict[str, Any]) -> bool:
     hit_count = entry.get("hit_count", 0)
     epsilon = max(
         settings.vision_epsilon_min,
-        settings.vision_epsilon_init * (settings.vision_epsilon_decay ** hit_count),
+        settings.vision_epsilon_init * (settings.vision_epsilon_decay**hit_count),
     )
     return random.random() < epsilon
 
@@ -159,10 +162,12 @@ async def describe_image(
         for msg in context_messages:
             messages.append({"role": msg.get("role", "user"), "content": msg.get("content", "")})
     # 图片
-    messages.append({
-        "role": "user",
-        "content": [{"type": "image_url", "image_url": {"url": data_uri}}],
-    })
+    messages.append(
+        {
+            "role": "user",
+            "content": [{"type": "image_url", "image_url": {"url": data_uri}}],
+        }
+    )
 
     response = await provider.chat(messages, tools=None, temperature=0.3, max_tokens=settings.vision_max_tokens)  # type: ignore[arg-type]
     return response["message"].get("content", "") or ""
@@ -185,7 +190,9 @@ async def get_or_create_cache_entry(pool: asyncpg.Pool, hash_str: str) -> dict[s
 
 
 async def update_cache_after_explore(
-    pool: asyncpg.Pool, hash_str: str, description: str,
+    pool: asyncpg.Pool,
+    hash_str: str,
+    description: str,
 ) -> None:
     """探索后更新缓存：写入描述，清除纠正标志，递增 hit_count。"""
     await pool.execute(
@@ -196,7 +203,8 @@ async def update_cache_after_explore(
             last_seen = now()
         WHERE hash = $1
         """,
-        hash_str, description,
+        hash_str,
+        description,
     )
 
 
@@ -274,16 +282,16 @@ async def process_message_images(
 ) -> list[dict[str, str]]:
     """处理消息中所有图片段，返回 [{hash, description}, ...]。"""
     image_urls = [
-        seg["data"]["url"]
-        for seg in segments
-        if seg.get("type") == "image" and seg.get("data", {}).get("url")
+        seg["data"]["url"] for seg in segments if seg.get("type") == "image" and seg.get("data", {}).get("url")
     ]
     if not image_urls:
         return []
 
     tasks = [
         process_image_segment(
-            url, pool=pool, session=session,
+            url,
+            pool=pool,
+            session=session,
             vision_provider=vision_provider,
             context_messages=context_messages,
         )

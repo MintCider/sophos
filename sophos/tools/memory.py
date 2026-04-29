@@ -1,5 +1,6 @@
 """记忆工具 — 档案设置 + 记忆读写删。"""
 
+from contextlib import suppress
 from typing import Any
 
 from sophos.tools.base import Tool
@@ -60,10 +61,7 @@ class SetProfileContextTool(Tool):
 
     @property
     def description(self) -> str:
-        return (
-            "设置当前会话的档案（整体替换）。"
-            "档案是你对这个群/私聊的核心认知，会始终出现在你的提示中。"
-        )
+        return "设置当前会话的档案（整体替换）。档案是你对这个群/私聊的核心认知，会始终出现在你的提示中。"
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -125,7 +123,9 @@ class SetProfileUserTool(Tool):
     async def execute(self, params: dict[str, Any], context: dict[str, Any]) -> Any:
         store = context["memory_store"]
         return await store.set_profile_user(
-            params["user_id"], params["content"], params.get("keywords"),
+            params["user_id"],
+            params["content"],
+            params.get("keywords"),
         )
 
 
@@ -196,10 +196,8 @@ class SearchMemoryTool(Tool):
         embed = context.get("embedding_provider")
         query_vec = None
         if embed is not None:
-            try:
+            with suppress(Exception):
                 query_vec = await embed.embed_single(params["query"])
-            except Exception:
-                pass  # 降级为纯关键词搜索
         results = await store.search_hybrid(params["query"], query_vec, limit=10)
         # 格式化返回
         formatted = []

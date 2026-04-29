@@ -17,10 +17,10 @@ import re
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from sophos import runtime_config
 from sophos.config import settings
 from sophos.llm.provider import Message
 from sophos.message_store import MessageStore
-from sophos import runtime_config
 
 _RE_REPLY_PREFIX = re.compile(r"^\[回复[^\]]*\]\s*")
 
@@ -73,7 +73,8 @@ async def build_chat_context(
     mode = runtime_config.get("cross_context_mode")
     if mode == "system":
         bg_row = await store.get_cross_context_background(
-            group_id=group_id, user_id=user_id,
+            group_id=group_id,
+            user_id=user_id,
         )
         if bg_row is not None:
             system_prompt = system_prompt + _format_bg_for_system(bg_row)
@@ -84,7 +85,10 @@ async def build_chat_context(
 
 
 def _build_multi_turn(
-    rows: list[dict[str, Any]], system_prompt: str, *, inline_bg: bool = False,
+    rows: list[dict[str, Any]],
+    system_prompt: str,
+    *,
+    inline_bg: bool = False,
 ) -> list[Message]:
     """多轮模式：每条消息独立，bot 消息用 assistant role。"""
     messages: list[Message] = [{"role": "system", "content": system_prompt}]
@@ -118,7 +122,10 @@ def _build_multi_turn(
 
 
 def _build_flat(
-    rows: list[dict[str, Any]], system_prompt: str, *, inline_bg: bool = False,
+    rows: list[dict[str, Any]],
+    system_prompt: str,
+    *,
+    inline_bg: bool = False,
 ) -> list[Message]:
     """拍平模式：所有消息合并为单条 user message。"""
     lines: list[str] = []
@@ -175,8 +182,7 @@ def apply_schema(
 ) -> str:
     """应用 schema 模板，替换 {{placeholder}} 占位符。"""
     return (
-        schema
-        .replace("{{time}}", time)
+        schema.replace("{{time}}", time)
         .replace("{{mid}}", mid)
         .replace("{{name}}", name)
         .replace("{{uid}}", uid)
@@ -187,7 +193,12 @@ def apply_schema(
 def describe_schema(schema: str) -> str:
     """将 schema 模板转为人类可读的格式说明（给 LLM 看）。"""
     return apply_schema(
-        schema, time="时间", mid="消息ID", name="昵称", uid="QQ号", message="内容",
+        schema,
+        time="时间",
+        mid="消息ID",
+        name="昵称",
+        uid="QQ号",
+        message="内容",
     )
 
 
@@ -269,10 +280,7 @@ def _maybe_append_inline_bg(content: str, row: dict[str, Any]) -> str:
     ts = format_timestamp(row)
 
     type_label = "群聊" if source_type == "group" else "私聊"
-    return (
-        f"{content}\n---\n"
-        f"[背景] 来自{type_label} {source_id}（{ts}）：{summary}"
-    )
+    return f"{content}\n---\n[背景] 来自{type_label} {source_id}（{ts}）：{summary}"
 
 
 # ── Tool loop 上下文刷新 ─────────────────────────────────
@@ -320,4 +328,3 @@ def format_new_messages(
         lines.append(line)
 
     return "[新消息 - 以下是你处理期间新到达的消息]\n" + "\n".join(lines)
-

@@ -23,9 +23,7 @@ from sophos.vision import process_image_segment
 logger = logging.getLogger(__name__)
 
 # 可展开的段类型（排除 text 和 image，image 由 ProcessImagesStage 处理）
-_EXPANDABLE_TYPES = frozenset(
-    {"at", "reply", "forward", "json", "xml", "face", "record", "video", "share"}
-)
+_EXPANDABLE_TYPES = frozenset({"at", "reply", "forward", "json", "xml", "face", "record", "video", "share"})
 
 
 def has_expandable_segments(segments: list[dict[str, Any]]) -> bool:
@@ -64,8 +62,13 @@ async def expand_segments(
     """
     parts: list[str] = []
     ctx = _ExpandContext(
-        api=api, store=store, session=session, pool=pool,
-        vision_provider=vision_provider, group_id=group_id, depth=depth,
+        api=api,
+        store=store,
+        session=session,
+        pool=pool,
+        vision_provider=vision_provider,
+        group_id=group_id,
+        depth=depth,
     )
     for seg in segments:
         seg_type = seg.get("type", "")
@@ -88,8 +91,13 @@ class _ExpandContext:
     """展开过程中共享的依赖和状态。"""
 
     __slots__ = (
-        "api", "store", "session", "pool",
-        "vision_provider", "group_id", "depth",
+        "api",
+        "store",
+        "session",
+        "pool",
+        "vision_provider",
+        "group_id",
+        "depth",
     )
 
     def __init__(self, **kwargs: Any) -> None:
@@ -134,10 +142,7 @@ async def _expand_reply(data: dict, _type: str, ctx: _ExpandContext) -> str:
             name = sender.get("card", "") or sender.get("nickname", "") or str(sender.get("user_id", ""))
             uid = sender.get("user_id", "")
             segs = msg_data.get("message", [])
-            text = "".join(
-                s["data"]["text"] for s in segs
-                if isinstance(s, dict) and s.get("type") == "text"
-            )
+            text = "".join(s["data"]["text"] for s in segs if isinstance(s, dict) and s.get("type") == "text")
             if len(text) > max_len:
                 text = text[:max_len] + "..."
             return f"[回复 {name}({uid}): {text}]"
@@ -180,7 +185,7 @@ async def _expand_forward(data: dict, _type: str, ctx: _ExpandContext) -> str:
         skipped = total - head_n - tail_n
 
     lines: list[str] = [f"[合并转发 共{total}条:"]
-    for idx, (orig_idx, msg) in enumerate(kept):
+    for idx, (_orig_idx, msg) in enumerate(kept):
         sender = msg.get("sender", {})
         nickname = sender.get("nickname", "") or str(sender.get("user_id", ""))
         uid = sender.get("user_id", "")
@@ -215,15 +220,14 @@ async def _expand_forward(data: dict, _type: str, ctx: _ExpandContext) -> str:
 
 
 async def _process_forward_images(
-    segments: list[dict[str, Any]], ctx: _ExpandContext,
+    segments: list[dict[str, Any]],
+    ctx: _ExpandContext,
 ) -> str:
     """处理转发消息内的图片段，返回描述文本。"""
     if ctx.vision_provider is None:
         return ""
     image_urls = [
-        seg["data"]["url"]
-        for seg in segments
-        if seg.get("type") == "image" and seg.get("data", {}).get("url")
+        seg["data"]["url"] for seg in segments if seg.get("type") == "image" and seg.get("data", {}).get("url")
     ]
     if not image_urls:
         return ""
@@ -231,7 +235,9 @@ async def _process_forward_images(
     for url in image_urls:
         try:
             info = await process_image_segment(
-                url, pool=ctx.pool, session=ctx.session,
+                url,
+                pool=ctx.pool,
+                session=ctx.session,
                 vision_provider=ctx.vision_provider,
             )
             if info and info.get("description"):
@@ -264,12 +270,7 @@ async def _expand_json(data: dict, _type: str, ctx: _ExpandContext) -> str:
         if isinstance(detail, dict):
             title = detail.get("title", "") or ""
             desc = detail.get("desc", "") or ""
-            url = (
-                detail.get("qqdocurl")
-                or detail.get("jumpUrl")
-                or detail.get("url")
-                or ""
-            )
+            url = detail.get("qqdocurl") or detail.get("jumpUrl") or detail.get("url") or ""
             preview = detail.get("preview", "") or ""
             break
     else:
@@ -282,7 +283,9 @@ async def _expand_json(data: dict, _type: str, ctx: _ExpandContext) -> str:
     if preview and ctx.vision_provider:
         try:
             info = await process_image_segment(
-                preview, pool=ctx.pool, session=ctx.session,
+                preview,
+                pool=ctx.pool,
+                session=ctx.session,
                 vision_provider=ctx.vision_provider,
             )
             if info and info.get("description"):

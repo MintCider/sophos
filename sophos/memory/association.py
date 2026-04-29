@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from sophos.llm.embedding import EmbeddingProvider
@@ -21,11 +21,7 @@ async def auto_retrieve(
 ) -> list[dict[str, Any]]:
     """根据最近消息自动检索相关记忆。"""
     # 拼接最近消息文本
-    recent_text = "\n".join(
-        msg.get("plain_text", "")
-        for msg in recent_messages[-10:]
-        if msg.get("plain_text")
-    )
+    recent_text = "\n".join(msg.get("plain_text", "") for msg in recent_messages[-10:] if msg.get("plain_text"))
     if not recent_text.strip():
         return []
 

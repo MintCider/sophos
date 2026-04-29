@@ -7,7 +7,6 @@ TypedDict 提供类型提示但零运行时开销，可直接 json.dumps。
 from abc import ABC, abstractmethod
 from typing import Any, TypedDict
 
-
 # ── 消息类型 ─────────────────────────────────────────────
 
 
@@ -92,3 +91,4 @@ class LLMProvider(ABC):
 
     async def close(self) -> None:
         """释放资源（HTTP session 等）。默认无操作。"""
+        return None
