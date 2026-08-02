@@ -13,6 +13,12 @@ from sophos.agent import (
 
 
 class WorkflowEngineTests(unittest.IsolatedAsyncioTestCase):
+    def test_collector_instruction_allows_model_reasoning_without_answer_restriction(self) -> None:
+        workflow = collector_actor_workflow()
+        instructions = workflow.node("collector").instructions
+        self.assertNotIn("不要总结、建议或回答用户", instructions)
+        self.assertIn("complete_collection", instructions)
+
     async def test_collector_actor_cycle_keeps_complete_history(self) -> None:
         workflow = collector_actor_workflow()
         actor_calls = 0

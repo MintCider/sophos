@@ -29,7 +29,7 @@ def collector_actor_workflow() -> WorkflowDefinition:
                 title="Collect information",
                 instructions=(
                     "只调用读取工具收集回答当前请求所需的信息。"
-                    "不要总结、建议或回答用户；收集完成后调用 complete_collection。"
+                    "收集完成后调用 complete_collection。"
                 ),
                 model=ModelPolicy(slot="trigger", require_tool_call=True),
                 tools=ToolPolicy(include_categories=("input",), exclude_names=("generate_image",)),
