@@ -44,6 +44,8 @@ async def expand_segments(
     pool: asyncpg.Pool,
     vision_provider: Any = None,
     group_id: int | None = None,
+    adapter_binding_id: int | None = None,
+    conversation_id: int | None = None,
     depth: int = 0,
     on_first_token: Callable[[], Awaitable[None]] | None = None,
 ) -> str:
@@ -71,6 +73,8 @@ async def expand_segments(
         pool=pool,
         vision_provider=vision_provider,
         group_id=group_id,
+        adapter_binding_id=adapter_binding_id,
+        conversation_id=conversation_id,
         depth=depth,
         on_first_token=on_first_token,
     )
@@ -101,6 +105,8 @@ class _ExpandContext:
         "pool",
         "vision_provider",
         "group_id",
+        "adapter_binding_id",
+        "conversation_id",
         "depth",
         "on_first_token",
     )
@@ -132,7 +138,13 @@ async def _expand_reply(data: dict, _type: str, ctx: _ExpandContext) -> str:
     max_len = runtime_config.get("reply_max_length")
     try:
         # 优先从 DB 查
-        row = await ctx.store.get_by_message_id(int(mid))
+        row = None
+        if ctx.adapter_binding_id is not None and ctx.conversation_id is not None:
+            row = await ctx.store.get_by_external_locator(
+                adapter_binding_id=ctx.adapter_binding_id,
+                conversation_id=ctx.conversation_id,
+                external_message_id=str(mid),
+            )
         if row:
             name = get_display_name(row)
             uid = row.get("user_id", "")
@@ -206,6 +218,8 @@ async def _expand_forward(data: dict, _type: str, ctx: _ExpandContext) -> str:
             pool=ctx.pool,
             vision_provider=ctx.vision_provider,
             group_id=ctx.group_id,
+            adapter_binding_id=ctx.adapter_binding_id,
+            conversation_id=ctx.conversation_id,
             depth=ctx.depth + 1,
             on_first_token=ctx.on_first_token,
         )

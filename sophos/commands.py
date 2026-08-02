@@ -1222,13 +1222,12 @@ async def handle_perm_command(
 
 async def _reply(api: OneBotAPI, event: dict[str, Any], text: str) -> None:
     """向来源会话发送回复。"""
-    msg_type = event.get("message_type", "private")
-    params: dict[str, Any] = {
-        "message_type": msg_type,
-        "message": [{"type": "text", "data": {"text": text}}],
-    }
-    if msg_type == "group":
-        params["group_id"] = event.get("group_id")
-    else:
-        params["user_id"] = event.get("user_id")
-    await api.call("send_msg", params)
+    from sophos.messaging import MessageService
+    from sophos.platform import SendMessageRequest
+
+    del api
+    service = event.get("_sophos_message_service")
+    conversation_id = event.get("_sophos_conversation_id")
+    if not isinstance(service, MessageService) or not isinstance(conversation_id, int):
+        raise RuntimeError("command reply requires the unified message service context")
+    await service.send_message(SendMessageRequest(conversation_id=conversation_id, text=text))

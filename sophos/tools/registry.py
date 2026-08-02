@@ -7,7 +7,7 @@ from sophos.tools.base import Tool
 
 logger = logging.getLogger(__name__)
 
-UNSAFE_DISABLE_TOOLS: frozenset[str] = frozenset({"send_msg"})
+UNSAFE_DISABLE_TOOLS: frozenset[str] = frozenset({"send_message"})
 
 
 class ToolRegistry:
@@ -77,6 +77,10 @@ class ToolRegistry:
             raise PermissionError(f"Tool is disabled: {name}")
         if allowed_tools is not None and name not in allowed_tools:
             raise PermissionError(f"Tool is not allowed in this context: {name}")
+        capabilities = set(context.get("adapter_capabilities", ()))
+        if not tool.required_capabilities.issubset(capabilities):
+            missing = sorted(tool.required_capabilities - capabilities)
+            raise PermissionError(f"Adapter capability unavailable for {name}: {', '.join(missing)}")
 
         # 轻量参数校验：检查 required 字段是否齐全
         schema = tool.parameters
@@ -93,6 +97,7 @@ class ToolRegistry:
         category: str | None = None,
         scope: str | None = None,
         description_overrides: dict[str, str] | None = None,
+        capabilities: set[str] | None = None,
     ) -> list[dict[str, Any]]:
         """导出工具的 schema，用于传给 LLM 的 tools 字段。
 
@@ -107,6 +112,8 @@ class ToolRegistry:
             tools = [t for t in tools if t.category == category]
         if scope is not None:
             tools = [t for t in tools if t.scope in (scope, "all")]
+        if capabilities is not None:
+            tools = [t for t in tools if t.required_capabilities.issubset(capabilities)]
 
         schemas = []
         for tool in tools:

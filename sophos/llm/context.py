@@ -31,7 +31,9 @@ def _strip_reply_prefix(text: str) -> str:
 
 
 def _extract_reply_to(row: dict[str, Any]) -> int | None:
-    """从 raw_message 提取 reply segment 的 message_id。"""
+    """Return the internal reply target, with legacy segment fallback."""
+    if row.get("reply_to_message_id") is not None:
+        return int(row["reply_to_message_id"])
     raw = row.get("raw_message")
     if not raw:
         return None
@@ -48,8 +50,7 @@ def _extract_reply_to(row: dict[str, Any]) -> int | None:
 async def build_chat_context(
     store: MessageStore,
     *,
-    group_id: int | None = None,
-    user_id: int | None = None,
+    conversation_id: int,
     system_prompt: str,
 ) -> list[Message]:
     """从 MessageStore 构建 LLM 对话上下文。
@@ -65,8 +66,7 @@ async def build_chat_context(
     """
     messages, _ = await build_chat_context_snapshot(
         store,
-        group_id=group_id,
-        user_id=user_id,
+        conversation_id=conversation_id,
         system_prompt=system_prompt,
     )
     return messages
@@ -75,14 +75,12 @@ async def build_chat_context(
 async def build_chat_context_snapshot(
     store: MessageStore,
     *,
-    group_id: int | None = None,
-    user_id: int | None = None,
+    conversation_id: int,
     system_prompt: str,
 ) -> tuple[list[Message], int]:
     """构建连续完成上下文，并返回最后实际可见的消息 DB id。"""
     rows = await store.get_context(
-        group_id=group_id,
-        user_id=user_id,
+        conversation_id=conversation_id,
         include_co_account=runtime_config.get("include_co_account_in_context"),
     )
     visible_cursor = max((int(row["id"]) for row in rows), default=0)
@@ -91,8 +89,7 @@ async def build_chat_context_snapshot(
     mode = runtime_config.get("cross_context_mode")
     if mode == "system":
         bg_row = await store.get_cross_context_background(
-            group_id=group_id,
-            user_id=user_id,
+            conversation_id=conversation_id,
         )
         if bg_row is not None:
             system_prompt = system_prompt + _format_bg_for_system(bg_row)
@@ -123,7 +120,7 @@ def _build_multi_turn(
                 content = f"{content} {img_text}" if content else img_text
             reply_to = _extract_reply_to(row)
             if reply_to is not None:
-                content = f"send_msg(reply={reply_to}) {content}"
+                content = f"send_message(reply_to_message_id={reply_to}) {content}"
             messages.append({"role": "assistant", "content": content})
         else:
             content = apply_schema(
@@ -157,7 +154,7 @@ def _build_flat(
             bot_text = _strip_reply_prefix(row.get("plain_text", ""))
             reply_to = _extract_reply_to(row)
             if reply_to is not None:
-                bot_text = f"send_msg(reply={reply_to}) {bot_text}"
+                bot_text = f"send_message(reply_to_message_id={reply_to}) {bot_text}"
             line = apply_schema(
                 runtime_config.get("llm_bot_schema"),
                 time=format_timestamp(row),
@@ -217,7 +214,7 @@ def describe_schema(schema: str) -> str:
         time="时间",
         mid="消息ID",
         name="昵称",
-        uid="QQ号",
+        uid="用户ID",
         message="内容",
     )
 

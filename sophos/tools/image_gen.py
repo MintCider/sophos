@@ -16,8 +16,8 @@ from uuid import uuid4
 import aiohttp
 
 from sophos.llm.provider_manager import resolve_base_url
-from sophos.message_store import MessageStore
-from sophos.onebot_api import OneBotAPI
+from sophos.messaging import MessageService
+from sophos.platform import Capability, SendMessageRequest
 from sophos.tools.base import Tool
 
 logger = logging.getLogger(__name__)
@@ -100,10 +100,7 @@ def _request_timeout_from_config(raw: Any) -> int:
 
 
 def _session_from_context(context: dict[str, Any]) -> dict[str, Any]:
-    msg_type = context.get("message_type", "group")
-    if msg_type == "group":
-        return {"message_type": "group", "group_id": context.get("group_id")}
-    return {"message_type": "private", "user_id": context.get("user_id")}
+    return {"conversation_id": context.get("conversation_id")}
 
 
 def _clone_queue_record(record: dict[str, Any]) -> dict[str, Any]:
@@ -172,61 +169,21 @@ def _complete_queue_task(
     _IMAGE_QUEUE_COMPLETED.appendleft(record)
 
 
-def _self_message_user_id(msg_type: str, target_id: int, context: dict[str, Any]) -> int:
-    if msg_type == "private":
-        return target_id
-    return context.get("self_id", 0)
-
-
-def _build_send_params(
-    *,
-    msg_type: str,
-    target_id: int,
-    segments: list[dict[str, Any]],
-) -> dict[str, Any]:
-    send_params: dict[str, Any] = {
-        "message_type": msg_type,
-        "message": segments,
-    }
-    if msg_type == "group":
-        send_params["group_id"] = target_id
-    else:
-        send_params["user_id"] = target_id
-    return send_params
-
-
 async def _send_callback_text(
     *,
-    api: OneBotAPI,
-    store: MessageStore,
-    msg_type: str,
-    target_id: int,
+    message_service: MessageService,
+    conversation_id: int,
     callback_text: str,
-    context: dict[str, Any],
 ) -> int:
-    segments = [{"type": "text", "data": {"text": callback_text}}]
-    result = await api.call(
-        "send_msg",
-        _build_send_params(msg_type=msg_type, target_id=target_id, segments=segments),
-    )
-    message_id = result.get("message_id")
-    if message_id is None:
-        raise RuntimeError(f"send_msg returned no message_id (result={result})")
-
-    await store.save_self_message(
-        message_id=message_id,
-        message_type=msg_type,
-        group_id=target_id if msg_type == "group" else None,
-        user_id=_self_message_user_id(msg_type, target_id, context),
-        raw_message=segments,
+    sent = await message_service.send_message(
+        SendMessageRequest(conversation_id=conversation_id, text=callback_text)
     )
     logger.info(
-        "generate_image: callback text sent (message_id=%s, target=%s:%s)",
-        message_id,
-        msg_type,
-        target_id,
+        "generate_image: callback text sent (message_id=%s, conversation_id=%s)",
+        sent.message_id,
+        conversation_id,
     )
-    return message_id
+    return sent.message_id
 
 
 class ImageGenerationTool(Tool):
@@ -243,6 +200,10 @@ class ImageGenerationTool(Tool):
     @property
     def group(self) -> str:
         return "image_generation"
+
+    @property
+    def required_capabilities(self) -> frozenset[str]:
+        return frozenset({Capability.MESSAGE_SEND.value})
 
     @property
     def is_builtin(self) -> bool:
@@ -537,66 +498,44 @@ async def _generate_and_send(
         len(image_b64) if image_b64 else 0,
     )
 
-    api = context["api"]
+    message_service: MessageService = context["message_service"]
     store = context["store"]
     pool = context["pool"]
-    msg_type = context.get("message_type", "group")
-    target_id = context.get("group_id") if msg_type == "group" else context.get("user_id")
-    if target_id is None:
-        logger.warning("generate_image: current %s target id is missing", msg_type)
-        _complete_queue_task(task_id, ok=False, error=f"current {msg_type} target id is missing")
+    conversation_id = context.get("conversation_id")
+    if not isinstance(conversation_id, int):
+        logger.warning("generate_image: current conversation id is missing")
+        _complete_queue_task(task_id, ok=False, error="current conversation id is missing")
         return
 
-    segments: list[dict[str, Any]] = []
     if image_b64:
-        segments.append({"type": "image", "data": {"file": f"base64://{image_b64}"}})
+        image_segment = {"type": "image", "data": {"base64": image_b64}}
     else:
-        segments.append({"type": "image", "data": {"url": image_url}})
-
-    send_params = _build_send_params(msg_type=msg_type, target_id=target_id, segments=segments)
+        image_segment = {"type": "image", "data": {"url": image_url}}
 
     try:
-        result = await api.call("send_msg", send_params)
+        sent = await message_service.send_message(
+            SendMessageRequest(conversation_id=conversation_id, inline_media=(image_segment,))
+        )
     except Exception as e:
-        logger.exception("generate_image: failed to send image to OneBot")
-        _complete_queue_task(task_id, ok=False, error=f"failed to send image to OneBot: {e}")
+        logger.exception("generate_image: failed to send image")
+        _complete_queue_task(task_id, ok=False, error=f"failed to send image: {e}")
         return
 
-    message_id = result.get("message_id")
-
-    if message_id is not None:
-        await store.save_self_message(
-            message_id=message_id,
-            message_type=msg_type,
-            group_id=target_id if msg_type == "group" else None,
-            user_id=_self_message_user_id(msg_type, target_id, context),
-            raw_message=segments,
-        )
-        logger.info(
-            "generate_image: image sent (message_id=%s, target=%s:%s)",
-            message_id,
-            msg_type,
-            target_id,
-        )
-    else:
-        logger.warning(
-            "generate_image: send_msg returned no message_id (result=%s)",
-            result,
-        )
-        _complete_queue_task(task_id, ok=False, error=f"send_msg returned no message_id (result={result})")
-        return
+    message_id = sent.message_id
+    logger.info(
+        "generate_image: image sent (message_id=%s, conversation_id=%s)",
+        message_id,
+        conversation_id,
+    )
 
     callback_message_id: int | None = None
     callback_error: str | None = None
     if callback_text:
         try:
             callback_message_id = await _send_callback_text(
-                api=api,
-                store=store,
-                msg_type=msg_type,
-                target_id=target_id,
+                message_service=message_service,
+                conversation_id=conversation_id,
                 callback_text=callback_text,
-                context=context,
             )
         except Exception as e:
             callback_error = f"failed to send callback text: {e}"
@@ -651,7 +590,7 @@ async def _generate_and_send(
                         prev_description=entry.get("description", ""),
                     )
                     await update_cache_after_explore(pool, hash_str, description)
-                    await store.update_image_extra(
+                    await store.update_image_metadata(
                         message_id,
                         [{"hash": hash_str, "description": description}],
                     )

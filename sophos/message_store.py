@@ -1,696 +1,480 @@
-"""消息存储层。
+"""Platform-neutral message persistence.
 
-职责：
-  1. save_event_message()  — 从 WS 事件存入（ON CONFLICT DO NOTHING）
-  2. save_self_message()   — Sophos 发消息后主动存入（ON CONFLICT DO UPDATE）
-  3. get_context()         — 按会话查询最近 N 条
-  4. get_by_message_id()   — 按 message_id 查找（CQ:reply 展开用）
-
-去重策略：
-  - 群聊以 (group_id, message_id) 唯一，私聊以 (user_id, message_id) 唯一
-  - 事件入口用 DO NOTHING：如果 Sophos 已通过 save_self_message 存过，则跳过
-  - Sophos 发消息用 DO UPDATE：无论事件是否先到，最终都标记为 source='sophos'
+All internal mutation and agent-facing references use ``messages.id``. Protocol
+IDs are accepted only together with an adapter binding and conversation.
 """
 
+from __future__ import annotations
+
 import json
-import logging
 from datetime import UTC, datetime
 from typing import Any
 
 import asyncpg
 
 from sophos import runtime_config
+from sophos.platform import MessageEvent
 
-logger = logging.getLogger(__name__)
+_MESSAGE_COLUMNS = """
+    m.*,
+    m.id AS message_id,
+    m.content AS raw_message,
+    m.occurred_at AS timestamp,
+    m.last_accessed_at AS last_accessed,
+    m.metadata AS extra,
+    u.id AS user_id,
+    COALESCE(NULLIF(i.display_name, ''), u.display_name, '') AS nickname,
+    ''::text AS card,
+    c.kind AS conversation_kind,
+    CASE WHEN c.kind = 'direct' THEN 'private' ELSE c.kind END AS message_type,
+    CASE WHEN c.kind = 'direct' THEN NULL ELSE c.id END AS group_id
+"""
 
 
 class MessageStore:
-    """消息存储，封装对 messages 表的读写操作。"""
-
     def __init__(self, pool: asyncpg.Pool):
         self._pool = pool
 
     @property
     def pool(self) -> asyncpg.Pool:
-        """公开数据库连接池，供外部模块（如 vision）使用。"""
         return self._pool
 
-    # ── 从 WS 事件存入 ───────────────────────────────────
+    async def save_event_message(self, event: MessageEvent) -> int:
+        """Idempotently persist an adapter-normalized event and return its internal ID."""
+        reply_to_message_id = await self._resolve_reply_target(
+            adapter_binding_id=event.adapter_binding_id,
+            conversation_id=event.conversation.conversation_id,
+            segments=event.segments,
+        )
+        row_id = await self._pool.fetchval(
+            """
+            INSERT INTO messages
+                (adapter_binding_id, conversation_id, sender_identity_id,
+                 external_message_id, reply_to_message_id, source, content, plain_text, raw_payload,
+                 enrichment_status, occurred_at, metadata)
+            VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9::jsonb, $10, $11, $12::jsonb)
+            ON CONFLICT (adapter_binding_id, conversation_id, external_message_id)
+                WHERE external_message_id IS NOT NULL
+            DO UPDATE SET
+                sender_identity_id = COALESCE(messages.sender_identity_id, EXCLUDED.sender_identity_id),
+                reply_to_message_id = COALESCE(messages.reply_to_message_id, EXCLUDED.reply_to_message_id),
+                source = CASE WHEN messages.source = 'sophos' THEN messages.source ELSE EXCLUDED.source END,
+                raw_payload = COALESCE(messages.raw_payload, EXCLUDED.raw_payload),
+                metadata = messages.metadata || EXCLUDED.metadata
+            RETURNING id
+            """,
+            event.adapter_binding_id,
+            event.conversation.conversation_id,
+            event.sender.identity_id,
+            event.external_message_id,
+            reply_to_message_id,
+            event.source,
+            json.dumps(event.segments, ensure_ascii=False),
+            event.plain_text,
+            json.dumps(event.raw_payload, ensure_ascii=False),
+            self._initial_enrichment_status(event.segments),
+            event.occurred_at,
+            json.dumps(event.metadata, ensure_ascii=False),
+        )
+        return int(row_id)
 
-    async def save_event_message(self, event: dict[str, Any], self_id: int | None = None) -> int | None:
-        """从 OneBot 消息事件中提取字段并存入数据库。
-
-        如果该 message_id 已存在（Sophos 先通过 save_self_message 存过），则跳过。
-        如果是同账号发出的消息（user_id == self_id）但不是 Sophos 存的，标记为 co_account。
-
-        Args:
-            event: OneBot v11 消息事件（post_type 为 message 或 message_sent）
-            self_id: Bot 自身的 QQ 号，从事件的 self_id 字段获取
-
-        Returns:
-            数据库自增 id，已存在时返回 None
-        """
-        try:
-            message_id, message_type, group_id, user_id, nickname, card, raw_message, plain_text, timestamp = (
-                self._extract_event_fields(event)
-            )
-
-            # 判断来源
-            is_from_self_account = (user_id == self_id) if self_id is not None else False
-            source = "co_account" if is_from_self_account else "user"
-
-            # ON CONFLICT DO NOTHING：如果已存在（Sophos 先存过）就跳过
-            if group_id is not None:
-                conflict_clause = "ON CONFLICT (group_id, message_id) WHERE group_id IS NOT NULL DO NOTHING"
-            else:
-                conflict_clause = "ON CONFLICT (user_id, message_id) WHERE group_id IS NULL DO NOTHING"
-
-            row_id = await self._pool.fetchval(
-                f"""
-                INSERT INTO messages
-                    (message_id, message_type, group_id, user_id,
-                     nickname, card, source, raw_message, plain_text, timestamp,
-                     enrichment_status)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11)
-                {conflict_clause}
-                RETURNING id
-                """,
-                message_id,
-                message_type,
-                group_id,
-                user_id,
-                nickname,
-                card,
-                source,
-                json.dumps(raw_message, ensure_ascii=False),
-                plain_text,
-                timestamp,
-                self._initial_enrichment_status(raw_message),
-            )
-
-            if row_id is not None:
-                logger.debug("Saved event message id=%s (message_id=%s, source=%s)", row_id, message_id, source)
-            else:
-                logger.debug("Skipped event message (message_id=%s, already exists)", message_id)
-            return row_id
-
-        except Exception:
-            logger.exception("Failed to save event message")
-            return None
-
-    # ── Sophos 发消息后主动存入 ───────────────────────────
-
-    async def save_self_message(
+    async def save_outbound_message(
         self,
         *,
-        message_id: int,
-        message_type: str,
-        group_id: int | None,
-        user_id: int,
-        raw_message: list[dict[str, Any]],
-        timestamp: datetime | None = None,
-        extra: dict[str, Any] | None = None,
-    ) -> int | None:
-        """Sophos 发送消息后主动存储，标记 source='sophos'。
+        adapter_binding_id: int,
+        conversation_id: int,
+        sender_identity_id: int,
+        external_message_id: str,
+        segments: list[dict[str, Any]],
+        reply_to_message_id: int | None = None,
+        occurred_at: datetime | None = None,
+        metadata: dict[str, Any] | None = None,
+        raw_payload: dict[str, Any] | None = None,
+    ) -> int:
+        """Persist a Sophos delivery; an earlier self echo is upgraded in place."""
+        plain_text = "".join(
+            segment.get("data", {}).get("text", "")
+            for segment in segments
+            if isinstance(segment, dict) and segment.get("type") == "text"
+        )
+        row_id = await self._pool.fetchval(
+            """
+            INSERT INTO messages
+                (adapter_binding_id, conversation_id, sender_identity_id,
+                 external_message_id, reply_to_message_id, source, content, plain_text, raw_payload,
+                 enrichment_status, occurred_at, metadata)
+            VALUES ($1, $2, $3, $4, $5, 'sophos', $6::jsonb, $7, $8::jsonb,
+                    'completed', $9, $10::jsonb)
+            ON CONFLICT (adapter_binding_id, conversation_id, external_message_id)
+                WHERE external_message_id IS NOT NULL
+            DO UPDATE SET source = 'sophos',
+                          sender_identity_id = EXCLUDED.sender_identity_id,
+                          reply_to_message_id = COALESCE(EXCLUDED.reply_to_message_id, messages.reply_to_message_id),
+                          content = EXCLUDED.content,
+                          plain_text = EXCLUDED.plain_text,
+                          raw_payload = COALESCE(EXCLUDED.raw_payload, messages.raw_payload),
+                          metadata = messages.metadata || EXCLUDED.metadata
+            RETURNING id
+            """,
+            adapter_binding_id,
+            conversation_id,
+            sender_identity_id,
+            str(external_message_id),
+            reply_to_message_id,
+            json.dumps(segments, ensure_ascii=False),
+            plain_text,
+            json.dumps(raw_payload or {}, ensure_ascii=False),
+            occurred_at or datetime.now(tz=UTC),
+            json.dumps(metadata or {}, ensure_ascii=False),
+        )
+        return int(row_id)
 
-        nickname 和 card 留空——LLM 可通过调用查询接口获取。
-        使用 ON CONFLICT DO UPDATE：如果事件先到（标记为 co_account），覆盖为 sophos。
-        """
-        try:
-            plain_text = "".join(
-                seg["data"]["text"] for seg in raw_message if isinstance(seg, dict) and seg.get("type") == "text"
-            )
-            ts = timestamp or datetime.now(tz=UTC)
-            extra_json = json.dumps(extra, ensure_ascii=False) if extra else None
-
-            if group_id is not None:
-                conflict_clause = """
-                    ON CONFLICT (group_id, message_id) WHERE group_id IS NOT NULL
-                    DO UPDATE SET source = 'sophos', extra = EXCLUDED.extra
-                """
-            else:
-                conflict_clause = """
-                    ON CONFLICT (user_id, message_id) WHERE group_id IS NULL
-                    DO UPDATE SET source = 'sophos', extra = EXCLUDED.extra
-                """
-
-            row_id = await self._pool.fetchval(
-                f"""
-                INSERT INTO messages
-                    (message_id, message_type, group_id, user_id,
-                     nickname, card, source, raw_message, plain_text, timestamp, extra)
-                VALUES ($1, $2, $3, $4, '', '', 'sophos', $5::jsonb, $6, $7, $8::jsonb)
-                {conflict_clause}
-                RETURNING id
-                """,
-                message_id,
-                message_type,
-                group_id,
-                user_id,
-                json.dumps(raw_message, ensure_ascii=False),
-                plain_text,
-                ts,
-                extra_json,
-            )
-            logger.debug("Saved self message id=%s (message_id=%s)", row_id, message_id)
-            return row_id
-
-        except Exception:
-            logger.exception("Failed to save self message")
-            return None
-
-    # ── 读取上下文 ────────────────────────────────────────
-
-    async def get_context(
-        self,
-        *,
-        group_id: int | None = None,
-        user_id: int | None = None,
-        limit: int | None = None,
-        include_co_account: bool = True,
-    ) -> list[dict[str, Any]]:
-        """获取指定会话的最近 N 条消息。
-
-        群聊：传 group_id
-        私聊：传 user_id（group_id 为 None）
-        include_co_account: 是否包含同账号其他来源的消息
-
-        返回按时间正序排列的消息列表（最旧在前），方便直接拼接给 LLM。
-        """
-        max_messages = limit or runtime_config.get("max_context_messages")
-
-        # 根据配置决定是否过滤 co_account
-        source_filter = "" if include_co_account else "AND m.source != 'co_account'"
-        pending_source_filter = "" if include_co_account else "AND p.source != 'co_account'"
-
-        if group_id is not None:
-            rows = await self._pool.fetch(
-                f"""
-                WITH boundary AS (
-                    SELECT MIN(p.id) AS pending_id
-                    FROM messages p
-                    WHERE p.group_id = $1
-                      AND p.enrichment_status IN ('pending', 'streaming')
-                      {pending_source_filter}
-                )
-                SELECT m.* FROM messages m CROSS JOIN boundary b
-                WHERE m.group_id = $1 {source_filter}
-                  AND (b.pending_id IS NULL OR m.id < b.pending_id)
-                ORDER BY m.id DESC
-                LIMIT $2
-                """,
-                group_id,
-                max_messages,
-            )
-        elif user_id is not None:
-            rows = await self._pool.fetch(
-                f"""
-                WITH boundary AS (
-                    SELECT MIN(p.id) AS pending_id
-                    FROM messages p
-                    WHERE p.user_id = $1 AND p.group_id IS NULL
-                      AND p.enrichment_status IN ('pending', 'streaming')
-                      {pending_source_filter}
-                )
-                SELECT m.* FROM messages m CROSS JOIN boundary b
-                WHERE m.user_id = $1 AND m.group_id IS NULL {source_filter}
-                  AND (b.pending_id IS NULL OR m.id < b.pending_id)
-                ORDER BY m.id DESC
-                LIMIT $2
-                """,
-                user_id,
-                max_messages,
-            )
-        else:
-            raise ValueError("Must provide either group_id or user_id")
-
-        # DB 返回的是 DESC 顺序（最新在前），反转为正序
-        return [dict(row) for row in reversed(rows)]
-
-    # ── 按 message_id 查找（CQ:reply 展开用）──────────────
-
-    async def get_by_message_id(self, message_id: int) -> dict[str, Any] | None:
-        """按 OneBot message_id 查找一条消息。"""
+    async def get_by_id(self, message_id: int) -> dict[str, Any] | None:
         row = await self._pool.fetchrow(
-            "SELECT * FROM messages WHERE message_id = $1",
+            f"""
+            SELECT {_MESSAGE_COLUMNS}
+            FROM messages m
+            LEFT JOIN user_identities i ON i.id = m.sender_identity_id
+            LEFT JOIN users u ON u.id = i.user_id
+            JOIN conversations c ON c.id = m.conversation_id
+            WHERE m.id = $1
+            """,
             message_id,
         )
         return dict(row) if row else None
 
-    # ── plain_text 更新（段展开后）────────────────────────────
+    async def get_by_external_locator(
+        self,
+        *,
+        adapter_binding_id: int,
+        conversation_id: int,
+        external_message_id: str,
+    ) -> dict[str, Any] | None:
+        row = await self._pool.fetchrow(
+            f"""
+            SELECT {_MESSAGE_COLUMNS}
+            FROM messages m
+            LEFT JOIN user_identities i ON i.id = m.sender_identity_id
+            LEFT JOIN users u ON u.id = i.user_id
+            JOIN conversations c ON c.id = m.conversation_id
+            WHERE m.adapter_binding_id = $1 AND m.conversation_id = $2
+              AND m.external_message_id = $3
+            """,
+            adapter_binding_id,
+            conversation_id,
+            str(external_message_id),
+        )
+        return dict(row) if row else None
 
     async def update_plain_text(self, message_id: int, plain_text: str) -> None:
-        """更新消息的 plain_text（段展开后的富文本）。"""
-        await self._pool.execute(
-            "UPDATE messages SET plain_text = $2 WHERE message_id = $1",
-            message_id,
-            plain_text,
-        )
+        await self._pool.execute("UPDATE messages SET plain_text = $2 WHERE id = $1", message_id, plain_text)
 
-    # ── 图片描述更新 ────────────────────────────────────────
-
-    async def update_image_extra(
-        self,
-        message_id: int,
-        image_infos: list[dict[str, str]],
-    ) -> None:
-        """将图片描述写入消息的 extra.images 字段。
-
-        与现有 extra 字段（如 cross_context）合并，互不干扰。
-        """
-        images_json = json.dumps(image_infos, ensure_ascii=False)
+    async def update_image_metadata(self, message_id: int, image_infos: list[dict[str, str]]) -> None:
         await self._pool.execute(
             """
             UPDATE messages
-            SET extra = COALESCE(extra, '{}'::jsonb) || jsonb_build_object('images', $2::jsonb)
-            WHERE message_id = $1
+            SET metadata = metadata || jsonb_build_object('images', $2::jsonb)
+            WHERE id = $1
             """,
             message_id,
-            images_json,
+            json.dumps(image_infos, ensure_ascii=False),
         )
 
     async def set_enrichment_streaming(self, message_id: int) -> None:
-        """首个有效视觉 token 到达后，将消息从 pending 推进到 streaming。"""
         await self._pool.execute(
             """
-            UPDATE messages
-            SET enrichment_status = 'streaming', enrichment_error = NULL
-            WHERE message_id = $1 AND enrichment_status = 'pending'
+            UPDATE messages SET enrichment_status = 'streaming', enrichment_error = NULL
+            WHERE id = $1 AND enrichment_status = 'pending'
             """,
             message_id,
         )
 
     async def complete_enrichment(self, message_id: int) -> None:
-        """将无需图片异步处理的富化消息标记为完成。"""
         await self._pool.execute(
             """
-            UPDATE messages
-            SET enrichment_status = 'completed', enrichment_error = NULL
-            WHERE message_id = $1 AND enrichment_status IN ('pending', 'streaming')
+            UPDATE messages SET enrichment_status = 'completed', enrichment_error = NULL
+            WHERE id = $1 AND enrichment_status IN ('pending', 'streaming')
             """,
             message_id,
         )
 
-    async def finish_image_enrichment(
-        self,
-        message_id: int,
-        image_infos: list[dict[str, str]],
-    ) -> None:
-        """原子写入图片结果并将消息推进到 completed 或 failed 终态。"""
+    async def finish_image_enrichment(self, message_id: int, image_infos: list[dict[str, str]]) -> None:
         failed = any(info.get("status") == "failed" for info in image_infos)
         status = "failed" if failed else "completed"
         errors = [info.get("error", "") for info in image_infos if info.get("status") == "failed"]
-        error = "; ".join(filter(None, errors)) or None
-        images_json = json.dumps(image_infos, ensure_ascii=False)
         await self._pool.execute(
             """
             UPDATE messages
-            SET extra = COALESCE(extra, '{}'::jsonb) || jsonb_build_object('images', $2::jsonb),
+            SET metadata = metadata || jsonb_build_object('images', $2::jsonb),
                 enrichment_status = $3,
                 enrichment_error = $4
-            WHERE message_id = $1
+            WHERE id = $1
             """,
-            message_id, images_json, status, error,
+            message_id,
+            json.dumps(image_infos, ensure_ascii=False),
+            status,
+            "; ".join(filter(None, errors)) or None,
         )
 
     async def fail_interrupted_enrichments(self) -> int:
-        """进程启动时终结上一进程遗留的非终态消息，避免永久阻塞水位。"""
         result = await self._pool.execute(
             """
-            UPDATE messages
-            SET enrichment_status = 'failed',
-                enrichment_error = '消息富化因服务重启而中断'
+            UPDATE messages SET enrichment_status = 'failed',
+                                enrichment_error = '消息富化因服务重启而中断'
             WHERE enrichment_status IN ('pending', 'streaming')
-            """,
+            """
         )
         return int(result.rsplit(" ", 1)[-1])
 
-    # ── 按时间范围查询 ────────────────────────────────────
+    async def get_context(
+        self,
+        *,
+        conversation_id: int,
+        limit: int | None = None,
+        include_co_account: bool = True,
+    ) -> list[dict[str, Any]]:
+        max_messages = limit or runtime_config.get("max_context_messages")
+        source_filter = "" if include_co_account else "AND m.source != 'co_account'"
+        pending_source_filter = "" if include_co_account else "AND p.source != 'co_account'"
+        rows = await self._pool.fetch(
+            f"""
+            WITH boundary AS (
+                SELECT MIN(p.id) AS pending_id FROM messages p
+                WHERE p.conversation_id = $1
+                  AND p.enrichment_status IN ('pending', 'streaming')
+                  {pending_source_filter}
+            )
+            SELECT {_MESSAGE_COLUMNS}
+            FROM messages m
+            CROSS JOIN boundary b
+            LEFT JOIN user_identities i ON i.id = m.sender_identity_id
+            LEFT JOIN users u ON u.id = i.user_id
+            JOIN conversations c ON c.id = m.conversation_id
+            WHERE m.conversation_id = $1 {source_filter}
+              AND (b.pending_id IS NULL OR m.id < b.pending_id)
+            ORDER BY m.id DESC LIMIT $2
+            """,
+            conversation_id,
+            max_messages,
+        )
+        return [dict(row) for row in reversed(rows)]
 
     async def query_by_time_range(
         self,
         *,
-        message_type: str,
-        target_id: int,
+        conversation_id: int,
         start: datetime,
         end: datetime,
         limit: int = 30,
     ) -> list[dict[str, Any]]:
-        """按时间范围查询指定会话的消息。
-
-        Args:
-            message_type: "group" 或 "private"
-            target_id:    群号（group）或用户 QQ 号（private）
-            start:        时间窗口起点（UTC）
-            end:          时间窗口终点（UTC）
-            limit:        最大返回条数
-
-        Returns:
-            按时间正序排列的消息列表
-        """
-        if message_type == "group":
-            where = "m.group_id = $1"
-            pending_where = "p.group_id = $1"
-        else:
-            where = "m.user_id = $1 AND m.group_id IS NULL"
-            pending_where = "p.user_id = $1 AND p.group_id IS NULL"
-
         rows = await self._pool.fetch(
             f"""
             WITH boundary AS (
-                SELECT MIN(p.id) AS pending_id
-                FROM messages p
-                WHERE {pending_where}
+                SELECT MIN(p.id) AS pending_id FROM messages p
+                WHERE p.conversation_id = $1
                   AND p.enrichment_status IN ('pending', 'streaming')
             )
-            SELECT m.* FROM messages m CROSS JOIN boundary b
-            WHERE {where} AND m.timestamp BETWEEN $2 AND $3
+            SELECT {_MESSAGE_COLUMNS}
+            FROM messages m
+            CROSS JOIN boundary b
+            LEFT JOIN user_identities i ON i.id = m.sender_identity_id
+            LEFT JOIN users u ON u.id = i.user_id
+            JOIN conversations c ON c.id = m.conversation_id
+            WHERE m.conversation_id = $1 AND m.occurred_at BETWEEN $2 AND $3
               AND m.enrichment_status NOT IN ('pending', 'streaming')
               AND (b.pending_id IS NULL OR m.id < b.pending_id)
-            ORDER BY m.id ASC
-            LIMIT $4
+            ORDER BY m.occurred_at ASC, m.id ASC LIMIT $4
             """,
-            target_id,
+            conversation_id,
             start,
             end,
             limit,
         )
-        return [dict(r) for r in rows]
+        return [dict(row) for row in rows]
 
     async def touch_accessed(self, ids: list[int]) -> None:
-        """批量更新消息的 last_accessed 时间戳。"""
-        if not ids:
-            return
-        await self._pool.execute(
-            "UPDATE messages SET last_accessed = now() WHERE id = ANY($1)",
-            ids,
+        if ids:
+            await self._pool.execute("UPDATE messages SET last_accessed_at = now() WHERE id = ANY($1)", ids)
+
+    async def get_cross_context_background(self, *, conversation_id: int) -> dict[str, Any] | None:
+        row = await self._pool.fetchrow(
+            f"""
+            SELECT {_MESSAGE_COLUMNS}
+            FROM messages m
+            LEFT JOIN user_identities i ON i.id = m.sender_identity_id
+            LEFT JOIN users u ON u.id = i.user_id
+            JOIN conversations c ON c.id = m.conversation_id
+            WHERE m.conversation_id = $1 AND m.source = 'sophos'
+              AND m.enrichment_status IN ('completed', 'failed')
+              AND m.metadata ? 'cross_context'
+            ORDER BY m.occurred_at DESC, m.id DESC LIMIT 1
+            """,
+            conversation_id,
         )
-
-    # ── 跨 context 背景查询 ───────────────────────────────
-
-    async def get_cross_context_background(
-        self,
-        *,
-        group_id: int | None = None,
-        user_id: int | None = None,
-    ) -> dict[str, Any] | None:
-        """查找当前会话中最近一条带 cross_context 背景的 Sophos 消息。
-
-        用于 system 模式的背景注入：找到最近一次跨 context 发来的消息，
-        将其背景摘要注入到 system prompt 中。
-
-        Returns:
-            整行 dict（含 timestamp、extra 等），供格式化用。无则 None。
-        """
-        if group_id is not None:
-            row = await self._pool.fetchrow(
-                """
-                SELECT * FROM messages
-                WHERE group_id = $1
-                  AND source = 'sophos'
-                  AND enrichment_status NOT IN ('pending', 'streaming')
-                  AND extra->'cross_context' IS NOT NULL
-                ORDER BY timestamp DESC
-                LIMIT 1
-                """,
-                group_id,
-            )
-        elif user_id is not None:
-            row = await self._pool.fetchrow(
-                """
-                SELECT * FROM messages
-                WHERE user_id = $1 AND group_id IS NULL
-                  AND source = 'sophos'
-                  AND enrichment_status NOT IN ('pending', 'streaming')
-                  AND extra->'cross_context' IS NOT NULL
-                ORDER BY timestamp DESC
-                LIMIT 1
-                """,
-                user_id,
-            )
-        else:
-            return None
-
         return dict(row) if row else None
-
-    # ── 最近全局消息（跨上下文）──────────────────────────
 
     async def get_recent_global(
         self,
         *,
-        exclude_group_id: int | None = None,
-        exclude_private_user_id: int | None = None,
+        exclude_conversation_id: int | None = None,
         limit: int = 50,
         min_self_messages: int = 5,
     ) -> list[dict[str, Any]]:
-        """获取其他上下文的最近消息，确保至少包含 min_self_messages 条 sophos 消息。
-
-        Args:
-            exclude_group_id:        当前群聊 ID（排除）
-            exclude_private_user_id: 当前私聊用户 ID（排除）
-            limit:                   最大消息条数
-            min_self_messages:       sophos 消息最少条数
-
-        Returns:
-            按时间正序排列的消息列表
-        """
-        # 构建排除条件
-        exclude_parts: list[str] = []
-        params: list[Any] = []
-        idx = 1
-
-        if exclude_group_id is not None:
-            exclude_parts.append(f"NOT (m.group_id = ${idx})")
-            params.append(exclude_group_id)
-            idx += 1
-        if exclude_private_user_id is not None:
-            exclude_parts.append(f"NOT (m.group_id IS NULL AND m.user_id = ${idx})")
-            params.append(exclude_private_user_id)
-            idx += 1
-
-        where = " AND ".join(exclude_parts) if exclude_parts else "TRUE"
-
-        # Query 1: 最近 limit 条非当前上下文消息
-        params.append(limit)
-        rows = await self._pool.fetch(
-            f"""
-            SELECT m.* FROM messages m
-            WHERE {where}
-              AND m.enrichment_status NOT IN ('pending', 'streaming')
-              AND NOT EXISTS (
-                  SELECT 1 FROM messages p
-                  WHERE p.enrichment_status IN ('pending', 'streaming')
-                    AND p.id < m.id
-                    AND (
-                        (m.group_id IS NOT NULL AND p.group_id = m.group_id)
-                        OR (m.group_id IS NULL AND p.group_id IS NULL AND p.user_id = m.user_id)
-                    )
-              )
-            ORDER BY m.timestamp DESC
-            LIMIT ${idx}
-            """,
-            *params,
+        rows = await self._recent_global_query(
+            exclude_conversation_id=exclude_conversation_id,
+            limit=limit,
+            source=None,
         )
-        rows = [dict(r) for r in rows]
-
-        # 统计 sophos 消息数量
-        sophos_count = sum(1 for r in rows if r.get("source") == "sophos")
-
+        sophos_count = sum(row.get("source") == "sophos" for row in rows)
         if sophos_count < min_self_messages:
-            # Query 2: 补充 sophos 消息
-            seen_ids = {r["id"] for r in rows}
-            need = min_self_messages - sophos_count
-            extra_params: list[Any] = []
-            extra_idx = 1
-            extra_parts: list[str] = []
-
-            if exclude_group_id is not None:
-                extra_parts.append(f"NOT (m.group_id = ${extra_idx})")
-                extra_params.append(exclude_group_id)
-                extra_idx += 1
-            if exclude_private_user_id is not None:
-                extra_parts.append(f"NOT (m.group_id IS NULL AND m.user_id = ${extra_idx})")
-                extra_params.append(exclude_private_user_id)
-                extra_idx += 1
-
-            extra_where = " AND ".join(extra_parts) if extra_parts else "TRUE"
-            extra_params.append(need + len(rows))  # 多取一些以跳过已有的
-
-            extra_rows = await self._pool.fetch(
-                f"""
-                SELECT m.* FROM messages m
-                WHERE {extra_where} AND m.source = 'sophos'
-                  AND m.enrichment_status NOT IN ('pending', 'streaming')
-                  AND NOT EXISTS (
-                      SELECT 1 FROM messages p
-                      WHERE p.enrichment_status IN ('pending', 'streaming')
-                        AND p.id < m.id
-                        AND (
-                            (m.group_id IS NOT NULL AND p.group_id = m.group_id)
-                            OR (m.group_id IS NULL AND p.group_id IS NULL AND p.user_id = m.user_id)
-                        )
-                  )
-                ORDER BY m.timestamp DESC
-                LIMIT ${extra_idx}
-                """,
-                *extra_params,
+            extras = await self._recent_global_query(
+                exclude_conversation_id=exclude_conversation_id,
+                limit=min_self_messages - sophos_count + len(rows),
+                source="sophos",
             )
-            for r in extra_rows:
-                rd = dict(r)
-                if rd["id"] not in seen_ids:
-                    rows.append(rd)
-                    seen_ids.add(rd["id"])
-                    need -= 1
-                    if need <= 0:
-                        break
+            seen = {row["id"] for row in rows}
+            for row in extras:
+                if row["id"] not in seen:
+                    rows.append(row)
+                    seen.add(row["id"])
+        rows.sort(key=lambda row: (row["timestamp"], row["id"]))
+        return rows[-limit:]
 
-        # 按时间正序
-        rows.sort(key=lambda r: r["timestamp"])
-        # 截断到 limit
-        return rows[-limit:] if len(rows) > limit else rows
-
-    # ── 游标查询（tool loop 上下文刷新用）─────────────────
-
-    async def get_max_id(
+    async def _recent_global_query(
         self,
         *,
-        group_id: int | None = None,
-        user_id: int | None = None,
-    ) -> int:
-        """当前会话最大 DB id，用作游标起点。无消息时返回 0。"""
-        if group_id is not None:
-            val = await self._pool.fetchval(
-                "SELECT COALESCE(MAX(id), 0) FROM messages WHERE group_id = $1",
-                group_id,
-            )
-        elif user_id is not None:
-            val = await self._pool.fetchval(
-                "SELECT COALESCE(MAX(id), 0) FROM messages WHERE user_id = $1 AND group_id IS NULL",
-                user_id,
-            )
-        else:
-            raise ValueError("Must provide either group_id or user_id")
-        return int(val)
+        exclude_conversation_id: int | None,
+        limit: int,
+        source: str | None,
+    ) -> list[dict[str, Any]]:
+        rows = await self._pool.fetch(
+            f"""
+            SELECT {_MESSAGE_COLUMNS}
+            FROM messages m
+            LEFT JOIN user_identities i ON i.id = m.sender_identity_id
+            LEFT JOIN users u ON u.id = i.user_id
+            JOIN conversations c ON c.id = m.conversation_id
+            WHERE ($1::bigint IS NULL OR m.conversation_id != $1)
+              AND ($2::text IS NULL OR m.source = $2)
+              AND m.enrichment_status IN ('completed', 'failed')
+              AND NOT EXISTS (
+                  SELECT 1 FROM messages p
+                  WHERE p.conversation_id = m.conversation_id
+                    AND p.enrichment_status IN ('pending', 'streaming')
+                    AND p.id < m.id
+              )
+            ORDER BY m.occurred_at DESC, m.id DESC LIMIT $3
+            """,
+            exclude_conversation_id,
+            source,
+            limit,
+        )
+        return [dict(row) for row in rows]
+
+    async def get_max_id(self, *, conversation_id: int) -> int:
+        value = await self._pool.fetchval(
+            "SELECT COALESCE(MAX(id), 0) FROM messages WHERE conversation_id = $1",
+            conversation_id,
+        )
+        return int(value)
 
     async def get_messages_after(
         self,
         *,
-        group_id: int | None = None,
-        user_id: int | None = None,
+        conversation_id: int,
         after_id: int,
         include_co_account: bool = True,
     ) -> list[dict[str, Any]]:
-        """获取 id > after_id 的全部新消息，供 enrichment 协调用。"""
-        source_filter = "" if include_co_account else "AND source != 'co_account'"
-
-        if group_id is not None:
-            rows = await self._pool.fetch(
-                f"""
-                SELECT * FROM messages
-                WHERE group_id = $1 AND id > $2 {source_filter}
-                ORDER BY id ASC
-                """,
-                group_id,
-                after_id,
-            )
-        elif user_id is not None:
-            rows = await self._pool.fetch(
-                f"""
-                SELECT * FROM messages
-                WHERE user_id = $1 AND group_id IS NULL AND id > $2 {source_filter}
-                ORDER BY id ASC
-                """,
-                user_id,
-                after_id,
-            )
-        else:
-            raise ValueError("Must provide either group_id or user_id")
-
+        source_filter = "" if include_co_account else "AND m.source != 'co_account'"
+        rows = await self._pool.fetch(
+            f"""
+            SELECT {_MESSAGE_COLUMNS}
+            FROM messages m
+            LEFT JOIN user_identities i ON i.id = m.sender_identity_id
+            LEFT JOIN users u ON u.id = i.user_id
+            JOIN conversations c ON c.id = m.conversation_id
+            WHERE m.conversation_id = $1 AND m.id > $2 {source_filter}
+            ORDER BY m.id ASC
+            """,
+            conversation_id,
+            after_id,
+        )
         return [dict(row) for row in rows]
 
     async def get_ready_messages_after(
         self,
         *,
-        group_id: int | None = None,
-        user_id: int | None = None,
+        conversation_id: int,
         after_id: int,
         include_co_account: bool = True,
     ) -> list[dict[str, Any]]:
-        """获取游标后的连续终态消息；遇到 pending/streaming 即截断。"""
         source_filter = "" if include_co_account else "AND m.source != 'co_account'"
         pending_source_filter = "" if include_co_account else "AND p.source != 'co_account'"
-
-        if group_id is not None:
-            rows = await self._pool.fetch(
-                f"""
-                WITH boundary AS (
-                    SELECT MIN(p.id) AS pending_id
-                    FROM messages p
-                    WHERE p.group_id = $1 AND p.id > $2
-                      AND p.enrichment_status IN ('pending', 'streaming')
-                      {pending_source_filter}
-                )
-                SELECT m.* FROM messages m CROSS JOIN boundary b
-                WHERE m.group_id = $1 AND m.id > $2 {source_filter}
-                  AND m.enrichment_status NOT IN ('pending', 'streaming')
-                  AND (b.pending_id IS NULL OR m.id < b.pending_id)
-                ORDER BY m.id ASC
-                """,
-                group_id, after_id,
+        rows = await self._pool.fetch(
+            f"""
+            WITH boundary AS (
+                SELECT MIN(p.id) AS pending_id FROM messages p
+                WHERE p.conversation_id = $1 AND p.id > $2
+                  AND p.enrichment_status IN ('pending', 'streaming')
+                  {pending_source_filter}
             )
-        elif user_id is not None:
-            rows = await self._pool.fetch(
-                f"""
-                WITH boundary AS (
-                    SELECT MIN(p.id) AS pending_id
-                    FROM messages p
-                    WHERE p.user_id = $1 AND p.group_id IS NULL AND p.id > $2
-                      AND p.enrichment_status IN ('pending', 'streaming')
-                      {pending_source_filter}
-                )
-                SELECT m.* FROM messages m CROSS JOIN boundary b
-                WHERE m.user_id = $1 AND m.group_id IS NULL AND m.id > $2 {source_filter}
-                  AND m.enrichment_status NOT IN ('pending', 'streaming')
-                  AND (b.pending_id IS NULL OR m.id < b.pending_id)
-                ORDER BY m.id ASC
-                """,
-                user_id, after_id,
-            )
-        else:
-            raise ValueError("Must provide either group_id or user_id")
-
+            SELECT {_MESSAGE_COLUMNS}
+            FROM messages m
+            CROSS JOIN boundary b
+            LEFT JOIN user_identities i ON i.id = m.sender_identity_id
+            LEFT JOIN users u ON u.id = i.user_id
+            JOIN conversations c ON c.id = m.conversation_id
+            WHERE m.conversation_id = $1 AND m.id > $2 {source_filter}
+              AND m.enrichment_status IN ('completed', 'failed')
+              AND (b.pending_id IS NULL OR m.id < b.pending_id)
+            ORDER BY m.id ASC
+            """,
+            conversation_id,
+            after_id,
+        )
         return [dict(row) for row in rows]
 
-    # ── 内部工具 ──────────────────────────────────────────
-
-    @staticmethod
-    def _initial_enrichment_status(raw_message: list[Any]) -> str:
-        """非纯文本段需要经过 Enrich/Images stage，落库时先标记 pending。"""
-        return "pending" if any(
-            isinstance(seg, dict) and seg.get("type") != "text"
-            for seg in raw_message
-        ) else "completed"
-
-    @staticmethod
-    def _extract_event_fields(
-        event: dict[str, Any],
-    ) -> tuple[Any, str, int | None, Any, str, str, list[Any], str, datetime]:
-        """从 OneBot 事件提取存储所需的字段。"""
-        message_id = event.get("message_id")
-        message_type = event.get("message_type", "private")
-        group_id = event.get("group_id")
-        user_id = event.get("user_id")
-
-        sender = event.get("sender", {})
-        nickname = sender.get("nickname", "")
-        card = sender.get("card", "")
-
-        raw_message = event.get("message", [])
-        plain_text = "".join(
-            seg["data"]["text"] for seg in raw_message if isinstance(seg, dict) and seg.get("type") == "text"
+    async def get_delivery_locator(self, message_id: int) -> tuple[int, int, str] | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT adapter_binding_id, conversation_id, external_message_id
+            FROM messages WHERE id = $1 AND external_message_id IS NOT NULL
+            """,
+            message_id,
         )
+        if not row:
+            return None
+        return row["adapter_binding_id"], row["conversation_id"], row["external_message_id"]
 
-        ts = event.get("time")
-        timestamp = datetime.fromtimestamp(ts, tz=UTC) if ts else datetime.now(tz=UTC)
+    async def _resolve_reply_target(
+        self,
+        *,
+        adapter_binding_id: int,
+        conversation_id: int,
+        segments: list[dict[str, Any]],
+    ) -> int | None:
+        for segment in segments:
+            if not isinstance(segment, dict) or segment.get("type") != "reply":
+                continue
+            data = segment.get("data", {})
+            external_id = data.get("id") or data.get("external_message_id")
+            if external_id is None:
+                return None
+            value = await self._pool.fetchval(
+                """
+                SELECT id FROM messages
+                WHERE adapter_binding_id = $1 AND conversation_id = $2
+                  AND external_message_id = $3
+                """,
+                adapter_binding_id,
+                conversation_id,
+                str(external_id),
+            )
+            return int(value) if value is not None else None
+        return None
 
-        return message_id, message_type, group_id, user_id, nickname, card, raw_message, plain_text, timestamp
+    @staticmethod
+    def _initial_enrichment_status(segments: list[Any]) -> str:
+        return "pending" if any(
+            isinstance(segment, dict) and segment.get("type") != "text" for segment in segments
+        ) else "completed"

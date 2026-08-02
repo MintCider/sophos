@@ -13,6 +13,7 @@ import aiohttp
 from aiohttp import web
 
 from sophos import runtime_config
+from sophos.adapter_router import AdapterRouter
 from sophos.api import create_app
 from sophos.cleanup import run_cleanup_loop
 from sophos.config import settings
@@ -20,8 +21,11 @@ from sophos.db import close_db, init_db
 from sophos.llm.provider_manager import ProviderManager
 from sophos.memory.store import MemoryStore
 from sophos.message_store import MessageStore
+from sophos.messaging import MessageService
+from sophos.onebot_adapter import OneBot11Adapter
 from sophos.onebot_api import OneBotAPI
 from sophos.pipeline import INGEST_STAGES, RESPONSE_STAGES, Pipeline, PipelineContext, _get_registry
+from sophos.platform_store import PlatformStore
 
 logger = logging.getLogger("sophos")
 
@@ -30,17 +34,19 @@ _response = Pipeline(RESPONSE_STAGES)
 
 
 async def handle_event(
-    api: OneBotAPI,
+    adapter: OneBot11Adapter,
     event: dict[str, Any],
+    message_service: MessageService,
     store: MessageStore,
     provider_mgr: ProviderManager,
     session: aiohttp.ClientSession,
     memory_store: MemoryStore | None = None,
 ) -> None:
     """处理一个 OneBot 事件上报。"""
-    ctx = PipelineContext.from_event(event, api, store, provider_mgr, session)
-    if ctx is None:
+    message = await adapter.normalize_event(event)
+    if message is None:
         return
+    ctx = PipelineContext.from_event(message, adapter, message_service, store, provider_mgr, session)
     if memory_store is not None:
         ctx.state["memory_store"] = memory_store
     await _ingest.run(ctx)
@@ -49,6 +55,9 @@ async def handle_event(
 
 async def ws_loop(
     store: MessageStore,
+    platform_store: PlatformStore,
+    router: AdapterRouter,
+    message_service: MessageService,
     provider_mgr: ProviderManager,
     memory_store: MemoryStore | None = None,
 ) -> None:
@@ -60,11 +69,20 @@ async def ws_loop(
     async with aiohttp.ClientSession() as session:
         while True:
             api: OneBotAPI | None = None
+            adapter: OneBot11Adapter | None = None
             try:
                 logger.info("Connecting to %s ...", ws_url)
                 async with session.ws_connect(ws_url, headers=headers) as ws:
                     logger.info("Connected!")
                     api = OneBotAPI(ws)
+                    if settings.bot_id:
+                        adapter = await OneBot11Adapter.create(
+                            api=api,
+                            platform_store=platform_store,
+                            self_external_id=str(settings.bot_id),
+                            display_name=settings.bot_nickname,
+                        )
+                        router.register(adapter)
 
                     async for msg in ws:
                         if msg.type == aiohttp.WSMsgType.TEXT:
@@ -74,11 +92,24 @@ async def ws_loop(
                             # 分流：API 响应 → 填充 Future；事件 → 返回给我们处理
                             event = api.dispatch(data)
                             if event is not None:
+                                if adapter is None:
+                                    self_id = str(event.get("self_id") or settings.bot_id or "")
+                                    if not self_id:
+                                        logger.warning("Ignoring OneBot event without self_id")
+                                        continue
+                                    adapter = await OneBot11Adapter.create(
+                                        api=api,
+                                        platform_store=platform_store,
+                                        self_external_id=self_id,
+                                        display_name=settings.bot_nickname,
+                                    )
+                                    router.register(adapter)
                                 # 事件处理放到独立 Task，不阻塞 WS 读取循环
                                 asyncio.create_task(
                                     handle_event(
-                                        api,
+                                        adapter,
                                         event,
+                                        message_service,
                                         store,
                                         provider_mgr,
                                         session,
@@ -92,6 +123,8 @@ async def ws_loop(
             except (aiohttp.ClientError, ConnectionError, OSError) as e:
                 logger.warning("Connection failed: %s. Retrying in 5s...", e)
             finally:
+                if adapter is not None:
+                    router.unregister(adapter)
                 if api is not None:
                     api.cancel_all("connection closed")
 
@@ -105,6 +138,9 @@ async def start() -> None:
     # 初始化数据库（建表 + 连接池）
     pool = await init_db()
     store = MessageStore(pool)
+    platform_store = PlatformStore(pool)
+    router = AdapterRouter()
+    message_service = MessageService(store, platform_store, router)
     interrupted = await store.fail_interrupted_enrichments()
     if interrupted:
         logger.warning("Marked %d interrupted enrichment message(s) as failed", interrupted)
@@ -136,7 +172,14 @@ async def start() -> None:
     cleanup_task = asyncio.create_task(run_cleanup_loop(pool))
 
     try:
-        await ws_loop(store, provider_mgr, memory_store=memory_store)
+        await ws_loop(
+            store,
+            platform_store,
+            router,
+            message_service,
+            provider_mgr,
+            memory_store=memory_store,
+        )
     finally:
         cleanup_task.cancel()
         await runner.cleanup()

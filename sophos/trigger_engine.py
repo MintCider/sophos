@@ -312,8 +312,7 @@ class TriggerEngine:
 
         limit = int(runtime_config.get("trigger_eval_context_limit", 20))
         rows = await ctx.store.get_context(
-            group_id=ctx.group_id if ctx.message_type == "group" else None,
-            user_id=ctx.user_id if ctx.message_type == "private" else None,
+            conversation_id=ctx.conversation_id,
             limit=limit,
         )
 

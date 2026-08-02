@@ -46,11 +46,14 @@ from sophos.llm.tool_loop import run_tool_loop
 from sophos.memory.association import auto_retrieve, format_association_block
 from sophos.memory.profile import build_profile_block
 from sophos.message_store import MessageStore
+from sophos.messaging import MessageService
+from sophos.onebot_adapter import OneBot11Adapter
 from sophos.onebot_api import OneBotAPI
+from sophos.platform import ConversationKind, MessageEvent, SendMessageRequest
 from sophos.segment import expand_segments, has_expandable_segments
 from sophos.tools.image_gen import IMAGE_GEN_TOOLS
 from sophos.tools.memory import MEMORY_TOOLS
-from sophos.tools.onebot import ALL_TOOLS
+from sophos.tools.messaging import ALL_MESSAGING_TOOLS
 from sophos.tools.registry import ToolRegistry
 from sophos.tools.vision import VISION_TOOLS
 from sophos.tools.web import WEB_TOOLS
@@ -67,16 +70,22 @@ class PipelineContext:
 
     # ── 事件数据 ──
     event: dict[str, Any]
+    message: MessageEvent
     post_type: str
     message_type: str
     self_id: int
+    self_user_id: int
     user_id: int
+    external_user_id: str
+    conversation_id: int
     group_id: int | None
     segments: list[dict[str, Any]]
     text: str
 
     # ── 依赖注入 ──
     api: OneBotAPI
+    adapter: OneBot11Adapter
+    message_service: MessageService
     store: MessageStore
     provider_mgr: ProviderManager
     session: aiohttp.ClientSession
@@ -87,28 +96,43 @@ class PipelineContext:
     @classmethod
     def from_event(
         cls,
-        event: dict[str, Any],
-        api: OneBotAPI,
+        message: MessageEvent,
+        adapter: OneBot11Adapter,
+        message_service: MessageService,
         store: MessageStore,
         provider_mgr: ProviderManager,
         session: aiohttp.ClientSession,
     ) -> "PipelineContext | None":
-        """从 OneBot 事件构建上下文。非消息事件返回 None。"""
-        post_type = event.get("post_type")
-        if post_type not in ("message", "message_sent"):
-            return None
-        segments: list[dict[str, Any]] = event.get("message", [])
+        """从适配器规范化消息构建内部上下文。"""
+        event = dict(message.raw_payload)
+        event["_sophos_conversation_id"] = message.conversation.conversation_id
+        event["_sophos_message_service"] = message_service
+        post_type = str(event.get("post_type", "message"))
+        segments = message.segments
         text = "".join(seg["data"]["text"] for seg in segments if seg.get("type") == "text").strip()
+        external_self_id = message.self_identity.external_user_id
+        external_sender_id = message.sender.external_user_id
+        external_conversation_id = message.conversation.external_conversation_id
         return cls(
             event=event,
+            message=message,
             post_type=post_type,
-            message_type=event.get("message_type", "private"),
-            self_id=event.get("self_id", 0),
-            user_id=event.get("user_id", 0),
-            group_id=event.get("group_id"),
+            message_type="private" if message.conversation.kind == ConversationKind.DIRECT else "group",
+            self_id=int(external_self_id) if external_self_id.isdecimal() else 0,
+            self_user_id=message.self_identity.user_id,
+            user_id=message.sender.user_id,
+            external_user_id=external_sender_id,
+            conversation_id=message.conversation.conversation_id,
+            group_id=(
+                int(external_conversation_id) if external_conversation_id.isdecimal() else None
+            )
+            if message.conversation.kind == ConversationKind.GROUP
+            else None,
             segments=segments,
             text=text,
-            api=api,
+            api=adapter.api,
+            adapter=adapter,
+            message_service=message_service,
             store=store,
             provider_mgr=provider_mgr,
             session=session,
@@ -198,8 +222,7 @@ async def _process_event_images(
     context_messages: list[dict[str, Any]] | None = None
     if settings.vision_context_messages > 0:
         rows = await ctx.store.get_context(
-            group_id=ctx.group_id,
-            user_id=ctx.user_id if ctx.message_type == "private" else None,
+            conversation_id=ctx.conversation_id,
             limit=settings.vision_context_messages,
         )
         if rows:
@@ -207,7 +230,7 @@ async def _process_event_images(
                 {"role": "user", "content": r.get("plain_text", "")} for r in rows if r.get("plain_text")
             ]
 
-    message_id = ctx.event.get("message_id")
+    message_id = ctx.state.get("message_row_id")
 
     async def _mark_streaming() -> None:
         if message_id is not None:
@@ -325,7 +348,7 @@ def _get_registry() -> ToolRegistry:
     global _tool_registry
     if _tool_registry is None:
         _tool_registry = ToolRegistry()
-        for tool in ALL_TOOLS + MEMORY_TOOLS + VISION_TOOLS + WEB_TOOLS + IMAGE_GEN_TOOLS:
+        for tool in ALL_MESSAGING_TOOLS + MEMORY_TOOLS + VISION_TOOLS + WEB_TOOLS + IMAGE_GEN_TOOLS:
             _tool_registry.register(tool)
     return _tool_registry
 
@@ -363,7 +386,7 @@ async def _load_description_overrides() -> dict[str, str]:
 
 
 _RAW_TOOL_CALL_RE = re.compile(
-    r"^(send_msg|set_profile_self|set_profile_context|set_profile_user|write_memory|"
+    r"^(send_message|set_profile_self|set_profile_context|set_profile_user|write_memory|"
     r"search_memory|delete_memory|correct_image_description|"
     r"query_messages|set_group_name|web_search|web_fetch|view_image|"
     r"generate_image|check_image_queue)\s*[\(\{]",
@@ -384,13 +407,13 @@ def _sanitize_fallback_reply(text: str) -> str | None:
     m = _RAW_TOOL_CALL_RE.match(stripped)
     if m:
         tool_name = m.group(1)
-        if tool_name == "send_msg":
+        if tool_name == "send_message":
             json_m = re.search(r"\{.*\}", stripped, re.DOTALL)
             if json_m:
                 try:
                     data = json.loads(json_m.group())
                     if isinstance(data, dict) and isinstance(data.get("text"), str):
-                        logger.debug("Extracted reply text from raw send_msg call")
+                        logger.debug("Extracted reply text from raw send_message call")
                         return data["text"]
                 except (json.JSONDecodeError, TypeError):
                     pass
@@ -452,8 +475,7 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
 
         # 获取最近消息用于档案和联想
         recent_rows = await ctx.store.get_context(
-            group_id=ctx.group_id,
-            user_id=ctx.user_id if ctx.message_type == "private" else None,
+            conversation_id=ctx.conversation_id,
         )
         context_user_ids = list({r["user_id"] for r in recent_rows if r.get("user_id")})
         context_text = "\n".join(r.get("plain_text", "") for r in recent_rows if r.get("plain_text"))
@@ -489,8 +511,7 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
     # ── 最近动态注入 ──
     try:
         recent_global = await ctx.store.get_recent_global(
-            exclude_group_id=ctx.group_id if ctx.message_type == "group" else None,
-            exclude_private_user_id=ctx.user_id if ctx.message_type == "private" else None,
+            exclude_conversation_id=ctx.conversation_id,
             limit=runtime_config.get("recent_global_limit"),
             min_self_messages=runtime_config.get("recent_global_min_self"),
         )
@@ -503,7 +524,7 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
     system_prompt += meta
 
     # 等待图片处理完成（如有），确保 LLM 能拿到图片描述
-    msg_id = ctx.event.get("message_id")
+    msg_id = ctx.state.get("message_row_id")
     if msg_id is not None:
         try:
             await get_enrichment_registry().wait_for([msg_id])
@@ -512,8 +533,7 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
 
     messages, _cursor_id = await build_chat_context_snapshot(
         ctx.store,
-        group_id=ctx.group_id,
-        user_id=ctx.user_id if ctx.message_type == "private" else None,
+        conversation_id=ctx.conversation_id,
         system_prompt=system_prompt,
     )
 
@@ -533,8 +553,7 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
     async def _refresh_context() -> str | None:
         nonlocal _cursor_id
         all_new_rows = await ctx.store.get_messages_after(
-            group_id=ctx.group_id,
-            user_id=ctx.user_id if ctx.message_type == "private" else None,
+            conversation_id=ctx.conversation_id,
             after_id=_cursor_id,
         )
         if not all_new_rows:
@@ -546,8 +565,7 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
         msg_ids = [r["message_id"] for r in all_new_rows if r.get("message_id")]
         await registry.wait_for(msg_ids)
         new_rows = await ctx.store.get_ready_messages_after(
-            group_id=ctx.group_id,
-            user_id=ctx.user_id if ctx.message_type == "private" else None,
+            conversation_id=ctx.conversation_id,
             after_id=_cursor_id,
             include_co_account=runtime_config.get("include_co_account_in_context"),
         )
@@ -562,11 +580,17 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
             if not new_rows:
                 return None
 
-        return format_new_messages(new_rows, self_user_id=ctx.self_id)
+        return format_new_messages(new_rows, self_user_id=ctx.self_user_id)
 
     tool_context: dict[str, Any] = {
         "api": ctx.api,
         "store": ctx.store,
+        "message_service": ctx.message_service,
+        "platform_store": ctx.message_service.platform_store,
+        "conversation_id": ctx.conversation_id,
+        "account_id": ctx.message.account_id,
+        "adapter_capabilities": {capability.value for capability in ctx.adapter.capabilities},
+        "timezone": settings.timezone,
         "self_id": ctx.self_id,
         "message_type": ctx.message_type,
         "group_id": ctx.group_id,
@@ -583,6 +607,7 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
     tool_schemas = registry.get_function_schemas(
         scope=ctx.message_type,
         description_overrides=await _load_description_overrides(),
+        capabilities=tool_context["adapter_capabilities"],
     )
 
     # 工具白名单过滤
@@ -617,7 +642,7 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
             tool_context,
             allowed_tools=allowed_tool_names,
         )
-        if name == "send_msg":
+        if name == "send_message":
             sent_via_tool = True
         return result
 
@@ -634,40 +659,23 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
         logger.exception("LLM tool loop failed")
         return
 
-    # 兜底：LLM 没调 send_msg 时提取 content 直接发送
+    # 兜底：LLM 没调 send_message 时提取 content 直接发送
     if not sent_via_tool:
         final_msg = result_messages[-1] if result_messages else None
         reply_text = (final_msg.get("content") or "") if final_msg else ""
         if not reply_text:
-            logger.warning("LLM returned empty response and didn't call send_msg")
+            logger.warning("LLM returned empty response and didn't call send_message")
             return
 
         reply_text = _sanitize_fallback_reply(reply_text)
         if not reply_text:
             return
 
-        logger.info("LLM didn't call send_msg, using fallback")
-        send_params: dict[str, Any] = {
-            "message_type": ctx.message_type,
-            "message": [{"type": "text", "data": {"text": reply_text}}],
-        }
-        if ctx.message_type == "group":
-            send_params["group_id"] = ctx.group_id
-        else:
-            send_params["user_id"] = ctx.user_id
-
-        result = await ctx.api.call("send_msg", send_params)
-        sent_message_id = result.get("message_id")
-        logger.debug("Fallback reply sent (message_id=%s)", sent_message_id)
-
-        if sent_message_id is not None:
-            await ctx.store.save_self_message(
-                message_id=sent_message_id,
-                message_type=ctx.message_type,
-                group_id=ctx.group_id if ctx.message_type == "group" else None,
-                user_id=ctx.self_id or 0,
-                raw_message=[{"type": "text", "data": {"text": reply_text}}],
-            )
+        logger.info("LLM didn't call send_message, using fallback")
+        sent = await ctx.message_service.send_message(
+            SendMessageRequest(conversation_id=ctx.conversation_id, text=reply_text)
+        )
+        logger.debug("Fallback reply sent (message_id=%s)", sent.message_id)
 
 
 # ── Stage 实现 ───────────────────────────────────────────────
@@ -685,7 +693,7 @@ class StoreMessageStage(Stage):
         return "将消息事件存入数据库"
 
     async def execute(self, ctx: PipelineContext, next_stage: NextFn) -> None:
-        ctx.state["message_row_id"] = await ctx.store.save_event_message(ctx.event, self_id=ctx.self_id)
+        ctx.state["message_row_id"] = await ctx.store.save_event_message(ctx.message)
         await next_stage()
 
 
@@ -701,7 +709,7 @@ class ProcessImagesStage(Stage):
         return "异步处理消息中的图片（VLM 识别）"
 
     async def execute(self, ctx: PipelineContext, next_stage: NextFn) -> None:
-        msg_id = ctx.event.get("message_id")
+        msg_id = ctx.state.get("message_row_id")
         has_images = any(seg.get("type") == "image" for seg in ctx.segments)
         if has_images:
             task = asyncio.create_task(_process_event_images(ctx))
@@ -728,7 +736,7 @@ class EnrichMessageStage(Stage):
         if not has_expandable_segments(ctx.segments):
             await next_stage()
             return
-        message_id = ctx.event.get("message_id")
+        message_id = ctx.state.get("message_row_id")
 
         async def _mark_streaming() -> None:
             if message_id is not None:
@@ -743,6 +751,8 @@ class EnrichMessageStage(Stage):
                 pool=ctx.store.pool,
                 vision_provider=ctx.provider_mgr.get_vision_provider(),
                 group_id=ctx.group_id,
+                adapter_binding_id=ctx.message.adapter_binding_id,
+                conversation_id=ctx.conversation_id,
                 on_first_token=_mark_streaming,
             )
             if enriched != ctx.text:
@@ -766,7 +776,7 @@ class FilterSelfStage(Stage):
         return "跳过 bot 自身发出的消息"
 
     async def execute(self, ctx: PipelineContext, next_stage: NextFn) -> None:
-        if ctx.user_id == ctx.self_id:
+        if ctx.user_id == ctx.self_user_id:
             return
         await next_stage()
 
@@ -1042,38 +1052,15 @@ class HandleCommandStage(Stage):
             )
 
     async def _send_text(self, ctx: PipelineContext, text: str) -> None:
-        params: dict[str, Any] = {
-            "message_type": ctx.message_type,
-            "message": [{"type": "text", "data": {"text": text}}],
-        }
-        if ctx.message_type == "group":
-            params["group_id"] = ctx.group_id
-        else:
-            params["user_id"] = ctx.user_id
-        await ctx.api.call("send_msg", params)
+        await ctx.message_service.send_message(
+            SendMessageRequest(conversation_id=ctx.conversation_id, text=text)
+        )
 
     async def _handle_ping(self, ctx: PipelineContext) -> None:
-        params: dict[str, Any] = {
-            "message_type": ctx.message_type,
-            "message": [{"type": "text", "data": {"text": "pong"}}],
-        }
-        if ctx.message_type == "group":
-            params["group_id"] = ctx.group_id
-        else:
-            params["user_id"] = ctx.user_id
-
-        result = await ctx.api.call("send_msg", params)
-        sent_message_id = result.get("message_id")
-        logger.debug("Replied pong (message_id=%s) to %s", sent_message_id, ctx.user_id)
-
-        if sent_message_id is not None:
-            await ctx.store.save_self_message(
-                message_id=sent_message_id,
-                message_type=ctx.message_type,
-                group_id=ctx.group_id if ctx.message_type == "group" else None,
-                user_id=ctx.self_id or 0,
-                raw_message=[{"type": "text", "data": {"text": "pong"}}],
-            )
+        sent = await ctx.message_service.send_message(
+            SendMessageRequest(conversation_id=ctx.conversation_id, text="pong")
+        )
+        logger.debug("Replied pong (message_id=%s) to user %s", sent.message_id, ctx.user_id)
 
 
 class TriggerLLMStage(Stage):

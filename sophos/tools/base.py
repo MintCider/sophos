@@ -37,6 +37,11 @@ class Tool(ABC):
         return "other"
 
     @property
+    def required_capabilities(self) -> frozenset[str]:
+        """Adapter capabilities required to expose and execute this tool."""
+        return frozenset()
+
+    @property
     def is_builtin(self) -> bool:
         """是否为内置工具（不可删除）。"""
         return True
