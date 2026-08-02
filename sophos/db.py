@@ -374,7 +374,7 @@ CREATE TABLE IF NOT EXISTS custom_tools (
     display_name    TEXT            NOT NULL,
     description     TEXT            NOT NULL,
     category        TEXT            NOT NULL DEFAULT 'input',
-    scope           TEXT            NOT NULL DEFAULT 'all',
+    conversation_kinds JSONB        NOT NULL DEFAULT '[]'::jsonb,
     tool_type       TEXT            NOT NULL DEFAULT 'image_generation',
     provider_alias  TEXT,
     model_name      TEXT,

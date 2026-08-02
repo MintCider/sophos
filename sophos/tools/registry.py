@@ -81,6 +81,11 @@ class ToolRegistry:
         if not tool.required_capabilities.issubset(capabilities):
             missing = sorted(tool.required_capabilities - capabilities)
             raise PermissionError(f"Adapter capability unavailable for {name}: {', '.join(missing)}")
+        conversation_kind = context.get("conversation_kind")
+        if tool.conversation_kinds is not None and conversation_kind not in tool.conversation_kinds:
+            raise PermissionError(
+                f"Tool {name} is unavailable in conversation kind: {conversation_kind or 'unknown'}"
+            )
 
         # 轻量参数校验：检查 required 字段是否齐全
         schema = tool.parameters
@@ -95,7 +100,7 @@ class ToolRegistry:
         self,
         *,
         category: str | None = None,
-        scope: str | None = None,
+        conversation_kind: str | None = None,
         description_overrides: dict[str, str] | None = None,
         capabilities: set[str] | None = None,
     ) -> list[dict[str, Any]]:
@@ -103,15 +108,18 @@ class ToolRegistry:
 
         Args:
             category: 按类别过滤，"input" 或 "output"。None 表示全部。
-            scope: 按适用场景过滤，"group" 或 "private"。
-                   None 表示全部；指定后会包含该 scope 和 "all" 的工具。
+            conversation_kind: 按通用会话类型过滤（direct/group/channel/thread）。
             description_overrides: 工具描述覆盖 {tool_name: custom_description}。
         """
         tools: list[Tool] = [t for t in self._tools.values() if t.name not in self._disabled_tools]
         if category is not None:
             tools = [t for t in tools if t.category == category]
-        if scope is not None:
-            tools = [t for t in tools if t.scope in (scope, "all")]
+        if conversation_kind is not None:
+            tools = [
+                tool
+                for tool in tools
+                if tool.conversation_kinds is None or conversation_kind in tool.conversation_kinds
+            ]
         if capabilities is not None:
             tools = [t for t in tools if t.required_capabilities.issubset(capabilities)]
 
@@ -137,7 +145,7 @@ class ToolRegistry:
 
         Returns:
             工具信息列表，每个元素包含：
-            name, description, default_description, category, scope, group,
+            name, description, default_description, category, conversation_kinds, group,
             is_builtin, is_custom, enabled, parameters
         """
         result = []
@@ -153,7 +161,9 @@ class ToolRegistry:
                     "default_description": default_desc,
                     "has_custom_description": custom_desc is not None,
                     "category": tool.category,
-                    "scope": tool.scope,
+                    "conversation_kinds": (
+                        sorted(tool.conversation_kinds) if tool.conversation_kinds is not None else None
+                    ),
                     "group": tool.group,
                     "is_builtin": tool.is_builtin,
                     "is_custom": not tool.is_builtin,

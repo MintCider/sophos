@@ -15,7 +15,7 @@ class Tool(ABC):
 
     可选覆盖：
     - category:    工具类别，"input"（查询）或 "output"（操作），默认 "input"
-    - scope:       适用场景，"all" / "group" / "private"，默认 "all"
+    - conversation_kinds: 适用的通用会话类型；None 表示全部
     - group:       工具分组，用于 WebUI 展示分类，默认根据 category 推导
     """
 
@@ -24,8 +24,8 @@ class Tool(ABC):
         return "input"
 
     @property
-    def scope(self) -> str:
-        return "all"
+    def conversation_kinds(self) -> frozenset[str] | None:
+        return None
 
     @property
     def group(self) -> str:
@@ -67,7 +67,7 @@ class Tool(ABC):
             {
                 "type": "object",
                 "properties": {
-                    "group_id": {"type": "integer", "description": "群号"},
+                    "conversation_id": {"type": "integer", "description": "Sophos 内部会话 ID"},
                     "message":  {"type": "string",  "description": "消息内容"},
                 },
                 "required": ["message"],
@@ -81,7 +81,7 @@ class Tool(ABC):
 
         Args:
             params:  调用参数（已通过 JSON Schema 校验）
-            context: 运行时上下文（WS 连接、bot 信息等，由调用方注入）
+            context: 平台中立的运行时上下文，由调用方注入
 
         Returns:
             工具执行结果，会被序列化后返回给 LLM 或调用方。

@@ -26,6 +26,12 @@ class _RecordingTool(Tool):
         return {"ok": True}
 
 
+class _DirectOnlyTool(_RecordingTool):
+    @property
+    def conversation_kinds(self) -> frozenset[str] | None:
+        return frozenset({"direct"})
+
+
 class ToolRegistryExecutionFilterTests(unittest.IsolatedAsyncioTestCase):
     async def test_disabled_tool_is_rejected_at_execution(self) -> None:
         registry = ToolRegistry()
@@ -54,6 +60,16 @@ class ToolRegistryExecutionFilterTests(unittest.IsolatedAsyncioTestCase):
         result = await registry.execute(tool.name, {}, {}, allowed_tools={tool.name})
         self.assertEqual(result, {"ok": True})
         self.assertEqual(tool.calls, 1)
+
+    async def test_conversation_kind_is_filtered_in_schema_and_execution(self) -> None:
+        registry = ToolRegistry()
+        tool = _DirectOnlyTool()
+        registry.register(tool)
+
+        self.assertEqual(registry.get_function_schemas(conversation_kind="group"), [])
+        self.assertEqual(len(registry.get_function_schemas(conversation_kind="direct")), 1)
+        with self.assertRaisesRegex(PermissionError, "conversation kind"):
+            await registry.execute(tool.name, {}, {"conversation_kind": "channel"})
 
 
 if __name__ == "__main__":

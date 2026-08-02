@@ -17,6 +17,7 @@ from sophos.platform import (
     MessageEvent,
 )
 from sophos.platform_store import PlatformStore
+from sophos.segment import expand_segments
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,9 @@ class OneBot11Adapter:
     capabilities = frozenset(
         {
             Capability.MESSAGE_SEND,
+            Capability.MESSAGE_REPLY,
+            Capability.MESSAGE_MENTION,
+            Capability.MESSAGE_IMAGE,
             Capability.MESSAGE_RECALL,
             Capability.MEMBER_LIST,
             Capability.MEMBER_MODERATE,
@@ -125,7 +129,8 @@ class OneBot11Adapter:
             external_conversation_id=external_conversation_id,
             display_name=conversation_name,
         )
-        segments = event.get("message") if isinstance(event.get("message"), list) else []
+        raw_segments = event.get("message") if isinstance(event.get("message"), list) else []
+        segments = await self._normalize_segments(raw_segments)
         plain_text = "".join(
             segment.get("data", {}).get("text", "")
             for segment in segments
@@ -145,8 +150,130 @@ class OneBot11Adapter:
             occurred_at=occurred_at,
             source="co_account" if sender.identity_id == self.self_identity.identity_id else "user",
             raw_payload=event,
-            metadata={"onebot_post_type": event.get("post_type", "message")},
+            metadata={
+                "onebot_post_type": event.get("post_type", "message"),
+                "mentioned_self": any(
+                    segment.get("type") == "mention"
+                    and segment.get("data", {}).get("user_id") == self.self_identity.user_id
+                    for segment in segments
+                ),
+                "leading_self_mention": bool(
+                    segments
+                    and segments[0].get("type") == "mention"
+                    and segments[0].get("data", {}).get("user_id") == self.self_identity.user_id
+                ),
+                "requires_content_enrichment": any(
+                    segment.get("type") not in {"text", "image"} for segment in segments
+                ),
+            },
         )
+
+    async def enrich_message_content(
+        self,
+        message: MessageEvent,
+        *,
+        store: Any,
+        http_session: Any,
+        vision_provider: Any,
+        on_first_token: Any = None,
+    ) -> str:
+        """Render OneBot-specific rich segments behind the adapter boundary."""
+        raw_segments = message.raw_payload.get("message")
+        if not isinstance(raw_segments, list):
+            return message.plain_text
+        group_id = (
+            self._coerce_id(message.conversation.external_conversation_id)
+            if message.conversation.kind == ConversationKind.GROUP
+            else None
+        )
+        return await expand_segments(
+            raw_segments,
+            api=self.api,
+            store=store,
+            session=http_session,
+            pool=store.pool,
+            vision_provider=vision_provider,
+            group_id=group_id,
+            adapter_binding_id=message.adapter_binding_id,
+            conversation_id=message.conversation.conversation_id,
+            on_first_token=on_first_token,
+        )
+
+    async def _normalize_segments(self, segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        for segment in segments:
+            segment_type = str(segment.get("type") or "")
+            data = segment.get("data") if isinstance(segment.get("data"), dict) else {}
+            if segment_type == "text":
+                normalized.append({"type": "text", "data": {"text": str(data.get("text", ""))}})
+            elif segment_type == "at":
+                external_user_id = str(data.get("qq") or "")
+                if external_user_id == "all":
+                    normalized.append({"type": "mention_all", "data": {}})
+                elif external_user_id:
+                    identity = await self.platform_store.resolve_identity(
+                        platform="qq",
+                        identity_namespace="global",
+                        external_user_id=external_user_id,
+                        display_name=str(data.get("name") or ""),
+                    )
+                    normalized.append(
+                        {
+                            "type": "mention",
+                            "data": {"user_id": identity.user_id, "display_name": identity.display_name},
+                        }
+                    )
+            elif segment_type == "reply":
+                external_message_id = data.get("id")
+                if external_message_id is not None:
+                    normalized.append(
+                        {
+                            "type": "reply",
+                            "data": {"external_message_id": str(external_message_id)},
+                        }
+                    )
+            elif segment_type == "image":
+                normalized.append(
+                    {
+                        "type": "image",
+                        "data": {
+                            key: data[key]
+                            for key in ("url", "file", "file_id", "summary")
+                            if data.get(key) is not None
+                        },
+                    }
+                )
+            elif segment_type == "face":
+                normalized.append(
+                    {"type": "emoji", "data": {"platform": "qq", "external_id": str(data.get("id", ""))}}
+                )
+            elif segment_type == "record":
+                normalized.append({"type": "audio", "data": dict(data)})
+            elif segment_type == "forward":
+                normalized.append(
+                    {"type": "message_bundle", "data": {"external_id": str(data.get("id", ""))}}
+                )
+            elif segment_type in {"json", "xml"}:
+                normalized.append(
+                    {"type": "rich_card", "data": {"format": segment_type, "payload": data.get("data", "")}}
+                )
+            elif segment_type == "share":
+                normalized.append(
+                    {
+                        "type": "link",
+                        "data": {key: data[key] for key in ("title", "url", "content", "image") if data.get(key)},
+                    }
+                )
+            elif segment_type == "video":
+                normalized.append({"type": "video", "data": dict(data)})
+            else:
+                normalized.append(
+                    {
+                        "type": "platform_segment",
+                        "data": {"platform": "qq", "segment_type": segment_type, "payload": dict(data)},
+                    }
+                )
+        return normalized
 
     async def send_message(self, request: AdapterSendRequest) -> AdapterSendResult:
         segments = await self._to_onebot_segments(request.segments)

@@ -39,6 +39,7 @@ class PermissionApiValidationTests(unittest.TestCase):
     def test_expected_routes_are_registered(self) -> None:
         registered = {(route.method, route.path) for route in routes}
         self.assertIn(("GET", "/api/permissions/users"), registered)
+        self.assertIn(("GET", "/api/permissions/conversations"), registered)
         self.assertIn(("GET", "/api/permissions/scopes"), registered)
         self.assertIn(("PUT", "/api/permissions/scopes/{scope_type}/{scope_id}/tools"), registered)
         self.assertIn(("POST", "/api/permissions/grants"), registered)

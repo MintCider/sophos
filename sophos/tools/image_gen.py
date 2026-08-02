@@ -194,16 +194,12 @@ class ImageGenerationTool(Tool):
         return "output"
 
     @property
-    def scope(self) -> str:
-        return "all"
-
-    @property
     def group(self) -> str:
         return "image_generation"
 
     @property
     def required_capabilities(self) -> frozenset[str]:
-        return frozenset({Capability.MESSAGE_SEND.value})
+        return frozenset({Capability.MESSAGE_SEND.value, Capability.MESSAGE_IMAGE.value})
 
     @property
     def is_builtin(self) -> bool:
@@ -409,10 +405,6 @@ class CheckImageQueueTool(Tool):
     @property
     def category(self) -> str:
         return "input"
-
-    @property
-    def scope(self) -> str:
-        return "all"
 
     @property
     def group(self) -> str:

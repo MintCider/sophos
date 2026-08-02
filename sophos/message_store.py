@@ -25,9 +25,7 @@ _MESSAGE_COLUMNS = """
     u.id AS user_id,
     COALESCE(NULLIF(i.display_name, ''), u.display_name, '') AS nickname,
     ''::text AS card,
-    c.kind AS conversation_kind,
-    CASE WHEN c.kind = 'direct' THEN 'private' ELSE c.kind END AS message_type,
-    CASE WHEN c.kind = 'direct' THEN NULL ELSE c.id END AS group_id
+    c.kind AS conversation_kind
 """
 
 

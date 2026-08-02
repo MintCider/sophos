@@ -37,7 +37,7 @@ interface ToolInfo {
   default_description: string
   has_custom_description: boolean
   category: string
-  scope: string
+  conversation_kinds: string[] | null
   group: string
   is_builtin: boolean
   is_custom: boolean
@@ -429,8 +429,8 @@ onMounted(loadTools)
                   <code>{{ tool.category }}</code>
                 </div>
                 <div class="detail-item">
-                  <span class="section-label">作用域</span>
-                  <code>{{ tool.scope }}</code>
+                  <span class="section-label">会话类型</span>
+                  <code>{{ tool.conversation_kinds?.join(', ') || 'all' }}</code>
                 </div>
               </div>
             </div>

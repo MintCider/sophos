@@ -41,7 +41,7 @@ async def build_profile_block(
         if uid in seen:
             continue
         seen.add(uid)
-        user_lines.append(f"- QQ {uid}: {m['content']}")
+        user_lines.append(f"- user_id={uid}: {m['content']}")
 
     if user_lines:
         parts.append("用户:\n" + "\n".join(user_lines))

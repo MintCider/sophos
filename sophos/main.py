@@ -25,6 +25,7 @@ from sophos.messaging import MessageService
 from sophos.onebot_adapter import OneBot11Adapter
 from sophos.onebot_api import OneBotAPI
 from sophos.pipeline import INGEST_STAGES, RESPONSE_STAGES, Pipeline, PipelineContext, _get_registry
+from sophos.platform import PlatformAdapter
 from sophos.platform_store import PlatformStore
 
 logger = logging.getLogger("sophos")
@@ -34,7 +35,7 @@ _response = Pipeline(RESPONSE_STAGES)
 
 
 async def handle_event(
-    adapter: OneBot11Adapter,
+    adapter: PlatformAdapter,
     event: dict[str, Any],
     message_service: MessageService,
     store: MessageStore,
@@ -42,7 +43,7 @@ async def handle_event(
     session: aiohttp.ClientSession,
     memory_store: MemoryStore | None = None,
 ) -> None:
-    """处理一个 OneBot 事件上报。"""
+    """Normalize and process one platform event through the core pipeline."""
     message = await adapter.normalize_event(event)
     if message is None:
         return

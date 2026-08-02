@@ -59,10 +59,18 @@ interface UserItem {
   identities: Array<{ platform: string; display_name: string }>
 }
 
+interface ConversationItem {
+  conversation_id: number
+  kind: string
+  display_name: string
+  platform: string
+  account_display_name: string
+}
+
 // ── 常量 ──
 
 const ALL_PERMS = [
-  'bot', 'bot.group', 'bot.private',
+  'bot', 'bot.shared', 'bot.direct',
   'cmd.tools', 'cmd.config', 'cmd.llm',
   'cmd.trigger', 'cmd.memory', 'cmd.prompt',
   'delegate',
@@ -83,6 +91,7 @@ const scopes = ref<ScopeItem[]>([])
 const grants = ref<GrantItem[]>([])
 const policies = ref<PolicyItem[]>([])
 const users = ref<UserItem[]>([])
+const conversations = ref<ConversationItem[]>([])
 const availableTools = ref<string[]>([])
 
 const expandedScope = ref('')
@@ -140,6 +149,18 @@ const userOptions = computed(() => users.value.map(user => ({
   value: user.user_id,
   label: `${user.display_name || '未命名用户'} (#${user.user_id})${user.roles.includes('master') ? ' [Master]' : ''}`,
 })))
+
+const conversationOptions = computed(() => conversations.value.map(conversation => ({
+  value: String(conversation.conversation_id),
+  label: `${conversation.display_name || conversation.kind} (#${conversation.conversation_id}, ${conversation.platform})`,
+})))
+
+function conversationLabel(conversationId: number) {
+  const conversation = conversations.value.find(item => item.conversation_id === conversationId)
+  return conversation
+    ? `${conversation.display_name || conversation.kind} (#${conversationId})`
+    : `#${conversationId}`
+}
 
 function userLabel(userId: number) {
   const user = users.value.find(item => item.user_id === userId)
@@ -208,6 +229,15 @@ async function loadUsers() {
     users.value = data.users
   } catch (e: any) {
     message.error(errorText(e, '加载统一用户失败'))
+  }
+}
+
+async function loadConversations() {
+  try {
+    const { data } = await api.get('/permissions/conversations')
+    conversations.value = data.conversations
+  } catch (e: any) {
+    message.error(errorText(e, '加载内部会话失败'))
   }
 }
 
@@ -438,6 +468,7 @@ onMounted(() => {
   loadPolicies()
   loadAvailableTools()
   loadUsers()
+  loadConversations()
 })
 </script>
 
@@ -472,7 +503,7 @@ onMounted(() => {
                 <NTag :type="scopeTagType(scope.scope_type)" size="small" round :bordered="false">
                   {{ scopeLabel(scope.scope_type) }}
                 </NTag>
-                <span class="scope-id">{{ scope.scope_id }}</span>
+                <span class="scope-id">{{ conversationLabel(scope.scope_id) }}</span>
               </div>
               <div class="perm-card__actions">
                 <NSwitch
@@ -679,7 +710,12 @@ onMounted(() => {
           </label>
           <label class="field-label">
             <span>内部会话 ID</span>
-            <NInput v-model:value="scopeForm.scope_id" placeholder="conversation_id" />
+            <NSelect
+              v-model:value="scopeForm.scope_id"
+              :options="conversationOptions"
+              filterable
+              placeholder="选择内部会话"
+            />
           </label>
           <label class="field-label">
             <span>启用</span>
@@ -709,7 +745,12 @@ onMounted(() => {
           </label>
           <label v-if="grantForm.scope_type !== 'global'" class="field-label">
             <span>内部会话 ID</span>
-            <NInput v-model:value="grantForm.scope_id" placeholder="conversation_id" />
+            <NSelect
+              v-model:value="grantForm.scope_id"
+              :options="conversationOptions"
+              filterable
+              placeholder="选择内部会话"
+            />
           </label>
           <label class="field-label">
             <span>权限</span>
@@ -739,7 +780,12 @@ onMounted(() => {
           </label>
           <label v-if="policyForm.scope_type !== 'global'" class="field-label">
             <span>内部会话 ID</span>
-            <NInput v-model:value="policyForm.scope_id" placeholder="conversation_id" />
+            <NSelect
+              v-model:value="policyForm.scope_id"
+              :options="conversationOptions"
+              filterable
+              placeholder="选择内部会话"
+            />
           </label>
           <label class="field-label">
             <span>抑制 LLM 触发</span>

@@ -4,15 +4,26 @@
 """
 
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 import asyncpg
 
 from sophos import permission, runtime_config, trigger
 from sophos.llm.provider_manager import ProviderManager
-from sophos.onebot_api import OneBotAPI
+from sophos.messaging import MessageService
+from sophos.platform import Capability, ConversationKind, SendMessageRequest
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class CommandContext:
+    """Platform-neutral dependencies shared by dot-command handlers."""
+
+    message_service: MessageService
+    conversation_id: int
+    conversation_kind: ConversationKind
 
 
 def _extract_type_flag(args: list[str]) -> str:
@@ -26,8 +37,7 @@ def _extract_type_flag(args: list[str]) -> str:
 async def handle_llm_command(
     text: str,
     *,
-    api: OneBotAPI,
-    event: dict[str, Any],
+    context: CommandContext,
     provider_mgr: ProviderManager,
 ) -> bool:
     """处理 .llm 命令。返回 True 表示已处理。"""
@@ -255,15 +265,14 @@ async def handle_llm_command(
             "  .llm trigger  — trigger 模型管理"
         )
 
-    await _reply(api, event, reply)
+    await _reply(context, reply)
     return True
 
 
 async def handle_trigger_command(
     text: str,
     *,
-    api: OneBotAPI,
-    event: dict[str, Any],
+    context: CommandContext,
     pool: asyncpg.Pool,
     provider_mgr: ProviderManager,
 ) -> bool:
@@ -473,7 +482,7 @@ async def handle_trigger_command(
             "  .trigger policy              — 用户策略管理"
         )
 
-    await _reply(api, event, reply)
+    await _reply(context, reply)
     return True
 
 
@@ -500,8 +509,7 @@ def _parse_policy_value(field: str, raw: str) -> bool | float | str | None:
 async def handle_memory_command(
     text: str,
     *,
-    api: OneBotAPI,
-    event: dict[str, Any],
+    context: CommandContext,
     provider_mgr: ProviderManager,
     pool: asyncpg.Pool,
 ) -> bool:
@@ -608,15 +616,14 @@ async def handle_memory_command(
             "  .memory migrate rollback             — 回滚迁移"
         )
 
-    await _reply(api, event, reply)
+    await _reply(context, reply)
     return True
 
 
 async def handle_config_command(
     text: str,
     *,
-    api: OneBotAPI,
-    event: dict[str, Any],
+    context: CommandContext,
 ) -> bool:
     """处理 .config 命令。返回 True 表示已处理。"""
     parts = text.split(maxsplit=2)
@@ -671,7 +678,7 @@ async def handle_config_command(
             "  .config reset <key>  — 恢复默认值"
         )
 
-    await _reply(api, event, reply)
+    await _reply(context, reply)
     return True
 
 
@@ -763,8 +770,7 @@ def _validate(key: str, value: Any) -> None:
 async def handle_prompt_command(
     text: str,
     *,
-    api: OneBotAPI,
-    event: dict[str, Any],
+    context: CommandContext,
 ) -> bool:
     """处理 .prompt 命令。返回 True 表示已处理。"""
     from sophos.pipeline import _load_system_prompt, clear_system_prompt_cache
@@ -792,7 +798,7 @@ async def handle_prompt_command(
             "  .prompt reload   — 重新加载文件"
         )
 
-    await _reply(api, event, reply)
+    await _reply(context, reply)
     return True
 
 
@@ -801,8 +807,8 @@ async def handle_prompt_command(
 _ALL_PERMS: frozenset[str] = frozenset(
     {
         "bot",
-        "bot.group",
-        "bot.private",
+        "bot.shared",
+        "bot.direct",
         "cmd.tools",
         "cmd.config",
         "cmd.llm",
@@ -815,8 +821,8 @@ _ALL_PERMS: frozenset[str] = frozenset(
 
 _PERM_ALIASES: dict[str, str] = {
     "bot": "bot",
-    "bot.group": "bot.group",
-    "bot.private": "bot.private",
+    "bot.shared": "bot.shared",
+    "bot.direct": "bot.direct",
     "tools": "cmd.tools",
     "config": "cmd.config",
     "llm": "cmd.llm",
@@ -830,22 +836,15 @@ _PERM_ALIASES: dict[str, str] = {
 async def _resolve_targets(
     target: str,
     *,
-    event: dict[str, Any],
+    context: CommandContext,
     pool: asyncpg.Pool,
 ) -> list[int] | str:
     """解析目标用户。返回 user_id 列表或错误消息字符串。"""
     if target in {"admins", "all"}:
-        from sophos.messaging import MessageService
-        from sophos.platform import Capability, ConversationKind
-
-        service = event.get("_sophos_message_service")
-        conversation_id = event.get("_sophos_conversation_id")
-        if not isinstance(service, MessageService) or not isinstance(conversation_id, int):
-            return "当前消息缺少统一会话上下文"
-        conversation = await service.platform_store.get_conversation(conversation_id)
-        if conversation is None or conversation.kind != ConversationKind.GROUP:
-            return f"{target} 仅限群组会话使用"
-        adapter = service.router.for_account(conversation.account_id, Capability.MEMBER_LIST)
+        conversation = await context.message_service.platform_store.get_conversation(context.conversation_id)
+        if conversation is None or conversation.kind == ConversationKind.DIRECT:
+            return f"{target} 仅限非私聊会话使用"
+        adapter = context.message_service.router.for_account(conversation.account_id, Capability.MEMBER_LIST)
         list_members = getattr(adapter, "list_conversation_members", None)
         if list_members is None:
             return "当前平台不支持成员目录"
@@ -877,8 +876,7 @@ async def _resolve_targets(
 async def handle_help_command(
     text: str,
     *,
-    api: OneBotAPI,
-    event: dict[str, Any],
+    context: CommandContext,
     pool: asyncpg.Pool,
     user_id: int,
     scope_type: str,
@@ -905,7 +903,7 @@ async def handle_help_command(
             lines.append(f"  {cmd:<10}— {desc}")
     if is_m or await permission.has_permission(pool, user_id, scope_type, scope_id, "delegate"):
         lines.append("  .perm    — 权限管理")
-    await _reply(api, event, "\n".join(lines))
+    await _reply(context, "\n".join(lines))
     return True
 
 
@@ -915,8 +913,7 @@ async def handle_help_command(
 async def handle_bot_command(
     text: str,
     *,
-    api: OneBotAPI,
-    event: dict[str, Any],
+    context: CommandContext,
     pool: asyncpg.Pool,
     scope_type: str,
     scope_id: int,
@@ -937,7 +934,7 @@ async def handle_bot_command(
     else:
         reply = "用法: .bot [on|off]"
 
-    await _reply(api, event, reply)
+    await _reply(context, reply)
     return True
 
 
@@ -947,8 +944,7 @@ async def handle_bot_command(
 async def handle_tools_command(
     text: str,
     *,
-    api: OneBotAPI,
-    event: dict[str, Any],
+    context: CommandContext,
     pool: asyncpg.Pool,
     scope_type: str,
     scope_id: int,
@@ -997,7 +993,7 @@ async def handle_tools_command(
             "  .tools list-all           — 列出所有工具"
         )
 
-    await _reply(api, event, reply)
+    await _reply(context, reply)
     return True
 
 
@@ -1016,21 +1012,21 @@ async def _can_delegate_perm(
     """检查用户是否有权分发指定权限。
 
     规则：
-    - bot + delegate → 可分发 bot 和 bot.group
-    - bot.group + delegate → 可分发当前会话的 bot.group
-    - bot.private → 仅 master（调用方已处理）
+    - bot + delegate → 可分发 bot 和 bot.shared
+    - bot.shared + delegate → 可分发当前会话的 bot.shared
+    - bot.direct → 仅 master（调用方已处理）
     - 其他 cmd.* → 拥有该权限即可分发
     """
     # 必须有 delegate 权限
     if not await has_perm_fn(pool, user_id, scope_type, scope_id, "delegate"):
         return False
-    if perm_name in ("bot", "bot.group"):
-        # 有 bot 全局权限 → 可分发 bot 和 bot.group
+    if perm_name in ("bot", "bot.shared"):
+        # 有 bot 全局权限 → 可分发 bot 和 bot.shared
         if await has_perm_fn(pool, user_id, "global", 0, "bot"):
             return True
-        # 有当前会话 bot.group → 只能分发当前会话 bot.group
-        if perm_name == "bot.group" and scope_type == "conversation":
-            return await has_perm_fn(pool, user_id, scope_type, scope_id, "bot.group")
+        # 有当前会话 bot.shared → 只能分发当前会话 bot.shared
+        if perm_name == "bot.shared" and scope_type == "conversation":
+            return await has_perm_fn(pool, user_id, scope_type, scope_id, "bot.shared")
         return False
     # 其他权限：拥有即可分发
     return await has_perm_fn(pool, user_id, scope_type, scope_id, perm_name)
@@ -1039,13 +1035,11 @@ async def _can_delegate_perm(
 async def handle_perm_command(
     text: str,
     *,
-    api: OneBotAPI,
-    event: dict[str, Any],
+    context: CommandContext,
     pool: asyncpg.Pool,
     user_id: int,
     scope_type: str,
     scope_id: int,
-    group_id: int | None,
 ) -> bool:
     """处理 .perm 命令。"""
     parts = text.split()
@@ -1078,8 +1072,8 @@ async def handle_perm_command(
                 reply = f"未知权限: {perm_alias}\n可用: {', '.join(sorted(_PERM_ALIASES))}"
             elif perm_name == "delegate" and not is_m:
                 reply = "仅 master 可授予 delegate 权限"
-            elif perm_name == "bot.private" and not is_m:
-                reply = "仅 master 可授予 bot.private 权限"
+            elif perm_name == "bot.direct" and not is_m:
+                reply = "仅 master 可授予 bot.direct 权限"
             elif not is_m and not await _can_delegate_perm(
                 perm_name,
                 user_id,
@@ -1090,32 +1084,32 @@ async def handle_perm_command(
             ):
                 reply = f"你没有权限授予 {perm_alias}"
             else:
-                targets = await _resolve_targets(parts[3], event=event, pool=pool)
+                targets = await _resolve_targets(parts[3], context=context, pool=pool)
                 if isinstance(targets, str):
                     reply = targets
-                elif perm_name == "bot.private":
+                elif perm_name == "bot.direct":
                     count = await permission.batch_grant(
                         pool,
                         targets,
                         "global",
                         0,
-                        "bot.private",
+                        "bot.direct",
                         user_id,
                     )
                     reply = f"已授予 {count} 人私聊启用权限"
-                elif perm_name == "bot.group":
-                    if group_id is None:
-                        reply = "bot.group 仅限群组会话中使用"
+                elif perm_name == "bot.shared":
+                    if context.conversation_kind == ConversationKind.DIRECT:
+                        reply = "bot.shared 仅限非私聊会话中使用"
                     else:
                         count = await permission.batch_grant(
                             pool,
                             targets,
                             scope_type,
                             scope_id,
-                            "bot.group",
+                            "bot.shared",
                             user_id,
                         )
-                        reply = f"已授予 {count} 人当前会话 bot.group 权限"
+                        reply = f"已授予 {count} 人当前会话 bot.shared 权限"
                 elif perm_name == "bot":
                     # 全局 bot 权限
                     count = await permission.batch_grant(
@@ -1148,8 +1142,8 @@ async def handle_perm_command(
                 reply = f"未知权限: {perm_alias}\n可用: {', '.join(sorted(_PERM_ALIASES))}"
             elif perm_name == "delegate" and not is_m:
                 reply = "仅 master 可撤销 delegate 权限"
-            elif perm_name == "bot.private" and not is_m:
-                reply = "仅 master 可撤销 bot.private 权限"
+            elif perm_name == "bot.direct" and not is_m:
+                reply = "仅 master 可撤销 bot.direct 权限"
             elif not is_m and not await _can_delegate_perm(
                 perm_name,
                 user_id,
@@ -1160,30 +1154,30 @@ async def handle_perm_command(
             ):
                 reply = f"你没有权限撤销 {perm_alias}"
             else:
-                targets = await _resolve_targets(parts[3], event=event, pool=pool)
+                targets = await _resolve_targets(parts[3], context=context, pool=pool)
                 if isinstance(targets, str):
                     reply = targets
-                elif perm_name == "bot.private":
+                elif perm_name == "bot.direct":
                     count = await permission.batch_revoke(
                         pool,
                         targets,
                         "global",
                         0,
-                        "bot.private",
+                        "bot.direct",
                     )
                     reply = f"已撤销 {count} 人的私聊启用权限"
-                elif perm_name == "bot.group":
-                    if group_id is None:
-                        reply = "bot.group 仅限群组会话中使用"
+                elif perm_name == "bot.shared":
+                    if context.conversation_kind == ConversationKind.DIRECT:
+                        reply = "bot.shared 仅限非私聊会话中使用"
                     else:
                         count = await permission.batch_revoke(
                             pool,
                             targets,
                             scope_type,
                             scope_id,
-                            "bot.group",
+                            "bot.shared",
                         )
-                        reply = f"已撤销 {count} 人当前会话 bot.group 权限"
+                        reply = f"已撤销 {count} 人当前会话 bot.shared 权限"
                 elif perm_name == "bot":
                     count = await permission.batch_revoke(
                         pool,
@@ -1235,18 +1229,12 @@ async def handle_perm_command(
             "目标: 内部用户ID | ID1,ID2 | admins | all"
         )
 
-    await _reply(api, event, reply)
+    await _reply(context, reply)
     return True
 
 
-async def _reply(api: OneBotAPI, event: dict[str, Any], text: str) -> None:
+async def _reply(context: CommandContext, text: str) -> None:
     """向来源会话发送回复。"""
-    from sophos.messaging import MessageService
-    from sophos.platform import SendMessageRequest
-
-    del api
-    service = event.get("_sophos_message_service")
-    conversation_id = event.get("_sophos_conversation_id")
-    if not isinstance(service, MessageService) or not isinstance(conversation_id, int):
-        raise RuntimeError("command reply requires the unified message service context")
-    await service.send_message(SendMessageRequest(conversation_id=conversation_id, text=text))
+    await context.message_service.send_message(
+        SendMessageRequest(conversation_id=context.conversation_id, text=text)
+    )

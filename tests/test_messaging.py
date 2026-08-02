@@ -77,7 +77,7 @@ class MessageStoreTests(unittest.IsolatedAsyncioTestCase):
             sender=_identity(31, 41, "100"),
             self_identity=_identity(32, 42, "200"),
             external_message_id="124",
-            segments=[{"type": "reply", "data": {"id": "123"}}],
+            segments=[{"type": "reply", "data": {"external_message_id": "123"}}],
             plain_text="",
             occurred_at=datetime.now(tz=UTC),
             source="user",
@@ -103,7 +103,9 @@ class MessageStoreTests(unittest.IsolatedAsyncioTestCase):
 
 
 class _FakeAdapter:
-    capabilities = frozenset({Capability.MESSAGE_SEND, Capability.MESSAGE_RECALL})
+    capabilities = frozenset(
+        {Capability.MESSAGE_SEND, Capability.MESSAGE_REPLY, Capability.MESSAGE_RECALL}
+    )
 
     def __init__(self, marker: str = "a") -> None:
         self.binding_id = 11
@@ -201,6 +203,50 @@ class MessagingToolTests(unittest.IsolatedAsyncioTestCase):
 
 
 class OneBotAdapterTests(unittest.IsolatedAsyncioTestCase):
+    async def test_normalizes_onebot_segments_to_internal_content_model(self) -> None:
+        platform_store = AsyncMock()
+        self_identity = _identity(32, 42, "200")
+        sender = _identity(31, 41, "100")
+        platform_store.resolve_identity.side_effect = [sender, self_identity]
+        platform_store.resolve_conversation.return_value = _conversation()
+        adapter = OneBot11Adapter(
+            api=AsyncMock(),
+            platform_store=platform_store,
+            binding_id=11,
+            account_id=10,
+            self_identity=self_identity,
+        )
+
+        message = await adapter.normalize_event(
+            {
+                "post_type": "message",
+                "message_type": "group",
+                "message_id": 9,
+                "group_id": 300,
+                "user_id": 100,
+                "sender": {"nickname": "sender"},
+                "message": [
+                    {"type": "at", "data": {"qq": "200"}},
+                    {"type": "text", "data": {"text": " hello"}},
+                    {"type": "reply", "data": {"id": "8"}},
+                    {"type": "face", "data": {"id": "14"}},
+                ],
+            }
+        )
+
+        assert message is not None
+        self.assertEqual(
+            message.segments,
+            [
+                {"type": "mention", "data": {"user_id": 42, "display_name": "user-42"}},
+                {"type": "text", "data": {"text": " hello"}},
+                {"type": "reply", "data": {"external_message_id": "8"}},
+                {"type": "emoji", "data": {"platform": "qq", "external_id": "14"}},
+            ],
+        )
+        self.assertTrue(message.metadata["mentioned_self"])
+        self.assertTrue(message.metadata["leading_self_mention"])
+
     async def test_private_conversation_uses_peer_not_sender_field_for_self_echo(self) -> None:
         platform_store = AsyncMock()
         self_identity = _identity(32, 42, "200")

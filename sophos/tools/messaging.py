@@ -34,11 +34,6 @@ class SendMessageTool(Tool):
                 "items": {"type": "integer"},
                 "description": "要提及的内部用户 ID",
             },
-            "attachment_ids": {
-                "type": "array",
-                "items": {"type": "integer"},
-                "description": "要发送的内部附件 ID",
-            },
             "background": {"type": "string", "description": "跨会话发送时必填的背景摘要"},
         },
         "required": ["text"],
@@ -64,7 +59,6 @@ class SendMessageTool(Tool):
                 text=text,
                 reply_to_message_id=params.get("reply_to_message_id"),
                 mention_user_ids=tuple(params.get("mention_user_ids") or ()),
-                attachment_ids=tuple(params.get("attachment_ids") or ()),
                 metadata=metadata,
             )
         )

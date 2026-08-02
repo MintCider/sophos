@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
@@ -17,6 +18,10 @@ class ConversationKind(StrEnum):
 
 class Capability(StrEnum):
     MESSAGE_SEND = "message.send"
+    MESSAGE_REPLY = "message.reply"
+    MESSAGE_MENTION = "message.mention"
+    MESSAGE_IMAGE = "message.image"
+    MESSAGE_ATTACHMENT = "message.attachment"
     MESSAGE_RECALL = "message.recall"
     MEMBER_LIST = "member.list"
     MEMBER_MODERATE = "member.moderate"
@@ -102,9 +107,29 @@ class MessagingAdapter(Protocol):
     async def recall_message(self, conversation: ConversationRef, external_message_id: str) -> None: ...
 
 
+@runtime_checkable
+class PlatformAdapter(MessagingAdapter, Protocol):
+    """Full inbound/outbound adapter boundary consumed by the core pipeline."""
+
+    async def normalize_event(self, event: dict[str, Any]) -> MessageEvent | None: ...
+
+    async def enrich_message_content(
+        self,
+        message: MessageEvent,
+        *,
+        store: Any,
+        http_session: Any,
+        vision_provider: Any,
+        on_first_token: Callable[[], Awaitable[None]] | None = None,
+    ) -> str: ...
+
+
 class AdapterUnavailableError(RuntimeError):
     """No live adapter can serve the requested account/capability."""
 
 
 class CapabilityUnavailableError(RuntimeError):
     """The active adapter does not expose a requested capability."""
+
+
+# TODO(milky): implement a Milky PlatformAdapter after the Milky protocol integration is scheduled.

@@ -14,8 +14,8 @@ _ALL_SCOPE_TYPES = _SESSION_SCOPE_TYPES | {"global"}
 _PERMISSIONS = frozenset(
     {
         "bot",
-        "bot.group",
-        "bot.private",
+        "bot.shared",
+        "bot.direct",
         "cmd.tools",
         "cmd.config",
         "cmd.llm",
@@ -95,6 +95,22 @@ async def list_users(request: web.Request) -> web.Response:
         """
     )
     return web.json_response({"users": [dict(row) for row in rows]})
+
+
+@routes.get("/api/permissions/conversations")
+async def list_conversations(request: web.Request) -> web.Response:
+    """List internal conversations for scope selection without exposing protocol IDs."""
+    pool: asyncpg.Pool = request.app["pool"]
+    rows = await pool.fetch(
+        """
+        SELECT c.id AS conversation_id, c.kind, c.display_name,
+               a.platform, a.display_name AS account_display_name
+        FROM conversations c
+        JOIN platform_accounts a ON a.id = c.account_id
+        ORDER BY c.updated_at DESC, c.id DESC
+        """
+    )
+    return web.json_response({"conversations": [dict(row) for row in rows]})
 
 
 # ── 会话权限 (perm_scope + perm_tool) ─────────────────────

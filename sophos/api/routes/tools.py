@@ -12,7 +12,8 @@ routes = web.RouteTableDef()
 
 _GROUP_LABELS: dict[str, str] = {
     "messaging": "消息交互",
-    "admin": "群管理",
+    "admin": "成员管理",
+    "moderation": "成员管理",
     "memory": "记忆系统",
     "vision": "视觉",
     "web": "联网",
@@ -194,16 +195,16 @@ async def set_tool_enabled(request: web.Request) -> web.Response:
         await pool.execute(
             """
             INSERT INTO custom_tools (
-                name, display_name, description, category, scope, tool_type, enabled
+                name, display_name, description, category, conversation_kinds, tool_type, enabled
             )
-            VALUES ($1, $2, $3, $4, $5, 'builtin_override', $6)
+            VALUES ($1, $2, $3, $4, $5::jsonb, 'builtin_override', $6)
             ON CONFLICT (name) DO UPDATE SET enabled = $6, updated_at = now()
             """,
             tool_name,
             tool.name,
             tool.description,
             tool.category,
-            tool.scope,
+            json.dumps(sorted(tool.conversation_kinds) if tool.conversation_kinds is not None else []),
             enabled,
         )
 
@@ -284,11 +285,11 @@ async def update_image_generation_config(request: web.Request) -> web.Response:
     await pool.execute(
         """
         INSERT INTO custom_tools (
-            name, display_name, description, category, scope, tool_type,
+            name, display_name, description, category, conversation_kinds, tool_type,
             provider_alias, model_name, api_type, send_as, config, enabled
         )
         VALUES (
-            'generate_image', '图像生成', $1, 'output', 'all', 'image_generation',
+            'generate_image', '图像生成', $1, 'output', '[]'::jsonb, 'image_generation',
             $2, $3, $4, $5, $6::jsonb, $7
         )
         ON CONFLICT (name) DO UPDATE SET

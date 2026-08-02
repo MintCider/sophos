@@ -7,6 +7,7 @@ from sophos.message_store import MessageStore
 from sophos.platform import (
     AdapterSendRequest,
     Capability,
+    CapabilityUnavailableError,
     SendMessageRequest,
     SentMessage,
 )
@@ -27,6 +28,7 @@ class MessageService:
 
         segments: list[dict] = []
         if request.reply_to_message_id is not None:
+            self._require_optional_capability(adapter, Capability.MESSAGE_REPLY)
             locator = await self.store.get_delivery_locator(request.reply_to_message_id)
             if locator is None:
                 raise ValueError(f"unknown or undelivered reply_to_message_id: {request.reply_to_message_id}")
@@ -35,11 +37,15 @@ class MessageService:
                 raise ValueError("reply target belongs to another adapter binding or conversation")
             segments.append({"type": "reply", "data": {"external_message_id": external_message_id}})
         for user_id in request.mention_user_ids:
+            self._require_optional_capability(adapter, Capability.MESSAGE_MENTION)
             segments.append({"type": "mention", "data": {"user_id": user_id}})
         if request.text:
             segments.append({"type": "text", "data": {"text": request.text}})
         if request.attachment_ids:
-            raise ValueError("attachment delivery is not implemented by the current adapter")
+            self._require_optional_capability(adapter, Capability.MESSAGE_ATTACHMENT)
+            raise ValueError("attachment materialization is not implemented")
+        if request.inline_media:
+            self._require_optional_capability(adapter, Capability.MESSAGE_IMAGE)
         segments.extend(request.inline_media)
         if not segments:
             raise ValueError("message content cannot be empty")
@@ -61,6 +67,15 @@ class MessageService:
             conversation_id=conversation.conversation_id,
             external_message_id=delivered.external_message_id,
         )
+
+    @staticmethod
+    def _require_optional_capability(adapter: object, capability: Capability) -> None:
+        capabilities = getattr(adapter, "capabilities", frozenset())
+        if capability not in capabilities:
+            binding_id = getattr(adapter, "binding_id", "unknown")
+            raise CapabilityUnavailableError(
+                f"adapter binding {binding_id} does not support {capability.value}"
+            )
 
     async def recall_message(self, message_id: int) -> None:
         locator = await self.store.get_delivery_locator(message_id)
