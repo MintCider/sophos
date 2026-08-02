@@ -82,6 +82,11 @@ CREATE TABLE IF NOT EXISTS messages (
     raw_message     JSONB           NOT NULL,
     plain_text      TEXT,
 
+    -- 异步富化状态：pending | streaming | completed | failed
+    enrichment_status VARCHAR(16)   NOT NULL DEFAULT 'completed'
+        CHECK (enrichment_status IN ('pending', 'streaming', 'completed', 'failed')),
+    enrichment_error  TEXT,
+
     -- 时间
     timestamp       TIMESTAMPTZ     NOT NULL,
 
@@ -300,6 +305,17 @@ _CREATE_INDEXES = [
     """\
     CREATE INDEX IF NOT EXISTS idx_messages_private_ts
     ON messages (user_id, timestamp DESC)
+    WHERE group_id IS NULL;
+    """,
+    # 连续完成水位查询
+    """\
+    CREATE INDEX IF NOT EXISTS idx_messages_group_enrichment
+    ON messages (group_id, id, enrichment_status)
+    WHERE group_id IS NOT NULL;
+    """,
+    """\
+    CREATE INDEX IF NOT EXISTS idx_messages_private_enrichment
+    ON messages (user_id, id, enrichment_status)
     WHERE group_id IS NULL;
     """,
     # 按 message_id 查找（CQ:reply 展开用）

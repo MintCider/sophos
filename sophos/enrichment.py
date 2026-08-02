@@ -10,6 +10,8 @@ import logging
 from contextlib import suppress
 from typing import Any
 
+from sophos.config import settings
+
 logger = logging.getLogger(__name__)
 
 
@@ -27,7 +29,7 @@ class EnrichmentRegistry:
     async def wait_for(
         self,
         message_ids: list[int],
-        timeout: float = 15.0,
+        timeout: float | None = None,
     ) -> bool:
         """Await all pending enrichment tasks for the given message_ids.
 
@@ -37,13 +39,21 @@ class EnrichmentRegistry:
         if not pending:
             return False
         logger.debug("Waiting for %d enrichment task(s) on %d message(s)", len(pending), len(message_ids))
-        done, _ = await asyncio.wait(pending, timeout=timeout)
+        wait_timeout = timeout
+        if wait_timeout is None:
+            wait_timeout = settings.vision_generation_timeout + 20.0
+        done, still_pending = await asyncio.wait(pending, timeout=wait_timeout)
         for t in done:
             if t.cancelled():
                 continue
             exc = t.exception()
             if exc:
                 logger.warning("Enrichment task failed: %s", exc)
+        if still_pending:
+            logger.warning(
+                "Timed out after %.1fs waiting for %d enrichment task(s)",
+                wait_timeout, len(still_pending),
+            )
         return True
 
     def _remove(self, message_id: int, task: asyncio.Task[Any]) -> None:

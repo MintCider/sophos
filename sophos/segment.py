@@ -9,6 +9,7 @@
 import json
 import logging
 import xml.etree.ElementTree as ET
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import aiohttp
@@ -44,6 +45,7 @@ async def expand_segments(
     vision_provider: Any = None,
     group_id: int | None = None,
     depth: int = 0,
+    on_first_token: Callable[[], Awaitable[None]] | None = None,
 ) -> str:
     """将消息段数组展开为富文本字符串。
 
@@ -56,6 +58,7 @@ async def expand_segments(
         vision_provider: VLM provider（可选，用于转发图片和卡片封面）
         group_id:        当前群号（用于 @ 昵称解析）
         depth:           转发嵌套深度（内部递归用）
+        on_first_token:  内嵌图片出现首个有效内容 token 时调用
 
     Returns:
         展开后的富文本字符串
@@ -69,6 +72,7 @@ async def expand_segments(
         vision_provider=vision_provider,
         group_id=group_id,
         depth=depth,
+        on_first_token=on_first_token,
     )
     for seg in segments:
         seg_type = seg.get("type", "")
@@ -98,6 +102,7 @@ class _ExpandContext:
         "vision_provider",
         "group_id",
         "depth",
+        "on_first_token",
     )
 
     def __init__(self, **kwargs: Any) -> None:
@@ -202,6 +207,7 @@ async def _expand_forward(data: dict, _type: str, ctx: _ExpandContext) -> str:
             vision_provider=ctx.vision_provider,
             group_id=ctx.group_id,
             depth=ctx.depth + 1,
+            on_first_token=ctx.on_first_token,
         )
 
         # 转发内的图片：过 VLM
@@ -239,6 +245,7 @@ async def _process_forward_images(
                 pool=ctx.pool,
                 session=ctx.session,
                 vision_provider=ctx.vision_provider,
+                on_first_token=ctx.on_first_token,
             )
             if info and info.get("description"):
                 descs.append(f"[图片: {info['description']}]")
@@ -287,6 +294,7 @@ async def _expand_json(data: dict, _type: str, ctx: _ExpandContext) -> str:
                 pool=ctx.pool,
                 session=ctx.session,
                 vision_provider=ctx.vision_provider,
+                on_first_token=ctx.on_first_token,
             )
             if info and info.get("description"):
                 cover_desc = info["description"]

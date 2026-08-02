@@ -11,7 +11,7 @@ from typing import Any
 
 import aiohttp
 
-from sophos.llm.provider import ChatResponse, LLMProvider, Message, UsageInfo
+from sophos.llm.provider import ChatResponse, FirstTokenCallback, LLMProvider, Message, UsageInfo
 
 logger = logging.getLogger(__name__)
 
@@ -216,6 +216,7 @@ class AnthropicProvider(LLMProvider):
         tools: list[dict[str, Any]] | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        on_first_token: FirstTokenCallback | None = None,
     ) -> ChatResponse:
         system_text, converted_msgs = self._convert_messages(messages)
 
@@ -259,7 +260,7 @@ class AnthropicProvider(LLMProvider):
                 if resp.status != 200:
                     body = await resp.text()
                     raise RuntimeError(f"Anthropic API error {resp.status}: {body}")
-                return await self._consume_stream(resp)
+                return await self._consume_stream(resp, on_first_token=on_first_token)
         else:
             logger.debug(
                 "Anthropic request: model=%s, messages=%d, tools=%s",
@@ -280,6 +281,8 @@ class AnthropicProvider(LLMProvider):
     async def _consume_stream(
         self,
         resp: aiohttp.ClientResponse,
+        *,
+        on_first_token: FirstTokenCallback | None = None,
     ) -> ChatResponse:
         """读取 Anthropic SSE stream，累积为完整 ChatResponse。
 
@@ -292,6 +295,7 @@ class AnthropicProvider(LLMProvider):
         stop_reason = "stop"
         input_tokens = 0
         output_tokens = 0
+        first_token_seen = False
 
         while True:
             line_bytes = await resp.content.readline()
@@ -339,7 +343,12 @@ class AnthropicProvider(LLMProvider):
                     delta = data.get("delta", {})
                     dtype = delta.get("type", "")
                     if dtype == "text_delta" and idx in blocks:
-                        blocks[idx]["parts"].append(delta.get("text", ""))
+                        text_delta = delta.get("text", "")
+                        blocks[idx]["parts"].append(text_delta)
+                        if text_delta and not first_token_seen:
+                            first_token_seen = True
+                            if on_first_token is not None:
+                                await on_first_token()
                     elif dtype == "input_json_delta" and idx in blocks:
                         blocks[idx]["json_parts"].append(delta.get("partial_json", ""))
 

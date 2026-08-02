@@ -5,7 +5,11 @@ TypedDict 提供类型提示但零运行时开销，可直接 json.dumps。
 """
 
 from abc import ABC, abstractmethod
+from collections.abc import Awaitable, Callable
 from typing import Any, TypedDict
+
+FirstTokenCallback = Callable[[], Awaitable[None]]
+
 
 # ── 消息类型 ─────────────────────────────────────────────
 
@@ -74,6 +78,7 @@ class LLMProvider(ABC):
         tools: list[dict[str, Any]] | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        on_first_token: FirstTokenCallback | None = None,
     ) -> ChatResponse:
         """发送消息给 LLM 并获取回复。
 
@@ -83,6 +88,7 @@ class LLMProvider(ABC):
                          为 None 时不启用 tool calling
             temperature: 生成温度，为 None 时使用 provider 默认值
             max_tokens:  最大生成 token 数，为 None 时使用 provider 默认值
+            on_first_token: 流式响应出现首个有效内容 token 时调用一次
 
         Returns:
             ChatResponse，包含 assistant 消息、用量信息和结束原因

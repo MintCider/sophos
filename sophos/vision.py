@@ -12,6 +12,7 @@ import base64
 import io
 import logging
 import random
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import aiohttp
@@ -19,9 +20,19 @@ import asyncpg
 
 from sophos import runtime_config
 from sophos.config import settings
-from sophos.llm.openai_compat import OpenAICompatProvider
+from sophos.llm.provider import LLMProvider
 
 logger = logging.getLogger(__name__)
+
+FirstTokenCallback = Callable[[], Awaitable[None]]
+
+
+class VisionFirstTokenTimeoutError(TimeoutError):
+    """VLM 在首 token 时限内没有产生有效内容。"""
+
+
+class VisionGenerationTimeoutError(TimeoutError):
+    """VLM 在总生成时限内没有完成响应。"""
 
 
 # ── 图片下载 ──────────────────────────────────────────────
@@ -135,13 +146,14 @@ def should_explore(entry: dict[str, Any]) -> bool:
 
 
 async def describe_image(
-    provider: OpenAICompatProvider,
+    provider: LLMProvider,
     image_data: bytes,
     mime_type: str = "image/png",
     *,
     context_messages: list[dict[str, Any]] | None = None,
     prev_description: str = "",
     correction_hint: str = "",
+    on_first_token: FirstTokenCallback | None = None,
 ) -> str:
     """调用 VLM 描述图片。返回描述文本。"""
     data_uri = f"data:{mime_type};base64,{base64.b64encode(image_data).decode()}"
@@ -169,8 +181,64 @@ async def describe_image(
         }
     )
 
-    response = await provider.chat(messages, tools=None, temperature=0.3, max_tokens=settings.vision_max_tokens)  # type: ignore[arg-type]
-    return response["message"].get("content", "") or ""
+    first_token = asyncio.Event()
+
+    async def _handle_first_token() -> None:
+        if first_token.is_set():
+            return
+        first_token.set()
+        if on_first_token is not None:
+            await on_first_token()
+
+    request_started = asyncio.get_running_loop().time()
+    chat_task = asyncio.create_task(
+        provider.chat(
+            messages,
+            tools=None,
+            temperature=0.3,
+            max_tokens=settings.vision_max_tokens,
+            on_first_token=_handle_first_token,
+        ),
+    )
+    first_token_task = asyncio.create_task(first_token.wait())
+
+    try:
+        done, _ = await asyncio.wait(
+            {chat_task, first_token_task},
+            timeout=settings.vision_ttft_timeout,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if not done:
+            raise VisionFirstTokenTimeoutError(
+                f"VLM first token timed out after {settings.vision_ttft_timeout:.1f}s",
+            )
+
+        if chat_task.done():
+            response = await chat_task
+        else:
+            remaining = settings.vision_generation_timeout - (
+                asyncio.get_running_loop().time() - request_started
+            )
+            if remaining <= 0:
+                raise VisionGenerationTimeoutError(
+                    f"VLM generation timed out after {settings.vision_generation_timeout:.1f}s",
+                )
+            try:
+                response = await asyncio.wait_for(chat_task, timeout=remaining)
+            except TimeoutError as exc:
+                raise VisionGenerationTimeoutError(
+                    f"VLM generation timed out after {settings.vision_generation_timeout:.1f}s",
+                ) from exc
+    finally:
+        first_token_task.cancel()
+        if not chat_task.done():
+            chat_task.cancel()
+        await asyncio.gather(first_token_task, chat_task, return_exceptions=True)
+
+    content = response["message"].get("content", "") or ""
+    if not content.strip():
+        raise RuntimeError("VLM returned an empty description")
+    return content
 
 
 # ── 缓存操作 ──────────────────────────────────────────────
@@ -224,8 +292,9 @@ async def process_image_segment(
     *,
     pool: asyncpg.Pool,
     session: aiohttp.ClientSession,
-    vision_provider: OpenAICompatProvider | None,
+    vision_provider: LLMProvider | None,
     context_messages: list[dict[str, Any]] | None = None,
+    on_first_token: FirstTokenCallback | None = None,
 ) -> dict[str, str] | None:
     """处理单张图片：下载 → 哈希 → 缓存查询 → 探索/利用。
 
@@ -233,12 +302,12 @@ async def process_image_segment(
     """
     result = await fetch_image(url, session)
     if result is None:
-        return None
+        return {"status": "failed", "error": "图片下载失败"}
     image_data, mime_type = result
 
     hash_str = await compute_hash(image_data)
     if hash_str is None:
-        return None
+        return {"status": "failed", "error": "图片哈希计算失败"}
 
     entry = await get_or_create_cache_entry(pool, hash_str)
 
@@ -253,20 +322,33 @@ async def process_image_segment(
                 context_messages=context_messages,
                 prev_description=entry.get("description", ""),
                 correction_hint=entry.get("correction_hint", "") or "",
+                on_first_token=on_first_token,
             )
             await update_cache_after_explore(pool, hash_str, description)
             logger.info("VLM explored image hash=%s: %s", hash_str, description[:200])
-        except Exception:
-            logger.exception("VLM call failed for hash=%s", hash_str)
+        except Exception as exc:
+            logger.warning("VLM call failed for hash=%s: %s", hash_str, exc, exc_info=True)
             description = entry.get("description", "")
             await bump_hit_count(pool, hash_str)
+            if not description:
+                return {
+                    "hash": hash_str,
+                    "status": "failed",
+                    "error": str(exc) or type(exc).__name__,
+                }
     else:
         description = entry.get("description", "")
         await bump_hit_count(pool, hash_str)
         if description:
             logger.debug("Cache hit for hash=%s (hit_count=%d)", hash_str, entry.get("hit_count", 0) + 1)
 
-    return {"hash": hash_str, "description": description}
+    if not description:
+        return {
+            "hash": hash_str,
+            "status": "failed",
+            "error": "视觉模型未配置或没有可用的缓存描述",
+        }
+    return {"hash": hash_str, "description": description, "status": "completed"}
 
 
 # ── 批量处理消息中的所有图片 ──────────────────────────────
@@ -277,8 +359,9 @@ async def process_message_images(
     *,
     pool: asyncpg.Pool,
     session: aiohttp.ClientSession,
-    vision_provider: OpenAICompatProvider | None,
+    vision_provider: LLMProvider | None,
     context_messages: list[dict[str, Any]] | None = None,
+    on_first_token: FirstTokenCallback | None = None,
 ) -> list[dict[str, str]]:
     """处理消息中所有图片段，返回 [{hash, description}, ...]。"""
     image_urls = [
@@ -294,6 +377,7 @@ async def process_message_images(
             session=session,
             vision_provider=vision_provider,
             context_messages=context_messages,
+            on_first_token=on_first_token,
         )
         for url in image_urls
     ]
@@ -305,4 +389,5 @@ async def process_message_images(
             image_infos.append(r)
         elif isinstance(r, Exception):
             logger.warning("Image processing failed: %s", r)
+            image_infos.append({"status": "failed", "error": str(r) or type(r).__name__})
     return image_infos

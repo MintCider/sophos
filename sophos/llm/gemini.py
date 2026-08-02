@@ -12,7 +12,7 @@ from typing import Any
 
 import aiohttp
 
-from sophos.llm.provider import ChatResponse, LLMProvider, Message, UsageInfo
+from sophos.llm.provider import ChatResponse, FirstTokenCallback, LLMProvider, Message, UsageInfo
 
 logger = logging.getLogger(__name__)
 
@@ -251,6 +251,7 @@ class GeminiProvider(LLMProvider):
         tools: list[dict[str, Any]] | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        on_first_token: FirstTokenCallback | None = None,
     ) -> ChatResponse:
         system_instruction, contents = self._convert_messages(messages)
 
@@ -294,7 +295,7 @@ class GeminiProvider(LLMProvider):
                 if resp.status != 200:
                     body = await resp.text()
                     raise RuntimeError(f"Gemini API error {resp.status}: {body}")
-                return await self._consume_stream(resp)
+                return await self._consume_stream(resp, on_first_token=on_first_token)
         else:
             url = f"{self._root}/v1beta/models/{self._model}:generateContent"
             logger.debug(
@@ -316,6 +317,8 @@ class GeminiProvider(LLMProvider):
     async def _consume_stream(
         self,
         resp: aiohttp.ClientResponse,
+        *,
+        on_first_token: FirstTokenCallback | None = None,
     ) -> ChatResponse:
         """读取 Gemini SSE stream，累积为完整 ChatResponse。
 
@@ -328,6 +331,7 @@ class GeminiProvider(LLMProvider):
         finish_reason = "stop"
         usage: UsageInfo | None = None
         chunk_count = 0
+        first_token_seen = False
 
         while True:
             line_bytes = await resp.content.readline()
@@ -355,6 +359,10 @@ class GeminiProvider(LLMProvider):
                         continue
                     if "text" in part:
                         text_parts.append(part["text"])
+                        if part["text"] and not first_token_seen:
+                            first_token_seen = True
+                            if on_first_token is not None:
+                                await on_first_token()
                         if "thoughtSignature" in part:
                             text_signature = part["thoughtSignature"]
                     elif "functionCall" in part:

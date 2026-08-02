@@ -138,6 +138,10 @@ class Settings(BaseSettings):
     vision_epsilon_decay: float = 0.7
     # VLM 最大生成 token 数
     vision_max_tokens: int = 1024
+    # VLM 从请求发出到首个有效内容 token 的最大等待时间
+    vision_ttft_timeout: float = 30.0
+    # VLM 从请求发出到完整响应结束的总时间上限
+    vision_generation_timeout: float = 60.0
     # imagehash average_hash 的 hash_size 参数
     vision_hash_size: int = 15
 

@@ -63,11 +63,29 @@ async def build_chat_context(
     Returns:
         OpenAI 格式的 messages 列表，以 system message 开头
     """
+    messages, _ = await build_chat_context_snapshot(
+        store,
+        group_id=group_id,
+        user_id=user_id,
+        system_prompt=system_prompt,
+    )
+    return messages
+
+
+async def build_chat_context_snapshot(
+    store: MessageStore,
+    *,
+    group_id: int | None = None,
+    user_id: int | None = None,
+    system_prompt: str,
+) -> tuple[list[Message], int]:
+    """构建连续完成上下文，并返回最后实际可见的消息 DB id。"""
     rows = await store.get_context(
         group_id=group_id,
         user_id=user_id,
         include_co_account=runtime_config.get("include_co_account_in_context"),
     )
+    visible_cursor = max((int(row["id"]) for row in rows), default=0)
 
     # system 模式：查询最近一条 cross_context 背景，追加到 system prompt
     mode = runtime_config.get("cross_context_mode")
@@ -80,8 +98,10 @@ async def build_chat_context(
             system_prompt = system_prompt + _format_bg_for_system(bg_row)
 
     if runtime_config.get("llm_flatten_context"):
-        return _build_flat(rows, system_prompt, inline_bg=(mode == "inline"))
-    return _build_multi_turn(rows, system_prompt, inline_bg=(mode == "inline"))
+        messages = _build_flat(rows, system_prompt, inline_bg=(mode == "inline"))
+    else:
+        messages = _build_multi_turn(rows, system_prompt, inline_bg=(mode == "inline"))
+    return messages, visible_cursor
 
 
 def _build_multi_turn(
@@ -226,6 +246,13 @@ def _format_image_descriptions(row: dict[str, Any]) -> str:
     """从 extra.images 提取图片描述，格式化为 [图片(hash): desc]。"""
     extra = row.get("extra")
     if not extra:
+        if row.get("enrichment_status") == "failed":
+            raw = row.get("raw_message") or []
+            if isinstance(raw, str):
+                raw = json.loads(raw)
+            if any(isinstance(seg, dict) and seg.get("type") == "image" for seg in raw):
+                return "[图片解析失败]"
+            return "[消息解析失败]"
         return ""
     if isinstance(extra, str):
         extra = json.loads(extra)
@@ -234,6 +261,9 @@ def _format_image_descriptions(row: dict[str, Any]) -> str:
         return ""
     parts = []
     for img in images:
+        if img.get("status") == "failed":
+            parts.append("[图片解析失败]")
+            continue
         h = img.get("hash", "")
         desc = img.get("description", "")
         if desc:

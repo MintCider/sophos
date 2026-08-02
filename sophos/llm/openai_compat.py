@@ -12,7 +12,7 @@ from typing import Any
 
 import aiohttp
 
-from sophos.llm.provider import ChatResponse, LLMProvider, Message, UsageInfo
+from sophos.llm.provider import ChatResponse, FirstTokenCallback, LLMProvider, Message, UsageInfo
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +61,7 @@ class OpenAICompatProvider(LLMProvider):
         tools: list[dict[str, Any]] | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        on_first_token: FirstTokenCallback | None = None,
     ) -> ChatResponse:
         """调用 OpenAI 兼容的 chat/completions 端点。
 
@@ -103,7 +104,7 @@ class OpenAICompatProvider(LLMProvider):
                 if resp.status != 200:
                     body = await resp.text()
                     raise RuntimeError(f"LLM API error {resp.status}: {body}")
-                return await self._consume_stream(resp)
+                return await self._consume_stream(resp, on_first_token=on_first_token)
         else:
             logger.debug(
                 "LLM request: model=%s, messages=%d, tools=%s",
@@ -119,7 +120,12 @@ class OpenAICompatProvider(LLMProvider):
                 data = await resp.json()
             return self._parse_response(data)
 
-    async def _consume_stream(self, resp: aiohttp.ClientResponse) -> ChatResponse:
+    async def _consume_stream(
+        self,
+        resp: aiohttp.ClientResponse,
+        *,
+        on_first_token: FirstTokenCallback | None = None,
+    ) -> ChatResponse:
         """读取 SSE stream，累积 delta 为完整的 ChatResponse。"""
         role = "assistant"
         content_parts: list[str] = []
@@ -128,6 +134,7 @@ class OpenAICompatProvider(LLMProvider):
         finish_reason = "stop"
         usage: dict[str, Any] | None = None
         chunk_count = 0
+        first_token_seen = False
 
         while True:
             line_bytes = await resp.content.readline()
@@ -161,6 +168,10 @@ class OpenAICompatProvider(LLMProvider):
                 role = delta["role"]
             if delta.get("content"):
                 content_parts.append(delta["content"])
+                if not first_token_seen:
+                    first_token_seen = True
+                    if on_first_token is not None:
+                        await on_first_token()
             # 透传 provider 特有的顶层字段（如 Gemini 的额外字段）
             for key, value in delta.items():
                 if key not in ("role", "content", "tool_calls"):

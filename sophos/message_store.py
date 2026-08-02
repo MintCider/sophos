@@ -69,8 +69,9 @@ class MessageStore:
                 f"""
                 INSERT INTO messages
                     (message_id, message_type, group_id, user_id,
-                     nickname, card, source, raw_message, plain_text, timestamp)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10)
+                     nickname, card, source, raw_message, plain_text, timestamp,
+                     enrichment_status)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11)
                 {conflict_clause}
                 RETURNING id
                 """,
@@ -84,6 +85,7 @@ class MessageStore:
                 json.dumps(raw_message, ensure_ascii=False),
                 plain_text,
                 timestamp,
+                self._initial_enrichment_status(raw_message),
             )
 
             if row_id is not None:
@@ -178,14 +180,23 @@ class MessageStore:
         max_messages = limit or runtime_config.get("max_context_messages")
 
         # 根据配置决定是否过滤 co_account
-        source_filter = "" if include_co_account else "AND source != 'co_account'"
+        source_filter = "" if include_co_account else "AND m.source != 'co_account'"
+        pending_source_filter = "" if include_co_account else "AND p.source != 'co_account'"
 
         if group_id is not None:
             rows = await self._pool.fetch(
                 f"""
-                SELECT * FROM messages
-                WHERE group_id = $1 {source_filter}
-                ORDER BY timestamp DESC
+                WITH boundary AS (
+                    SELECT MIN(p.id) AS pending_id
+                    FROM messages p
+                    WHERE p.group_id = $1
+                      AND p.enrichment_status IN ('pending', 'streaming')
+                      {pending_source_filter}
+                )
+                SELECT m.* FROM messages m CROSS JOIN boundary b
+                WHERE m.group_id = $1 {source_filter}
+                  AND (b.pending_id IS NULL OR m.id < b.pending_id)
+                ORDER BY m.id DESC
                 LIMIT $2
                 """,
                 group_id,
@@ -194,9 +205,17 @@ class MessageStore:
         elif user_id is not None:
             rows = await self._pool.fetch(
                 f"""
-                SELECT * FROM messages
-                WHERE user_id = $1 AND group_id IS NULL {source_filter}
-                ORDER BY timestamp DESC
+                WITH boundary AS (
+                    SELECT MIN(p.id) AS pending_id
+                    FROM messages p
+                    WHERE p.user_id = $1 AND p.group_id IS NULL
+                      AND p.enrichment_status IN ('pending', 'streaming')
+                      {pending_source_filter}
+                )
+                SELECT m.* FROM messages m CROSS JOIN boundary b
+                WHERE m.user_id = $1 AND m.group_id IS NULL {source_filter}
+                  AND (b.pending_id IS NULL OR m.id < b.pending_id)
+                ORDER BY m.id DESC
                 LIMIT $2
                 """,
                 user_id,
@@ -250,6 +269,62 @@ class MessageStore:
             images_json,
         )
 
+    async def set_enrichment_streaming(self, message_id: int) -> None:
+        """首个有效视觉 token 到达后，将消息从 pending 推进到 streaming。"""
+        await self._pool.execute(
+            """
+            UPDATE messages
+            SET enrichment_status = 'streaming', enrichment_error = NULL
+            WHERE message_id = $1 AND enrichment_status = 'pending'
+            """,
+            message_id,
+        )
+
+    async def complete_enrichment(self, message_id: int) -> None:
+        """将无需图片异步处理的富化消息标记为完成。"""
+        await self._pool.execute(
+            """
+            UPDATE messages
+            SET enrichment_status = 'completed', enrichment_error = NULL
+            WHERE message_id = $1 AND enrichment_status IN ('pending', 'streaming')
+            """,
+            message_id,
+        )
+
+    async def finish_image_enrichment(
+        self,
+        message_id: int,
+        image_infos: list[dict[str, str]],
+    ) -> None:
+        """原子写入图片结果并将消息推进到 completed 或 failed 终态。"""
+        failed = any(info.get("status") == "failed" for info in image_infos)
+        status = "failed" if failed else "completed"
+        errors = [info.get("error", "") for info in image_infos if info.get("status") == "failed"]
+        error = "; ".join(filter(None, errors)) or None
+        images_json = json.dumps(image_infos, ensure_ascii=False)
+        await self._pool.execute(
+            """
+            UPDATE messages
+            SET extra = COALESCE(extra, '{}'::jsonb) || jsonb_build_object('images', $2::jsonb),
+                enrichment_status = $3,
+                enrichment_error = $4
+            WHERE message_id = $1
+            """,
+            message_id, images_json, status, error,
+        )
+
+    async def fail_interrupted_enrichments(self) -> int:
+        """进程启动时终结上一进程遗留的非终态消息，避免永久阻塞水位。"""
+        result = await self._pool.execute(
+            """
+            UPDATE messages
+            SET enrichment_status = 'failed',
+                enrichment_error = '消息富化因服务重启而中断'
+            WHERE enrichment_status IN ('pending', 'streaming')
+            """,
+        )
+        return int(result.rsplit(" ", 1)[-1])
+
     # ── 按时间范围查询 ────────────────────────────────────
 
     async def query_by_time_range(
@@ -273,13 +348,26 @@ class MessageStore:
         Returns:
             按时间正序排列的消息列表
         """
-        where = "group_id = $1" if message_type == "group" else "user_id = $1 AND group_id IS NULL"
+        if message_type == "group":
+            where = "m.group_id = $1"
+            pending_where = "p.group_id = $1"
+        else:
+            where = "m.user_id = $1 AND m.group_id IS NULL"
+            pending_where = "p.user_id = $1 AND p.group_id IS NULL"
 
         rows = await self._pool.fetch(
             f"""
-            SELECT * FROM messages
-            WHERE {where} AND timestamp BETWEEN $2 AND $3
-            ORDER BY timestamp ASC
+            WITH boundary AS (
+                SELECT MIN(p.id) AS pending_id
+                FROM messages p
+                WHERE {pending_where}
+                  AND p.enrichment_status IN ('pending', 'streaming')
+            )
+            SELECT m.* FROM messages m CROSS JOIN boundary b
+            WHERE {where} AND m.timestamp BETWEEN $2 AND $3
+              AND m.enrichment_status NOT IN ('pending', 'streaming')
+              AND (b.pending_id IS NULL OR m.id < b.pending_id)
+            ORDER BY m.id ASC
             LIMIT $4
             """,
             target_id,
@@ -320,6 +408,7 @@ class MessageStore:
                 SELECT * FROM messages
                 WHERE group_id = $1
                   AND source = 'sophos'
+                  AND enrichment_status NOT IN ('pending', 'streaming')
                   AND extra->'cross_context' IS NOT NULL
                 ORDER BY timestamp DESC
                 LIMIT 1
@@ -332,6 +421,7 @@ class MessageStore:
                 SELECT * FROM messages
                 WHERE user_id = $1 AND group_id IS NULL
                   AND source = 'sophos'
+                  AND enrichment_status NOT IN ('pending', 'streaming')
                   AND extra->'cross_context' IS NOT NULL
                 ORDER BY timestamp DESC
                 LIMIT 1
@@ -370,11 +460,11 @@ class MessageStore:
         idx = 1
 
         if exclude_group_id is not None:
-            exclude_parts.append(f"NOT (group_id = ${idx})")
+            exclude_parts.append(f"NOT (m.group_id = ${idx})")
             params.append(exclude_group_id)
             idx += 1
         if exclude_private_user_id is not None:
-            exclude_parts.append(f"NOT (group_id IS NULL AND user_id = ${idx})")
+            exclude_parts.append(f"NOT (m.group_id IS NULL AND m.user_id = ${idx})")
             params.append(exclude_private_user_id)
             idx += 1
 
@@ -384,9 +474,19 @@ class MessageStore:
         params.append(limit)
         rows = await self._pool.fetch(
             f"""
-            SELECT * FROM messages
+            SELECT m.* FROM messages m
             WHERE {where}
-            ORDER BY timestamp DESC
+              AND m.enrichment_status NOT IN ('pending', 'streaming')
+              AND NOT EXISTS (
+                  SELECT 1 FROM messages p
+                  WHERE p.enrichment_status IN ('pending', 'streaming')
+                    AND p.id < m.id
+                    AND (
+                        (m.group_id IS NOT NULL AND p.group_id = m.group_id)
+                        OR (m.group_id IS NULL AND p.group_id IS NULL AND p.user_id = m.user_id)
+                    )
+              )
+            ORDER BY m.timestamp DESC
             LIMIT ${idx}
             """,
             *params,
@@ -405,11 +505,11 @@ class MessageStore:
             extra_parts: list[str] = []
 
             if exclude_group_id is not None:
-                extra_parts.append(f"NOT (group_id = ${extra_idx})")
+                extra_parts.append(f"NOT (m.group_id = ${extra_idx})")
                 extra_params.append(exclude_group_id)
                 extra_idx += 1
             if exclude_private_user_id is not None:
-                extra_parts.append(f"NOT (group_id IS NULL AND user_id = ${extra_idx})")
+                extra_parts.append(f"NOT (m.group_id IS NULL AND m.user_id = ${extra_idx})")
                 extra_params.append(exclude_private_user_id)
                 extra_idx += 1
 
@@ -418,9 +518,19 @@ class MessageStore:
 
             extra_rows = await self._pool.fetch(
                 f"""
-                SELECT * FROM messages
-                WHERE {extra_where} AND source = 'sophos'
-                ORDER BY timestamp DESC
+                SELECT m.* FROM messages m
+                WHERE {extra_where} AND m.source = 'sophos'
+                  AND m.enrichment_status NOT IN ('pending', 'streaming')
+                  AND NOT EXISTS (
+                      SELECT 1 FROM messages p
+                      WHERE p.enrichment_status IN ('pending', 'streaming')
+                        AND p.id < m.id
+                        AND (
+                            (m.group_id IS NOT NULL AND p.group_id = m.group_id)
+                            OR (m.group_id IS NULL AND p.group_id IS NULL AND p.user_id = m.user_id)
+                        )
+                  )
+                ORDER BY m.timestamp DESC
                 LIMIT ${extra_idx}
                 """,
                 *extra_params,
@@ -470,7 +580,7 @@ class MessageStore:
         after_id: int,
         include_co_account: bool = True,
     ) -> list[dict[str, Any]]:
-        """获取 id > after_id 的新消息，按 id ASC 排序。"""
+        """获取 id > after_id 的全部新消息，供 enrichment 协调用。"""
         source_filter = "" if include_co_account else "AND source != 'co_account'"
 
         if group_id is not None:
@@ -498,7 +608,68 @@ class MessageStore:
 
         return [dict(row) for row in rows]
 
+    async def get_ready_messages_after(
+        self,
+        *,
+        group_id: int | None = None,
+        user_id: int | None = None,
+        after_id: int,
+        include_co_account: bool = True,
+    ) -> list[dict[str, Any]]:
+        """获取游标后的连续终态消息；遇到 pending/streaming 即截断。"""
+        source_filter = "" if include_co_account else "AND m.source != 'co_account'"
+        pending_source_filter = "" if include_co_account else "AND p.source != 'co_account'"
+
+        if group_id is not None:
+            rows = await self._pool.fetch(
+                f"""
+                WITH boundary AS (
+                    SELECT MIN(p.id) AS pending_id
+                    FROM messages p
+                    WHERE p.group_id = $1 AND p.id > $2
+                      AND p.enrichment_status IN ('pending', 'streaming')
+                      {pending_source_filter}
+                )
+                SELECT m.* FROM messages m CROSS JOIN boundary b
+                WHERE m.group_id = $1 AND m.id > $2 {source_filter}
+                  AND m.enrichment_status NOT IN ('pending', 'streaming')
+                  AND (b.pending_id IS NULL OR m.id < b.pending_id)
+                ORDER BY m.id ASC
+                """,
+                group_id, after_id,
+            )
+        elif user_id is not None:
+            rows = await self._pool.fetch(
+                f"""
+                WITH boundary AS (
+                    SELECT MIN(p.id) AS pending_id
+                    FROM messages p
+                    WHERE p.user_id = $1 AND p.group_id IS NULL AND p.id > $2
+                      AND p.enrichment_status IN ('pending', 'streaming')
+                      {pending_source_filter}
+                )
+                SELECT m.* FROM messages m CROSS JOIN boundary b
+                WHERE m.user_id = $1 AND m.group_id IS NULL AND m.id > $2 {source_filter}
+                  AND m.enrichment_status NOT IN ('pending', 'streaming')
+                  AND (b.pending_id IS NULL OR m.id < b.pending_id)
+                ORDER BY m.id ASC
+                """,
+                user_id, after_id,
+            )
+        else:
+            raise ValueError("Must provide either group_id or user_id")
+
+        return [dict(row) for row in rows]
+
     # ── 内部工具 ──────────────────────────────────────────
+
+    @staticmethod
+    def _initial_enrichment_status(raw_message: list[Any]) -> str:
+        """非纯文本段需要经过 Enrich/Images stage，落库时先标记 pending。"""
+        return "pending" if any(
+            isinstance(seg, dict) and seg.get("type") != "text"
+            for seg in raw_message
+        ) else "completed"
 
     @staticmethod
     def _extract_event_fields(

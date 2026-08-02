@@ -105,6 +105,9 @@ async def start() -> None:
     # 初始化数据库（建表 + 连接池）
     pool = await init_db()
     store = MessageStore(pool)
+    interrupted = await store.fail_interrupted_enrichments()
+    if interrupted:
+        logger.warning("Marked %d interrupted enrichment message(s) as failed", interrupted)
 
     # 初始化运行时配置
     await runtime_config.init(pool)

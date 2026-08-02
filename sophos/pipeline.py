@@ -35,7 +35,7 @@ from sophos.config import settings
 from sophos.db import get_pool
 from sophos.enrichment import get_enrichment_registry
 from sophos.llm.context import (
-    build_chat_context,
+    build_chat_context_snapshot,
     describe_schema,
     format_new_messages,
     format_timestamp,
@@ -207,6 +207,12 @@ async def _process_event_images(
                 {"role": "user", "content": r.get("plain_text", "")} for r in rows if r.get("plain_text")
             ]
 
+    message_id = ctx.event.get("message_id")
+
+    async def _mark_streaming() -> None:
+        if message_id is not None:
+            await ctx.store.set_enrichment_streaming(message_id)
+
     try:
         image_infos = await process_message_images(
             ctx.segments,
@@ -214,23 +220,24 @@ async def _process_event_images(
             session=ctx.session,
             vision_provider=vision_provider,
             context_messages=context_messages,
+            on_first_token=_mark_streaming,
         )
-    except Exception:
+    except Exception as exc:
         logger.exception(
             "Image processing failed for message_id=%s",
-            ctx.event.get("message_id"),
+            message_id,
         )
-        return
+        image_infos = [{"status": "failed", "error": str(exc) or type(exc).__name__}]
 
-    if image_infos:
-        message_id = ctx.event.get("message_id")
-        if message_id is not None:
-            await ctx.store.update_image_extra(message_id, image_infos)
-            logger.debug(
-                "Stored %d image description(s) for message_id=%s",
-                len(image_infos),
-                message_id,
-            )
+    if not image_infos:
+        image_infos = [{"status": "failed", "error": "图片消息中没有可处理的图片地址"}]
+    if message_id is not None:
+        await ctx.store.finish_image_enrichment(message_id, image_infos)
+        logger.debug(
+            "Stored %d image result(s) for message_id=%s status=%s",
+            len(image_infos), message_id,
+            "failed" if any(info.get("status") == "failed" for info in image_infos) else "completed",
+        )
 
 
 # ── LLM 触发（临时，后续由触发器 stage 替代）────────────────
@@ -503,7 +510,7 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
         except Exception:
             logger.warning("Image processing failed, continuing without descriptions")
 
-    messages = await build_chat_context(
+    messages, _cursor_id = await build_chat_context_snapshot(
         ctx.store,
         group_id=ctx.group_id,
         user_id=ctx.user_id if ctx.message_type == "private" else None,
@@ -511,11 +518,6 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
     )
 
     # ── 上下文刷新闭包（tool loop 间隙注入新消息）──
-    _cursor_id = await ctx.store.get_max_id(
-        group_id=ctx.group_id,
-        user_id=ctx.user_id if ctx.message_type == "private" else None,
-    )
-
     # Pre-compute refresh-suppressed user set for filtering
     from sophos import user_policy as _up
 
@@ -530,27 +532,27 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
 
     async def _refresh_context() -> str | None:
         nonlocal _cursor_id
-        new_rows = await ctx.store.get_messages_after(
+        all_new_rows = await ctx.store.get_messages_after(
             group_id=ctx.group_id,
             user_id=ctx.user_id if ctx.message_type == "private" else None,
             after_id=_cursor_id,
         )
-        if not new_rows:
+        if not all_new_rows:
             return None
 
         # Wait for pending enrichment (image processing) on new messages,
         # then re-fetch so we get updated extra.images data.
         registry = get_enrichment_registry()
-        msg_ids = [r["message_id"] for r in new_rows if r.get("message_id")]
-        had_pending = await registry.wait_for(msg_ids)
-        if had_pending:
-            new_rows = await ctx.store.get_messages_after(
-                group_id=ctx.group_id,
-                user_id=ctx.user_id if ctx.message_type == "private" else None,
-                after_id=_cursor_id,
-            )
-            if not new_rows:
-                return None
+        msg_ids = [r["message_id"] for r in all_new_rows if r.get("message_id")]
+        await registry.wait_for(msg_ids)
+        new_rows = await ctx.store.get_ready_messages_after(
+            group_id=ctx.group_id,
+            user_id=ctx.user_id if ctx.message_type == "private" else None,
+            after_id=_cursor_id,
+            include_co_account=runtime_config.get("include_co_account_in_context"),
+        )
+        if not new_rows:
+            return None
 
         _cursor_id = max(r["id"] for r in new_rows)
 
@@ -676,7 +678,7 @@ class StoreMessageStage(Stage):
         return "将消息事件存入数据库"
 
     async def execute(self, ctx: PipelineContext, next_stage: NextFn) -> None:
-        await ctx.store.save_event_message(ctx.event, self_id=ctx.self_id)
+        ctx.state["message_row_id"] = await ctx.store.save_event_message(ctx.event, self_id=ctx.self_id)
         await next_stage()
 
 
@@ -692,11 +694,15 @@ class ProcessImagesStage(Stage):
         return "异步处理消息中的图片（VLM 识别）"
 
     async def execute(self, ctx: PipelineContext, next_stage: NextFn) -> None:
-        task = asyncio.create_task(_process_event_images(ctx))
-        ctx.state["image_task"] = task
         msg_id = ctx.event.get("message_id")
-        if msg_id is not None:
-            get_enrichment_registry().register(msg_id, task)
+        has_images = any(seg.get("type") == "image" for seg in ctx.segments)
+        if has_images:
+            task = asyncio.create_task(_process_event_images(ctx))
+            ctx.state["image_task"] = task
+            if msg_id is not None:
+                get_enrichment_registry().register(msg_id, task)
+        elif msg_id is not None:
+            await ctx.store.complete_enrichment(msg_id)
         await next_stage()
 
 
@@ -715,6 +721,12 @@ class EnrichMessageStage(Stage):
         if not has_expandable_segments(ctx.segments):
             await next_stage()
             return
+        message_id = ctx.event.get("message_id")
+
+        async def _mark_streaming() -> None:
+            if message_id is not None:
+                await ctx.store.set_enrichment_streaming(message_id)
+
         try:
             enriched = await expand_segments(
                 ctx.segments,
@@ -724,9 +736,9 @@ class EnrichMessageStage(Stage):
                 pool=ctx.store.pool,
                 vision_provider=ctx.provider_mgr.get_vision_provider(),
                 group_id=ctx.group_id,
+                on_first_token=_mark_streaming,
             )
             if enriched != ctx.text:
-                message_id = ctx.event.get("message_id")
                 if message_id is not None:
                     await ctx.store.update_plain_text(message_id, enriched)
                 ctx.text = enriched
