@@ -2,6 +2,8 @@
 
 Sophos 是一个使用 PostgreSQL/pgvector 持久化数据、通过外部 IM adapter 接收消息的聊天机器人。
 
+平台中间层的数据约束、工具能力模型和后续适配顺序见 [平台中间层架构与后续计划](docs/platform-abstraction-plan.md)。
+
 ## 开发
 
 复制本地配置和 system prompt：
