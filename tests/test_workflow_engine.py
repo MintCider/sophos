@@ -18,6 +18,7 @@ class WorkflowEngineTests(unittest.IsolatedAsyncioTestCase):
         instructions = workflow.node("collector").instructions
         self.assertNotIn("不要总结、建议或回答用户", instructions)
         self.assertIn("complete_collection", instructions)
+        self.assertIn("不调用任何读取工具", instructions)
 
     async def test_collector_actor_cycle_keeps_complete_history(self) -> None:
         workflow = collector_actor_workflow()

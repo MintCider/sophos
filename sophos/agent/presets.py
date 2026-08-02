@@ -30,6 +30,7 @@ def collector_actor_workflow() -> WorkflowDefinition:
                 instructions=(
                     "只调用读取工具收集回答当前请求所需的信息。"
                     "收集完成后调用 complete_collection。"
+                    "如果现有上下文已经足够，可以不调用任何读取工具，直接调用 complete_collection。"
                 ),
                 model=ModelPolicy(slot="collector", require_tool_call=True),
                 tools=ToolPolicy(include_categories=("input",), exclude_names=("generate_image",)),
@@ -38,7 +39,7 @@ def collector_actor_workflow() -> WorkflowDefinition:
                 output_ports=(
                     PortSpec(
                         "complete_collection",
-                        "已有工具调用历史足以交给输出节点时调用。",
+                        "现有上下文和工具调用历史足以交给输出节点时调用；无需新增信息时可直接调用。",
                         model_callable=True,
                     ),
                 ),
