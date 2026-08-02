@@ -718,7 +718,8 @@ onMounted(loadProviders)
   color: inherit;
 }
 
-.slot-tag--default {
+.slot-tag--default,
+.slot-tag--collector {
   background: linear-gradient(135deg, #513fe0, #7c6bf0);
 }
 
