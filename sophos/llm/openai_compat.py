@@ -12,7 +12,15 @@ from typing import Any
 
 import aiohttp
 
-from sophos.llm.provider import ChatResponse, FirstTokenCallback, LLMProvider, Message, UsageInfo
+from sophos.llm.provider import (
+    ChatResponse,
+    FirstTokenCallback,
+    LLMProvider,
+    Message,
+    ProviderRequestOptions,
+    UsageInfo,
+)
+from sophos.llm.schema import compile_openai_strict_tools
 
 logger = logging.getLogger(__name__)
 
@@ -55,21 +63,15 @@ class OpenAICompatProvider(LLMProvider):
             )
         return self._session
 
-    async def chat(
+    def _build_payload(
         self,
         messages: list[Message],
-        tools: list[dict[str, Any]] | None = None,
-        temperature: float | None = None,
-        max_tokens: int | None = None,
-        on_first_token: FirstTokenCallback | None = None,
-    ) -> ChatResponse:
-        """调用 OpenAI 兼容的 chat/completions 端点。
-
-        stream=True 时使用 SSE streaming 避免长时间等待导致的超时，
-        内部累积所有 delta 后返回完整 ChatResponse，对上层透明。
-        stream=False 时使用传统的一次性请求（兼容不支持流式的 provider）。
-        """
-        url = f"{self._base_url}/chat/completions"
+        tools: list[dict[str, Any]] | None,
+        temperature: float | None,
+        max_tokens: int | None,
+        request_options: ProviderRequestOptions | None,
+    ) -> dict[str, Any]:
+        options = request_options or ProviderRequestOptions()
         payload: dict[str, Any] = {
             "model": self._model,
             "messages": messages,
@@ -78,10 +80,40 @@ class OpenAICompatProvider(LLMProvider):
         temp = temperature if temperature is not None else self._default_temperature
         if temp is not None:
             payload["temperature"] = temp
-        if tools:
-            payload["tools"] = tools
+        if tools and options.tool_choice != "none":
+            payload["tools"] = (
+                compile_openai_strict_tools(tools)
+                if options.strict_tools
+                else tools
+            )
+            payload["tool_choice"] = options.tool_choice
+        elif options.tool_choice == "none":
+            payload["tool_choice"] = "none"
+
+        if options.cache and options.cache.enabled and options.cache.key:
+            payload["prompt_cache_key"] = options.cache.key
+
         if self._extra_body:
             payload.update(self._extra_body)
+        return payload
+
+    async def chat(
+        self,
+        messages: list[Message],
+        tools: list[dict[str, Any]] | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        on_first_token: FirstTokenCallback | None = None,
+        request_options: ProviderRequestOptions | None = None,
+    ) -> ChatResponse:
+        """调用 OpenAI 兼容的 chat/completions 端点。
+
+        stream=True 时使用 SSE streaming 避免长时间等待导致的超时，
+        内部累积所有 delta 后返回完整 ChatResponse，对上层透明。
+        stream=False 时使用传统的一次性请求（兼容不支持流式的 provider）。
+        """
+        url = f"{self._base_url}/chat/completions"
+        payload = self._build_payload(messages, tools, temperature, max_tokens, request_options)
 
         session = self._get_session()
         logger.log(TRACE, "LLM payload:\n%s", json.dumps(payload, ensure_ascii=False, indent=2))
@@ -224,10 +256,14 @@ class OpenAICompatProvider(LLMProvider):
 
         usage_info: UsageInfo | None = None
         if usage:
+            details = usage.get("prompt_tokens_details") or {}
             usage_info = {
                 "prompt_tokens": usage.get("prompt_tokens", 0),
                 "completion_tokens": usage.get("completion_tokens", 0),
                 "total_tokens": usage.get("total_tokens", 0),
+                "cached_input_tokens": details.get("cached_tokens", 0),
+                "cache_write_tokens": details.get("cache_write_tokens", 0),
+                "raw": usage,
             }
 
         logger.debug(
@@ -237,7 +273,12 @@ class OpenAICompatProvider(LLMProvider):
             len(tool_calls_map),
             finish_reason,
         )
-        result: ChatResponse = {"message": message, "usage": usage_info, "finish_reason": finish_reason}
+        result: ChatResponse = {
+            "message": message,
+            "usage": usage_info,
+            "finish_reason": finish_reason,
+            "provider": "openai_compat",
+        }
         logger.log(TRACE, "LLM response:\n%s", json.dumps(result, ensure_ascii=False, indent=2, default=str))
         return result
 
@@ -267,10 +308,15 @@ class OpenAICompatProvider(LLMProvider):
         # 用量信息
         usage: UsageInfo | None = None
         if "usage" in data:
+            raw_usage = data["usage"]
+            details = raw_usage.get("prompt_tokens_details") or {}
             usage = {
-                "prompt_tokens": data["usage"].get("prompt_tokens", 0),
-                "completion_tokens": data["usage"].get("completion_tokens", 0),
-                "total_tokens": data["usage"].get("total_tokens", 0),
+                "prompt_tokens": raw_usage.get("prompt_tokens", 0),
+                "completion_tokens": raw_usage.get("completion_tokens", 0),
+                "total_tokens": raw_usage.get("total_tokens", 0),
+                "cached_input_tokens": details.get("cached_tokens", 0),
+                "cache_write_tokens": details.get("cache_write_tokens", 0),
+                "raw": raw_usage,
             }
 
         # finish_reason 标准化
@@ -280,7 +326,18 @@ class OpenAICompatProvider(LLMProvider):
         elif finish in ("function_call",):
             finish = "tool_calls"  # 旧版 API 兼容
 
-        result: ChatResponse = {"message": message, "usage": usage, "finish_reason": finish}
+        native_metadata = {
+            key: data[key]
+            for key in ("id", "model", "created", "system_fingerprint", "service_tier")
+            if key in data
+        }
+        result: ChatResponse = {
+            "message": message,
+            "usage": usage,
+            "finish_reason": finish,
+            "provider": "openai_compat",
+            "native_metadata": native_metadata,
+        }
         logger.log(TRACE, "LLM response:\n%s", json.dumps(result, ensure_ascii=False, indent=2, default=str))
         return result
 

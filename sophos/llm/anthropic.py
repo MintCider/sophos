@@ -11,7 +11,15 @@ from typing import Any
 
 import aiohttp
 
-from sophos.llm.provider import ChatResponse, FirstTokenCallback, LLMProvider, Message, UsageInfo
+from sophos.llm.provider import (
+    ChatResponse,
+    FirstTokenCallback,
+    LLMProvider,
+    Message,
+    ProviderRequestOptions,
+    UsageInfo,
+)
+from sophos.llm.schema import close_json_schema
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +134,11 @@ class AnthropicProvider(LLMProvider):
         return system_text, result
 
     @staticmethod
-    def _convert_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _convert_tools(
+        tools: list[dict[str, Any]],
+        *,
+        strict: bool,
+    ) -> list[dict[str, Any]]:
         """将 OpenAI tool schemas 转换为 Anthropic tools。"""
         converted = []
         for tool in tools:
@@ -138,9 +150,49 @@ class AnthropicProvider(LLMProvider):
                 "description": fn.get("description", ""),
             }
             if fn.get("parameters"):
-                t["input_schema"] = fn["parameters"]
+                t["input_schema"] = (
+                    close_json_schema(fn["parameters"])
+                    if strict
+                    else fn["parameters"]
+                )
+            if strict:
+                t["strict"] = True
             converted.append(t)
         return converted
+
+    def _build_payload(
+        self,
+        messages: list[Message],
+        tools: list[dict[str, Any]] | None,
+        temperature: float | None,
+        max_tokens: int | None,
+        request_options: ProviderRequestOptions | None,
+    ) -> dict[str, Any]:
+        options = request_options or ProviderRequestOptions()
+        system_text, converted_msgs = self._convert_messages(messages)
+        payload: dict[str, Any] = {
+            "model": self._model,
+            "max_tokens": max_tokens if max_tokens is not None else self._default_max_tokens,
+            "messages": converted_msgs,
+        }
+        temp = temperature if temperature is not None else self._default_temperature
+        if temp is not None:
+            payload["temperature"] = temp
+        if system_text:
+            payload["system"] = system_text
+        if tools and options.tool_choice != "none":
+            payload["tools"] = self._convert_tools(tools, strict=options.strict_tools)
+            payload["tool_choice"] = {"type": "any" if options.tool_choice == "required" else "auto"}
+        if options.cache and options.cache.enabled:
+            cache_control: dict[str, Any] = {"type": "ephemeral"}
+            if (
+                options.cache.preferred_ttl_seconds is not None
+                and options.cache.preferred_ttl_seconds >= 3600
+            ):
+                cache_control["ttl"] = "1h"
+            payload["cache_control"] = cache_control
+        payload.update(self._extra_body)
+        return payload
 
     # ── Anthropic → OpenAI 转换 ───────────────────────────
 
@@ -194,12 +246,21 @@ class AnthropicProvider(LLMProvider):
                 "prompt_tokens": u.get("input_tokens", 0),
                 "completion_tokens": u.get("output_tokens", 0),
                 "total_tokens": u.get("input_tokens", 0) + u.get("output_tokens", 0),
+                "cached_input_tokens": u.get("cache_read_input_tokens", 0),
+                "cache_write_tokens": u.get("cache_creation_input_tokens", 0),
+                "raw": u,
             }
 
         result: ChatResponse = {
             "message": message,
             "usage": usage,
             "finish_reason": finish_reason,
+            "provider": "anthropic",
+            "native_metadata": {
+                key: data[key]
+                for key in ("id", "model", "type", "stop_sequence")
+                if key in data
+            },
         }
         logger.log(
             TRACE,
@@ -217,24 +278,9 @@ class AnthropicProvider(LLMProvider):
         temperature: float | None = None,
         max_tokens: int | None = None,
         on_first_token: FirstTokenCallback | None = None,
+        request_options: ProviderRequestOptions | None = None,
     ) -> ChatResponse:
-        system_text, converted_msgs = self._convert_messages(messages)
-
-        payload: dict[str, Any] = {
-            "model": self._model,
-            "max_tokens": max_tokens if max_tokens is not None else self._default_max_tokens,
-            "messages": converted_msgs,
-        }
-        temp = temperature if temperature is not None else self._default_temperature
-        if temp is not None:
-            payload["temperature"] = temp
-        if system_text:
-            payload["system"] = system_text
-        if tools:
-            payload["tools"] = self._convert_tools(tools)
-        # extra_body 合并到顶层
-        for k, v in self._extra_body.items():
-            payload[k] = v
+        payload = self._build_payload(messages, tools, temperature, max_tokens, request_options)
 
         session = self._get_session()
         url = f"{self._root}/v1/messages"
@@ -295,6 +341,9 @@ class AnthropicProvider(LLMProvider):
         stop_reason = "stop"
         input_tokens = 0
         output_tokens = 0
+        cache_read_tokens = 0
+        cache_write_tokens = 0
+        raw_usage: dict[str, Any] = {}
         first_token_seen = False
 
         while True:
@@ -323,6 +372,9 @@ class AnthropicProvider(LLMProvider):
                     msg = data.get("message", {})
                     u = msg.get("usage", {})
                     input_tokens = u.get("input_tokens", 0)
+                    cache_read_tokens = u.get("cache_read_input_tokens", 0)
+                    cache_write_tokens = u.get("cache_creation_input_tokens", 0)
+                    raw_usage.update(u)
 
                 elif event_type == "content_block_start":
                     idx = data.get("index", 0)
@@ -364,6 +416,7 @@ class AnthropicProvider(LLMProvider):
                     stop_reason = reason_map.get(raw, "stop")
                     u = data.get("usage", {})
                     output_tokens = u.get("output_tokens", output_tokens)
+                    raw_usage.update(u)
 
                 elif event_type == "message_stop":
                     break
@@ -403,6 +456,9 @@ class AnthropicProvider(LLMProvider):
             "prompt_tokens": input_tokens,
             "completion_tokens": output_tokens,
             "total_tokens": input_tokens + output_tokens,
+            "cached_input_tokens": cache_read_tokens,
+            "cache_write_tokens": cache_write_tokens,
+            "raw": raw_usage,
         }
 
         logger.debug(
@@ -415,6 +471,7 @@ class AnthropicProvider(LLMProvider):
             "message": message,
             "usage": usage,
             "finish_reason": stop_reason,
+            "provider": "anthropic",
         }
         logger.log(
             TRACE,

@@ -12,7 +12,14 @@ from typing import Any
 
 import aiohttp
 
-from sophos.llm.provider import ChatResponse, FirstTokenCallback, LLMProvider, Message, UsageInfo
+from sophos.llm.provider import (
+    ChatResponse,
+    FirstTokenCallback,
+    LLMProvider,
+    Message,
+    ProviderRequestOptions,
+    UsageInfo,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -152,6 +159,36 @@ class GeminiProvider(LLMProvider):
             declarations.append(decl)
         return [{"functionDeclarations": declarations}] if declarations else []
 
+    def _build_payload(
+        self,
+        messages: list[Message],
+        tools: list[dict[str, Any]] | None,
+        temperature: float | None,
+        max_tokens: int | None,
+        request_options: ProviderRequestOptions | None,
+    ) -> dict[str, Any]:
+        options = request_options or ProviderRequestOptions()
+        system_instruction, contents = self._convert_messages(messages)
+        payload: dict[str, Any] = {"contents": contents}
+        if system_instruction:
+            payload["systemInstruction"] = system_instruction
+        if tools and options.tool_choice != "none":
+            payload["tools"] = self._convert_tools(tools)
+            mode = "ANY" if options.tool_choice == "required" else "VALIDATED"
+            payload["toolConfig"] = {"functionCallingConfig": {"mode": mode}}
+        elif options.tool_choice == "none":
+            payload["toolConfig"] = {"functionCallingConfig": {"mode": "NONE"}}
+
+        gen_config: dict[str, Any] = {
+            "maxOutputTokens": max_tokens if max_tokens is not None else self._default_max_tokens,
+        }
+        temp = temperature if temperature is not None else self._default_temperature
+        if temp is not None:
+            gen_config["temperature"] = temp
+        gen_config.update(self._extra_body)
+        payload["generationConfig"] = gen_config
+        return payload
+
     # ── Gemini → OpenAI 转换 ──────────────────────────────
 
     @staticmethod
@@ -229,12 +266,20 @@ class GeminiProvider(LLMProvider):
                 "prompt_tokens": um.get("promptTokenCount", 0),
                 "completion_tokens": um.get("candidatesTokenCount", 0),
                 "total_tokens": um.get("totalTokenCount", 0),
+                "cached_input_tokens": um.get("cachedContentTokenCount", 0),
+                "raw": um,
             }
 
         result: ChatResponse = {
             "message": message,
             "usage": usage,
             "finish_reason": finish_reason,
+            "provider": "gemini",
+            "native_metadata": {
+                key: data[key]
+                for key in ("modelVersion", "responseId", "promptFeedback")
+                if key in data
+            },
         }
         logger.log(
             TRACE,
@@ -252,25 +297,9 @@ class GeminiProvider(LLMProvider):
         temperature: float | None = None,
         max_tokens: int | None = None,
         on_first_token: FirstTokenCallback | None = None,
+        request_options: ProviderRequestOptions | None = None,
     ) -> ChatResponse:
-        system_instruction, contents = self._convert_messages(messages)
-
-        payload: dict[str, Any] = {"contents": contents}
-        if system_instruction:
-            payload["systemInstruction"] = system_instruction
-        if tools:
-            payload["tools"] = self._convert_tools(tools)
-
-        gen_config: dict[str, Any] = {
-            "maxOutputTokens": max_tokens if max_tokens is not None else self._default_max_tokens,
-        }
-        temp = temperature if temperature is not None else self._default_temperature
-        if temp is not None:
-            gen_config["temperature"] = temp
-        # extra_body 中的参数合并到 generationConfig
-        for k, v in self._extra_body.items():
-            gen_config[k] = v
-        payload["generationConfig"] = gen_config
+        payload = self._build_payload(messages, tools, temperature, max_tokens, request_options)
 
         session = self._get_session()
         logger.log(
@@ -398,6 +427,8 @@ class GeminiProvider(LLMProvider):
                     "prompt_tokens": um.get("promptTokenCount", 0),
                     "completion_tokens": um.get("candidatesTokenCount", 0),
                     "total_tokens": um.get("totalTokenCount", 0),
+                    "cached_input_tokens": um.get("cachedContentTokenCount", 0),
+                    "raw": um,
                 }
 
         # 组装
@@ -423,6 +454,7 @@ class GeminiProvider(LLMProvider):
             "message": message,
             "usage": usage,
             "finish_reason": finish_reason,
+            "provider": "gemini",
         }
         logger.log(
             TRACE,

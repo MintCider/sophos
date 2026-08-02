@@ -6,7 +6,8 @@ TypedDict 提供类型提示但零运行时开销，可直接 json.dumps。
 
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
-from typing import Any, TypedDict
+from dataclasses import dataclass
+from typing import Any, Literal, TypedDict
 
 FirstTokenCallback = Callable[[], Awaitable[None]]
 
@@ -52,14 +53,42 @@ class UsageInfo(TypedDict, total=False):
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int
+    cached_input_tokens: int
+    cache_write_tokens: int
+    raw: dict[str, Any]
 
 
-class ChatResponse(TypedDict):
+class ChatResponse(TypedDict, total=False):
     """LLM 调用的返回值。"""
 
     message: Message
     usage: UsageInfo | None
     finish_reason: str  # "stop" | "tool_calls" | "length"
+    provider: str
+    native_metadata: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class CachePlan:
+    """Provider-neutral prompt cache intent.
+
+    Provider adapters compile this intent to native cache controls where the API
+    exposes them. ``key`` describes a stable routing namespace; it is not a cache
+    object identifier and providers that do not expose such a key may ignore it.
+    """
+
+    enabled: bool = True
+    key: str | None = None
+    preferred_ttl_seconds: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderRequestOptions:
+    """Semantic request controls compiled independently by each provider."""
+
+    tool_choice: Literal["auto", "required", "none"] = "auto"
+    strict_tools: bool = True
+    cache: CachePlan | None = None
 
 
 # ── Provider 抽象基类 ────────────────────────────────────
@@ -79,6 +108,7 @@ class LLMProvider(ABC):
         temperature: float | None = None,
         max_tokens: int | None = None,
         on_first_token: FirstTokenCallback | None = None,
+        request_options: ProviderRequestOptions | None = None,
     ) -> ChatResponse:
         """发送消息给 LLM 并获取回复。
 
@@ -89,6 +119,7 @@ class LLMProvider(ABC):
             temperature: 生成温度，为 None 时使用 provider 默认值
             max_tokens:  最大生成 token 数，为 None 时使用 provider 默认值
             on_first_token: 流式响应出现首个有效内容 token 时调用一次
+            request_options: provider-neutral tool selection and cache intent
 
         Returns:
             ChatResponse，包含 assistant 消息、用量信息和结束原因

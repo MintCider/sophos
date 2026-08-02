@@ -5,14 +5,23 @@
 
 from sophos.llm.context import build_chat_context
 from sophos.llm.openai_compat import OpenAICompatProvider
-from sophos.llm.provider import ChatResponse, LLMProvider, Message, ToolCall
+from sophos.llm.provider import (
+    CachePlan,
+    ChatResponse,
+    LLMProvider,
+    Message,
+    ProviderRequestOptions,
+    ToolCall,
+)
 from sophos.llm.tool_loop import run_tool_loop
 
 __all__ = [
+    "CachePlan",
     "ChatResponse",
     "LLMProvider",
     "Message",
     "OpenAICompatProvider",
+    "ProviderRequestOptions",
     "ToolCall",
     "build_chat_context",
     "run_tool_loop",

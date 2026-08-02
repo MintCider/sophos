@@ -3,6 +3,7 @@
 import logging
 from typing import Any
 
+from sophos.llm.schema import strip_boundary_nulls
 from sophos.tools.base import Tool
 
 logger = logging.getLogger(__name__)
@@ -94,6 +95,7 @@ class ToolRegistry:
         if missing:
             return {"error": f"缺少必填参数: {', '.join(missing)}"}
 
+        params = strip_boundary_nulls(params, schema)
         return await tool.execute(params, context)
 
     def get_function_schemas(
