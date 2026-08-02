@@ -32,7 +32,7 @@ class _TableStats:
 _CLEANUP_SPECS = {
     "messages": _CleanupSpec(
         table="messages",
-        lru_expression="COALESCE(last_accessed, timestamp)",
+        lru_expression="COALESCE(last_accessed_at, occurred_at)",
     ),
     "memories": _CleanupSpec(
         table="memories",
@@ -74,10 +74,52 @@ async def _logical_table_stats(pool: asyncpg.Pool, table: str) -> _TableStats:
     )
 
 
-async def _cleanup_table(pool: asyncpg.Pool, table: str, max_bytes: int) -> None:
+async def _protected_message_stats(pool: asyncpg.Pool, keep_per_conversation: int) -> _TableStats:
+    """统计每个会话最近 K 条受保护消息，仅在容量无法下降时执行。"""
+    row = await pool.fetchrow(
+        """
+        WITH protected AS MATERIALIZED (
+            SELECT recent.id
+            FROM conversations c
+            CROSS JOIN LATERAL (
+                SELECT m.id
+                FROM messages m
+                WHERE m.conversation_id = c.id
+                ORDER BY m.id DESC
+                LIMIT $1
+            ) recent
+        )
+        SELECT
+            COALESCE(SUM(pg_column_size(m)::bigint), 0) AS logical_bytes,
+            COUNT(*) AS row_count
+        FROM messages m
+        JOIN protected p ON p.id = m.id
+        """,
+        keep_per_conversation,
+    )
+    return _TableStats(
+        logical_bytes=int(row["logical_bytes"]) if row else 0,
+        row_count=int(row["row_count"]) if row else 0,
+    )
+
+
+async def _cleanup_table(
+    pool: asyncpg.Pool,
+    table: str,
+    max_bytes: int,
+    *,
+    keep_per_conversation: int | None = None,
+) -> None:
     """超过高水位后，按 LRU 分批删除到 90% 低水位。"""
     max_bytes = _require_positive_int(max_bytes, f"cleanup_{table}_max_bytes")
     spec = _spec(table)
+    if table == "messages":
+        keep_per_conversation = _require_positive_int(
+            keep_per_conversation,
+            "max_context_messages",
+        )
+    elif keep_per_conversation is not None:
+        raise ValueError("keep_per_conversation is only supported for messages")
     stats = await _logical_table_stats(pool, table)
     size = stats.logical_bytes
     if size <= max_bytes:
@@ -94,19 +136,63 @@ async def _cleanup_table(pool: asyncpg.Pool, table: str, max_bytes: int) -> None
             max_bytes // _MEBIBYTE,
             batch,
         )
-        deleted = await pool.fetch(
-            f"""
-            DELETE FROM {spec.table}
-            WHERE id IN (
-                SELECT id FROM {spec.table}
-                ORDER BY {spec.lru_expression} ASC, id ASC
-                LIMIT $1
+        if table == "messages":
+            # 每个会话只做一次 K+1 定位；避免对整张消息表执行窗口排序。
+            deleted = await pool.fetch(
+                f"""
+                WITH conversation_cutoffs AS MATERIALIZED (
+                    SELECT c.id AS conversation_id,
+                           (
+                               SELECT m.id
+                               FROM messages m
+                               WHERE m.conversation_id = c.id
+                               ORDER BY m.id DESC
+                               OFFSET $2
+                               LIMIT 1
+                           ) AS max_deletable_id
+                    FROM conversations c
+                ), victims AS MATERIALIZED (
+                    SELECT m.id
+                    FROM messages m
+                    JOIN conversation_cutoffs cutoff
+                      ON cutoff.conversation_id = m.conversation_id
+                     AND cutoff.max_deletable_id IS NOT NULL
+                     AND m.id <= cutoff.max_deletable_id
+                    WHERE m.enrichment_status NOT IN ('pending', 'streaming')
+                    ORDER BY {spec.lru_expression} ASC, m.id ASC
+                    LIMIT $1
+                )
+                DELETE FROM messages m
+                USING victims v
+                WHERE m.id = v.id
+                RETURNING pg_column_size(m)::bigint AS logical_bytes
+                """,
+                batch,
+                keep_per_conversation,
             )
-            RETURNING pg_column_size({spec.table})::bigint AS logical_bytes
-            """,
-            batch,
-        )
+        else:
+            deleted = await pool.fetch(
+                f"""
+                DELETE FROM {spec.table}
+                WHERE id IN (
+                    SELECT id FROM {spec.table}
+                    ORDER BY {spec.lru_expression} ASC, id ASC
+                    LIMIT $1
+                )
+                RETURNING pg_column_size({spec.table})::bigint AS logical_bytes
+                """,
+                batch,
+            )
         if not deleted:
+            if table == "messages":
+                protected = await _protected_message_stats(pool, keep_per_conversation)
+                logger.warning(
+                    "messages cleanup retained %d protected rows (%d MiB); "
+                    "per-conversation context floor takes precedence over the %d MiB limit",
+                    protected.row_count,
+                    protected.logical_bytes // _MEBIBYTE,
+                    max_bytes // _MEBIBYTE,
+                )
             logger.warning(
                 "%s logical cleanup stopped before reaching target: %d MiB / %d MiB",
                 spec.table,
@@ -126,7 +212,8 @@ async def _cleanup_table(pool: asyncpg.Pool, table: str, max_bytes: int) -> None
 
 async def cleanup_messages(pool: asyncpg.Pool, max_bytes: int) -> None:
     """按逻辑大小和 LRU 清理 messages。"""
-    await _cleanup_table(pool, "messages", max_bytes)
+    keep = _require_positive_int(runtime_config.get("max_context_messages"), "max_context_messages")
+    await _cleanup_table(pool, "messages", max_bytes, keep_per_conversation=keep)
 
 
 async def cleanup_memories(pool: asyncpg.Pool, max_bytes: int) -> None:

@@ -1,7 +1,13 @@
 import re
 import unittest
 
-from sophos.db import _CREATE_INDEXES, _CREATE_MESSAGES_TABLE
+from sophos.db import (
+    _CREATE_CONVERSATIONS_TABLE,
+    _CREATE_INDEXES,
+    _CREATE_MESSAGES_TABLE,
+    _CREATE_USER_IDENTITIES_TABLE,
+    SCHEMA_VERSION,
+)
 
 
 def _declared_columns(create_table_sql: str) -> set[str]:
@@ -22,21 +28,39 @@ class DatabaseSchemaTests(unittest.TestCase):
         columns = _declared_columns(_CREATE_MESSAGES_TABLE)
         self.assertTrue(
             {
-                "message_id",
-                "raw_message",
+                "adapter_binding_id",
+                "conversation_id",
+                "sender_identity_id",
+                "external_message_id",
+                "reply_to_message_id",
+                "content",
+                "raw_payload",
                 "plain_text",
                 "enrichment_status",
                 "enrichment_error",
-                "timestamp",
-                "last_accessed",
-                "extra",
+                "occurred_at",
+                "last_accessed_at",
+                "metadata",
             }.issubset(columns)
         )
 
-    def test_cleanup_lru_indexes_are_declared(self) -> None:
+    def test_schema_has_platform_neutral_identity_and_conversation_keys(self) -> None:
+        self.assertEqual(SCHEMA_VERSION, 2)
+        self.assertIn("platform, identity_namespace, external_user_id", _CREATE_USER_IDENTITIES_TABLE)
+        self.assertIn("parent_conversation_id", _CREATE_CONVERSATIONS_TABLE)
+        self.assertIn("'direct', 'group', 'channel', 'thread'", _CREATE_CONVERSATIONS_TABLE)
+
+    def test_message_query_and_cleanup_indexes_are_declared(self) -> None:
         indexes = "\n".join(_CREATE_INDEXES)
+        self.assertIn("uidx_messages_external_locator", indexes)
+        self.assertIn("adapter_binding_id, conversation_id, external_message_id", indexes)
+        self.assertIn("idx_messages_conversation_id", indexes)
+        self.assertIn("conversation_id, id DESC", indexes)
+        self.assertIn("idx_messages_conversation_time", indexes)
+        self.assertIn("idx_messages_pending", indexes)
+        self.assertIn("WHERE enrichment_status IN ('pending', 'streaming')", indexes)
         self.assertIn("idx_messages_lru", indexes)
-        self.assertIn("COALESCE(last_accessed, timestamp), id", indexes)
+        self.assertIn("COALESCE(last_accessed_at, occurred_at), id", indexes)
         self.assertIn("idx_memories_lru", indexes)
         self.assertIn("COALESCE(last_hit, created_at), id", indexes)
 

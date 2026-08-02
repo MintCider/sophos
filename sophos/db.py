@@ -2,10 +2,8 @@
 
 职责：
   1. 管理 asyncpg 连接池生命周期 (init / close)
-  2. 应用启动时幂等建表 (CREATE TABLE IF NOT EXISTS)
-
-不引入迁移框架 (alembic 等)，当前阶段用 DDL 脚本直接管理。
-表结构变更时手动写 ALTER 或重建。
+  2. 为空数据库创建当前 canonical schema
+  3. 拒绝在未知/旧 schema 上自动运行，数据迁移必须显式执行
 """
 
 import logging
@@ -56,43 +54,133 @@ def get_pool() -> asyncpg.Pool:
 
 # ── Schema DDL ──────────────────────────────────────────────
 
-_CREATE_MESSAGES_TABLE = """\
-CREATE TABLE IF NOT EXISTS messages (
+SCHEMA_VERSION = 2
+
+_CREATE_SCHEMA_META_TABLE = """\
+CREATE TABLE schema_meta (
+    singleton       BOOLEAN         PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+    version         INTEGER         NOT NULL,
+    created_at      TIMESTAMPTZ     NOT NULL DEFAULT now()
+);
+"""
+
+_CREATE_USERS_TABLE = """\
+CREATE TABLE users (
     id              BIGSERIAL       PRIMARY KEY,
+    display_name    TEXT            NOT NULL DEFAULT '',
+    metadata        JSONB           NOT NULL DEFAULT '{}'::jsonb,
+    created_at      TIMESTAMPTZ     NOT NULL DEFAULT now(),
+    updated_at      TIMESTAMPTZ     NOT NULL DEFAULT now()
+);
+"""
 
-    -- OneBot 协议字段
-    message_id      BIGINT          NOT NULL,
-    message_type    VARCHAR(16)     NOT NULL,
+_CREATE_USER_IDENTITIES_TABLE = """\
+CREATE TABLE user_identities (
+    id                  BIGSERIAL       PRIMARY KEY,
+    user_id             BIGINT          NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+    platform            VARCHAR(32)     NOT NULL,
+    identity_namespace  TEXT            NOT NULL DEFAULT 'global',
+    external_user_id    TEXT            NOT NULL,
+    display_name        TEXT            NOT NULL DEFAULT '',
+    metadata            JSONB           NOT NULL DEFAULT '{}'::jsonb,
+    verification_method TEXT,
+    verified_at         TIMESTAMPTZ,
+    verified_by_user_id BIGINT          REFERENCES users(id) ON DELETE SET NULL,
+    created_at          TIMESTAMPTZ     NOT NULL DEFAULT now(),
+    updated_at          TIMESTAMPTZ     NOT NULL DEFAULT now(),
+    UNIQUE (platform, identity_namespace, external_user_id)
+);
+"""
 
-    -- 会话定位
-    group_id        BIGINT,
-    user_id         BIGINT          NOT NULL,
+_CREATE_USER_ROLES_TABLE = """\
+CREATE TABLE user_roles (
+    user_id         BIGINT          NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    role            VARCHAR(32)     NOT NULL,
+    granted_by      BIGINT          REFERENCES users(id) ON DELETE SET NULL,
+    created_at      TIMESTAMPTZ     NOT NULL DEFAULT now(),
+    PRIMARY KEY (user_id, role)
+);
+"""
 
-    -- 发送者信息（冗余快照，昵称/名片会变）
-    nickname        VARCHAR(128),
-    card            VARCHAR(128),
+_CREATE_PLATFORM_ACCOUNTS_TABLE = """\
+CREATE TABLE platform_accounts (
+    id                  BIGSERIAL       PRIMARY KEY,
+    platform            VARCHAR(32)     NOT NULL,
+    identity_namespace  TEXT            NOT NULL DEFAULT 'global',
+    external_account_id TEXT            NOT NULL,
+    display_name        TEXT            NOT NULL DEFAULT '',
+    metadata            JSONB           NOT NULL DEFAULT '{}'::jsonb,
+    created_at          TIMESTAMPTZ     NOT NULL DEFAULT now(),
+    updated_at          TIMESTAMPTZ     NOT NULL DEFAULT now(),
+    UNIQUE (platform, identity_namespace, external_account_id)
+);
+"""
 
-    -- 消息来源：'user' | 'sophos' | 'co_account'
-    --   user       — 群友/对方发的正常消息
-    --   sophos     — Sophos 通过 send_msg 发出的
-    --   co_account — 同账号其他来源（其他 bot、手动发的等）
+_CREATE_ADAPTER_BINDINGS_TABLE = """\
+CREATE TABLE adapter_bindings (
+    id                    BIGSERIAL       PRIMARY KEY,
+    account_id            BIGINT          NOT NULL REFERENCES platform_accounts(id) ON DELETE RESTRICT,
+    adapter_kind          VARCHAR(32)     NOT NULL,
+    name                  TEXT            NOT NULL,
+    external_id_namespace TEXT            NOT NULL,
+    enabled               BOOLEAN         NOT NULL DEFAULT TRUE,
+    metadata              JSONB           NOT NULL DEFAULT '{}'::jsonb,
+    created_at            TIMESTAMPTZ     NOT NULL DEFAULT now(),
+    updated_at            TIMESTAMPTZ     NOT NULL DEFAULT now(),
+    UNIQUE (account_id, name),
+    UNIQUE (external_id_namespace)
+);
+"""
+
+_CREATE_CONVERSATIONS_TABLE = """\
+CREATE TABLE conversations (
+    id                       BIGSERIAL       PRIMARY KEY,
+    account_id               BIGINT          NOT NULL REFERENCES platform_accounts(id) ON DELETE RESTRICT,
+    kind                     VARCHAR(16)     NOT NULL
+        CHECK (kind IN ('direct', 'group', 'channel', 'thread')),
+    external_conversation_id TEXT            NOT NULL,
+    parent_conversation_id   BIGINT          REFERENCES conversations(id) ON DELETE RESTRICT,
+    display_name             TEXT            NOT NULL DEFAULT '',
+    metadata                 JSONB           NOT NULL DEFAULT '{}'::jsonb,
+    created_at               TIMESTAMPTZ     NOT NULL DEFAULT now(),
+    updated_at               TIMESTAMPTZ     NOT NULL DEFAULT now(),
+    UNIQUE NULLS NOT DISTINCT
+        (account_id, kind, parent_conversation_id, external_conversation_id)
+);
+"""
+
+_CREATE_MESSAGES_TABLE = """\
+CREATE TABLE messages (
+    id              BIGSERIAL       PRIMARY KEY,
+    adapter_binding_id BIGINT       NOT NULL REFERENCES adapter_bindings(id) ON DELETE RESTRICT,
+    conversation_id BIGINT          NOT NULL REFERENCES conversations(id) ON DELETE RESTRICT,
+    sender_identity_id BIGINT       REFERENCES user_identities(id) ON DELETE RESTRICT,
+    external_message_id TEXT,
+    reply_to_message_id BIGINT      REFERENCES messages(id) ON DELETE SET NULL,
     source          VARCHAR(16)     NOT NULL DEFAULT 'user',
-
-    -- 消息内容
-    raw_message     JSONB           NOT NULL,
+    content         JSONB           NOT NULL DEFAULT '[]'::jsonb,
     plain_text      TEXT,
-
-    -- 异步富化状态：pending | streaming | completed | failed
+    raw_payload     JSONB,
     enrichment_status VARCHAR(16)   NOT NULL DEFAULT 'completed'
         CHECK (enrichment_status IN ('pending', 'streaming', 'completed', 'failed')),
     enrichment_error  TEXT,
+    occurred_at     TIMESTAMPTZ     NOT NULL,
+    created_at      TIMESTAMPTZ     NOT NULL DEFAULT now(),
+    last_accessed_at TIMESTAMPTZ,
+    metadata        JSONB           NOT NULL DEFAULT '{}'::jsonb
+);
+"""
 
-    -- 时间
-    timestamp       TIMESTAMPTZ     NOT NULL,
-    last_accessed   TIMESTAMPTZ,
-
-    -- 预留扩展
-    extra           JSONB
+_CREATE_ATTACHMENTS_TABLE = """\
+CREATE TABLE attachments (
+    id              BIGSERIAL       PRIMARY KEY,
+    message_id      BIGINT          NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    kind            VARCHAR(32)     NOT NULL,
+    mime_type       TEXT,
+    source_url      TEXT,
+    storage_ref     TEXT,
+    metadata        JSONB           NOT NULL DEFAULT '{}'::jsonb,
+    created_at      TIMESTAMPTZ     NOT NULL DEFAULT now()
 );
 """
 
@@ -174,7 +262,7 @@ CREATE TABLE IF NOT EXISTS bot_config (
 
 _CREATE_MEMORY_PROFILE_CONTEXT_TABLE = """\
 CREATE TABLE IF NOT EXISTS memory_profile_context (
-    scope_type  VARCHAR(16) NOT NULL,
+    scope_type  VARCHAR(16) NOT NULL CHECK (scope_type IN ('global', 'conversation')),
     scope_id    BIGINT      NOT NULL,
     content     TEXT        NOT NULL,
     updated_at  TIMESTAMPTZ DEFAULT now(),
@@ -184,7 +272,7 @@ CREATE TABLE IF NOT EXISTS memory_profile_context (
 
 _CREATE_MEMORY_PROFILE_USER_TABLE = """\
 CREATE TABLE IF NOT EXISTS memory_profile_user (
-    user_id     BIGINT      PRIMARY KEY,
+    user_id     BIGINT      PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
     content     TEXT        NOT NULL,
     keywords    JSONB       DEFAULT '[]'::jsonb,
     updated_at  TIMESTAMPTZ DEFAULT now()
@@ -208,7 +296,7 @@ CREATE TABLE IF NOT EXISTS memories (
     id          BIGSERIAL       PRIMARY KEY,
     content     TEXT            NOT NULL,
     embedding   vector,
-    source_scope VARCHAR(16),
+    source_scope VARCHAR(16) CHECK (source_scope IS NULL OR source_scope IN ('conversation')),
     source_id   BIGINT,
     created_at  TIMESTAMPTZ     DEFAULT now(),
     last_hit    TIMESTAMPTZ,
@@ -221,7 +309,7 @@ CREATE TABLE IF NOT EXISTS memories (
 
 _CREATE_PERM_SCOPE_TABLE = """\
 CREATE TABLE IF NOT EXISTS perm_scope (
-    scope_type  VARCHAR(16)  NOT NULL,
+    scope_type  VARCHAR(16)  NOT NULL CHECK (scope_type IN ('global', 'conversation')),
     scope_id    BIGINT       NOT NULL,
     enabled     BOOLEAN      NOT NULL DEFAULT true,
     updated_at  TIMESTAMPTZ  DEFAULT now(),
@@ -231,11 +319,11 @@ CREATE TABLE IF NOT EXISTS perm_scope (
 
 _CREATE_PERM_GRANT_TABLE = """\
 CREATE TABLE IF NOT EXISTS perm_grant (
-    user_id     BIGINT       NOT NULL,
-    scope_type  VARCHAR(16)  NOT NULL,
+    user_id     BIGINT       NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    scope_type  VARCHAR(16)  NOT NULL CHECK (scope_type IN ('global', 'conversation')),
     scope_id    BIGINT       NOT NULL,
     permission  VARCHAR(32)  NOT NULL,
-    granted_by  BIGINT,
+    granted_by  BIGINT       REFERENCES users(id) ON DELETE SET NULL,
     created_at  TIMESTAMPTZ  DEFAULT now(),
     PRIMARY KEY (user_id, scope_type, scope_id, permission)
 );
@@ -243,7 +331,7 @@ CREATE TABLE IF NOT EXISTS perm_grant (
 
 _CREATE_PERM_TOOL_TABLE = """\
 CREATE TABLE IF NOT EXISTS perm_tool (
-    scope_type  VARCHAR(16)  NOT NULL,
+    scope_type  VARCHAR(16)  NOT NULL CHECK (scope_type IN ('global', 'conversation')),
     scope_id    BIGINT       NOT NULL,
     tool_name   VARCHAR(64)  NOT NULL,
     PRIMARY KEY (scope_type, scope_id, tool_name)
@@ -254,8 +342,9 @@ CREATE TABLE IF NOT EXISTS perm_tool (
 
 _CREATE_USER_TRIGGER_POLICY_TABLE = """\
 CREATE TABLE IF NOT EXISTS user_trigger_policy (
-    user_id              BIGINT       NOT NULL,
-    scope_type           VARCHAR(16)  NOT NULL DEFAULT 'global',
+    user_id              BIGINT       NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    scope_type           VARCHAR(16)  NOT NULL DEFAULT 'global'
+        CHECK (scope_type IN ('global', 'conversation')),
     scope_id             BIGINT       NOT NULL DEFAULT 0,
     suppress_llm_trigger BOOLEAN      NOT NULL DEFAULT true,
     rate_multiplier      REAL         NOT NULL DEFAULT 0.0,
@@ -296,103 +385,135 @@ CREATE TABLE IF NOT EXISTS tool_description_overrides (
 """
 
 _CREATE_INDEXES = [
-    # 按群聊查最近消息（最常用）
+    # 完整协议定位符仅在相同适配器绑定和会话内唯一。
     """\
-    CREATE INDEX IF NOT EXISTS idx_messages_group_ts
-    ON messages (group_id, timestamp DESC)
-    WHERE group_id IS NOT NULL;
+    CREATE UNIQUE INDEX uidx_messages_external_locator
+    ON messages (adapter_binding_id, conversation_id, external_message_id)
+    WHERE external_message_id IS NOT NULL;
     """,
-    # 按私聊查最近消息
+    # 最热路径：最近上下文、MAX(id) 和 tool-loop 增量游标。
     """\
-    CREATE INDEX IF NOT EXISTS idx_messages_private_ts
-    ON messages (user_id, timestamp DESC)
-    WHERE group_id IS NULL;
+    CREATE INDEX idx_messages_conversation_id
+    ON messages (conversation_id, id DESC);
     """,
-    # 连续完成水位查询
+    # 指定会话的时间窗口回溯。
     """\
-    CREATE INDEX IF NOT EXISTS idx_messages_group_enrichment
-    ON messages (group_id, id, enrichment_status)
-    WHERE group_id IS NOT NULL;
+    CREATE INDEX idx_messages_conversation_time
+    ON messages (conversation_id, occurred_at DESC, id DESC);
+    """,
+    # 非终态消息通常很少，partial index 用于连续富化水位。
+    """\
+    CREATE INDEX idx_messages_pending
+    ON messages (conversation_id, id)
+    WHERE enrichment_status IN ('pending', 'streaming');
+    """,
+    # 跨会话最近背景只扫描可进入上下文的终态消息。
+    """\
+    CREATE INDEX idx_messages_ready_global
+    ON messages (occurred_at DESC, id DESC)
+    WHERE enrichment_status IN ('completed', 'failed');
+    """,
+    # 最近一条跨上下文 Sophos 消息；索引保持很小。
+    """\
+    CREATE INDEX idx_messages_cross_context
+    ON messages (conversation_id, occurred_at DESC, id DESC)
+    WHERE source = 'sophos'
+      AND enrichment_status IN ('completed', 'failed')
+      AND metadata ? 'cross_context';
+    """,
+    # reply_to_message_id 使用 ON DELETE SET NULL，需要反向索引。
+    """\
+    CREATE INDEX idx_messages_reply
+    ON messages (reply_to_message_id)
+    WHERE reply_to_message_id IS NOT NULL;
     """,
     """\
-    CREATE INDEX IF NOT EXISTS idx_messages_private_enrichment
-    ON messages (user_id, id, enrichment_status)
-    WHERE group_id IS NULL;
+    CREATE INDEX idx_attachments_message
+    ON attachments (message_id);
     """,
-    # 按 message_id 查找（CQ:reply 展开用）
     """\
-    CREATE INDEX IF NOT EXISTS idx_messages_msg_id
-    ON messages (message_id);
-    """,
-    # 群聊内 message_id 唯一（用于 ON CONFLICT 去重）
-    """\
-    CREATE UNIQUE INDEX IF NOT EXISTS uidx_messages_group
-    ON messages (group_id, message_id)
-    WHERE group_id IS NOT NULL;
-    """,
-    # 私聊内 message_id 唯一（用于 ON CONFLICT 去重）
-    """\
-    CREATE UNIQUE INDEX IF NOT EXISTS uidx_messages_private
-    ON messages (user_id, message_id)
-    WHERE group_id IS NULL;
+    CREATE INDEX idx_user_identities_user
+    ON user_identities (user_id);
     """,
     # memories 全文搜索索引
     """\
-    CREATE INDEX IF NOT EXISTS idx_memories_tsv
+    CREATE INDEX idx_memories_tsv
     ON memories USING gin(tsv);
-    """,
-    # 跨上下文最近消息查询（全局时间索引）
-    """\
-    CREATE INDEX IF NOT EXISTS idx_messages_ts_desc
-    ON messages (timestamp DESC);
     """,
     # 消息逻辑容量清理的 LRU 顺序
     """\
-    CREATE INDEX IF NOT EXISTS idx_messages_lru
-    ON messages (COALESCE(last_accessed, timestamp), id);
+    CREATE INDEX idx_messages_lru
+    ON messages (COALESCE(last_accessed_at, occurred_at), id);
     """,
     # 记忆逻辑容量清理的 LRU 顺序
     """\
-    CREATE INDEX IF NOT EXISTS idx_memories_lru
+    CREATE INDEX idx_memories_lru
     ON memories (COALESCE(last_hit, created_at), id);
     """,
     # 权限系统：按 scope 查询授权
     """\
-    CREATE INDEX IF NOT EXISTS idx_perm_grant_scope
+    CREATE INDEX idx_perm_grant_scope
     ON perm_grant (scope_type, scope_id);
     """,
 ]
 
 
 async def _init_schema(pool: asyncpg.Pool) -> None:
-    """幂等创建所有表和索引。"""
+    """为空数据库创建 canonical schema；旧 schema 必须显式迁移。"""
     async with pool.acquire() as conn:
-        # pgvector 扩展（必须在使用 vector 类型之前）
-        await conn.execute("CREATE EXTENSION IF NOT EXISTS vector;")
-        await conn.execute(_CREATE_MESSAGES_TABLE)
-        await conn.execute(_CREATE_LLM_PROVIDERS_TABLE)
-        await conn.execute(_CREATE_LLM_ACTIVE_TABLE)
-        await conn.execute(_CREATE_IMAGE_CACHE_TABLE)
-        await conn.execute(_CREATE_TRIGGER_CONFIG_TABLE)
-        await conn.execute(_SEED_TRIGGER_CONFIG)
-        await conn.execute(_CREATE_EMBEDDING_CONFIG_TABLE)
-        await conn.execute(_SEED_EMBEDDING_CONFIG)
-        # 运行时配置
-        await conn.execute(_CREATE_BOT_CONFIG_TABLE)
-        # 记忆系统
-        await conn.execute(_CREATE_MEMORY_PROFILE_CONTEXT_TABLE)
-        await conn.execute(_CREATE_MEMORY_PROFILE_USER_TABLE)
-        await conn.execute(_CREATE_MEMORY_PROFILE_SELF_TABLE)
-        await conn.execute(_SEED_MEMORY_PROFILE_SELF)
-        await conn.execute(_CREATE_MEMORIES_TABLE)
-        # 权限系统
-        await conn.execute(_CREATE_PERM_SCOPE_TABLE)
-        await conn.execute(_CREATE_PERM_GRANT_TABLE)
-        await conn.execute(_CREATE_PERM_TOOL_TABLE)
-        # 用户触发策略
-        await conn.execute(_CREATE_USER_TRIGGER_POLICY_TABLE)
-        # 自定义工具
-        await conn.execute(_CREATE_CUSTOM_TOOLS_TABLE)
-        await conn.execute(_CREATE_TOOL_DESCRIPTION_OVERRIDES_TABLE)
-        for ddl in _CREATE_INDEXES:
-            await conn.execute(ddl)
+        has_schema_meta = await conn.fetchval("SELECT to_regclass('public.schema_meta') IS NOT NULL")
+        if has_schema_meta:
+            schema_version = await conn.fetchval("SELECT version FROM schema_meta WHERE singleton")
+            if schema_version != SCHEMA_VERSION:
+                raise RuntimeError(
+                    f"unsupported database schema version {schema_version}; expected {SCHEMA_VERSION}. "
+                    "Run the explicit offline migration before starting Sophos."
+                )
+            return
+
+        if await conn.fetchval("SELECT to_regclass('public.messages') IS NOT NULL"):
+            raise RuntimeError(
+                "legacy database schema detected. Sophos does not migrate production data on startup; "
+                "run the explicit offline migration first."
+            )
+
+        async with conn.transaction():
+            # pgvector 必须在创建 memories 之前启用。
+            await conn.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+            for ddl in (
+                _CREATE_USERS_TABLE,
+                _CREATE_USER_IDENTITIES_TABLE,
+                _CREATE_USER_ROLES_TABLE,
+                _CREATE_PLATFORM_ACCOUNTS_TABLE,
+                _CREATE_ADAPTER_BINDINGS_TABLE,
+                _CREATE_CONVERSATIONS_TABLE,
+                _CREATE_MESSAGES_TABLE,
+                _CREATE_ATTACHMENTS_TABLE,
+                _CREATE_LLM_PROVIDERS_TABLE,
+                _CREATE_LLM_ACTIVE_TABLE,
+                _CREATE_IMAGE_CACHE_TABLE,
+                _CREATE_TRIGGER_CONFIG_TABLE,
+                _SEED_TRIGGER_CONFIG,
+                _CREATE_EMBEDDING_CONFIG_TABLE,
+                _SEED_EMBEDDING_CONFIG,
+                _CREATE_BOT_CONFIG_TABLE,
+                _CREATE_MEMORY_PROFILE_CONTEXT_TABLE,
+                _CREATE_MEMORY_PROFILE_USER_TABLE,
+                _CREATE_MEMORY_PROFILE_SELF_TABLE,
+                _SEED_MEMORY_PROFILE_SELF,
+                _CREATE_MEMORIES_TABLE,
+                _CREATE_PERM_SCOPE_TABLE,
+                _CREATE_PERM_GRANT_TABLE,
+                _CREATE_PERM_TOOL_TABLE,
+                _CREATE_USER_TRIGGER_POLICY_TABLE,
+                _CREATE_CUSTOM_TOOLS_TABLE,
+                _CREATE_TOOL_DESCRIPTION_OVERRIDES_TABLE,
+            ):
+                await conn.execute(ddl)
+            for ddl in _CREATE_INDEXES:
+                await conn.execute(ddl)
+            await conn.execute(_CREATE_SCHEMA_META_TABLE)
+            await conn.execute(
+                "INSERT INTO schema_meta (singleton, version) VALUES (TRUE, $1)",
+                SCHEMA_VERSION,
+            )
