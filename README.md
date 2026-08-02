@@ -21,6 +21,14 @@ pnpm dev
 
 Vite 开发服务器监听 `5173` 并将 `/api` 代理到后端的 `8080` 端口。
 
+## System prompt 变量
+
+`system_prompt.md` 支持显式变量替换。推荐使用 `{runtime_context}` 放置完整的时间、内部身份、Master、会话和消息格式信息。也可以单独使用：
+
+`{nickname}`、`{current_time}`、`{timezone}`、`{self_user_id}`、`{current_user_id}`、`{current_user_roles}`、`{conversation_id}`、`{conversation_kind}`、`{master_users}`、`{identity_context}`、`{message_format}`。
+
+替换器只处理上述变量，不会解释 prompt 中其他花括号。旧 prompt 如果没有使用任何运行时变量，会在末尾自动追加完整 `{runtime_context}`，以免丢失内部身份和 Master 信息。
+
 ## 容器集成验证
 
 完整镜像同时包含 Python 后端和构建后的 Vue WebUI。生产运行时由 Aiohttp 在 `8080` 端口提供 API 和前端静态资源，不运行 Vite 进程。

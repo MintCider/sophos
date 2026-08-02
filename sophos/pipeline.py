@@ -35,7 +35,7 @@ from sophos.commands import (
 from sophos.config import settings
 from sophos.db import get_pool
 from sophos.enrichment import get_enrichment_registry
-from sophos.identity_prompt import build_identity_block
+from sophos.identity_prompt import build_identity_variables
 from sophos.llm.context import (
     build_chat_context_snapshot,
     describe_schema,
@@ -50,6 +50,7 @@ from sophos.memory.profile import build_profile_block
 from sophos.message_store import MessageStore
 from sophos.messaging import MessageService
 from sophos.platform import ConversationKind, MessageEvent, PlatformAdapter, SendMessageRequest
+from sophos.prompt_template import render_system_prompt
 from sophos.tools.image_gen import IMAGE_GEN_TOOLS
 from sophos.tools.memory import MEMORY_TOOLS
 from sophos.tools.messaging import ALL_MESSAGING_TOOLS
@@ -261,7 +262,10 @@ def _load_system_prompt() -> str:
     except FileNotFoundError:
         if _system_prompt_cache is None:
             logger.warning("system_prompt.md not found, using fallback")
-            _system_prompt_cache = "你是 {nickname}，一个活跃在多个聊天平台中的助手。回复时请自然、简洁。"
+            _system_prompt_cache = (
+                "你是 {nickname}，一个活跃在多个聊天平台中的助手。回复时请自然、简洁。\n\n"
+                "{runtime_context}"
+            )
         return _system_prompt_cache
 
     if _system_prompt_cache is None or current_mtime != _system_prompt_mtime:
@@ -420,20 +424,28 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
     tz = ZoneInfo(settings.timezone)
     now_str = datetime.now(tz).strftime("%Y-%m-%d %H:%M")
     tz_label = settings.timezone
-    identity_block = await build_identity_block(
+    prompt_values = await build_identity_variables(
         get_pool(),
         current_user_id=ctx.user_id,
         self_user_id=ctx.self_user_id,
         conversation_id=ctx.conversation_id,
         conversation_kind=ctx.message.conversation.kind.value,
     )
-    meta = (
-        f"\n---\n"
+    runtime_context = (
         f"当前时间：{now_str} ({tz_label})\n"
-        f"{identity_block}\n"
+        f"{prompt_values['identity_context']}\n"
         f"消息格式：{fmt_desc}"
     )
-    system_prompt = _load_system_prompt().replace("{nickname}", nickname)
+    prompt_values.update(
+        {
+            "nickname": nickname,
+            "current_time": now_str,
+            "timezone": tz_label,
+            "message_format": fmt_desc,
+            "runtime_context": runtime_context,
+        }
+    )
+    system_prompt = render_system_prompt(_load_system_prompt(), prompt_values)
 
     # ── 记忆注入 ──
     memory_store = ctx.state.get("memory_store")
@@ -491,8 +503,6 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
             system_prompt += f"\n---\n{block}"
     except Exception:
         logger.warning("Failed to build recent global block", exc_info=True)
-
-    system_prompt += meta
 
     # 等待图片处理完成（如有），确保 LLM 能拿到图片描述
     msg_id = ctx.state.get("message_row_id")
