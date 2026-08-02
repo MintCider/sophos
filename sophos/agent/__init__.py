@@ -1,5 +1,11 @@
 """Provider-neutral agent workflow and transcript primitives."""
 
+from sophos.agent.config import (
+    load_active_workflow,
+    reset_active_workflow,
+    save_active_workflow,
+    validate_executable_workflow,
+)
 from sophos.agent.engine import (
     NodeOutcome,
     WorkflowEngine,
@@ -56,6 +62,10 @@ __all__ = [
     "WorkflowValidationError",
     "build_model_transition_tools",
     "collector_actor_workflow",
+    "load_active_workflow",
     "new_event",
+    "reset_active_workflow",
+    "save_active_workflow",
     "transcript_from_messages",
+    "validate_executable_workflow",
 ]

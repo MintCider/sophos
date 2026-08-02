@@ -33,6 +33,8 @@ _DEFAULTS: dict[str, Any] = {
     "forward_tail_count": 2,
     "forward_max_depth": 2,
     "reply_max_length": 100,
+    # Agent 工作流；None 使用内置 collector/actor 图
+    "agent_workflow": None,
     # 触发器引擎
     "trigger_delay": 2.0,
     "trigger_qps": 0.5,

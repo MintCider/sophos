@@ -26,9 +26,9 @@ from sophos.agent import (
     LLMWorkflowContext,
     WorkflowEngine,
     WorkflowRun,
-    collector_actor_workflow,
     transcript_from_messages,
 )
+from sophos.agent.config import load_active_workflow
 from sophos.commands import (
     CommandContext,
     handle_bot_command,
@@ -645,7 +645,7 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
             return trigger_provider
         raise RuntimeError(f"No provider configured for workflow model slot: {slot}")
 
-    workflow = collector_actor_workflow()
+    workflow = load_active_workflow()
     transcript = transcript_from_messages(messages)
     llm_context = LLMWorkflowContext(
         messages=messages,
