@@ -102,6 +102,18 @@ CREATE TABLE user_roles (
 );
 """
 
+_CREATE_IDENTITY_AUTH_AUDIT_TABLE = """\
+CREATE TABLE identity_auth_audit (
+    id                  BIGSERIAL       PRIMARY KEY,
+    identity_id         BIGINT          NOT NULL,
+    source_user_id      BIGINT          NOT NULL,
+    target_user_id      BIGINT          NOT NULL,
+    verified_by_user_id BIGINT          NOT NULL,
+    verification_method TEXT            NOT NULL,
+    created_at          TIMESTAMPTZ     NOT NULL DEFAULT now()
+);
+"""
+
 _CREATE_PLATFORM_ACCOUNTS_TABLE = """\
 CREATE TABLE platform_accounts (
     id                  BIGSERIAL       PRIMARY KEY,
@@ -484,6 +496,7 @@ async def _init_schema(pool: asyncpg.Pool) -> None:
                 _CREATE_USERS_TABLE,
                 _CREATE_USER_IDENTITIES_TABLE,
                 _CREATE_USER_ROLES_TABLE,
+                _CREATE_IDENTITY_AUTH_AUDIT_TABLE,
                 _CREATE_PLATFORM_ACCOUNTS_TABLE,
                 _CREATE_ADAPTER_BINDINGS_TABLE,
                 _CREATE_CONVERSATIONS_TABLE,

@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 import aiohttp
 from aiohttp import web
 
-from sophos import runtime_config
+from sophos import permission, runtime_config
 from sophos.adapter_router import AdapterRouter
 from sophos.api import create_app
 from sophos.cleanup import run_cleanup_loop
@@ -147,6 +147,7 @@ async def start() -> None:
 
     # 初始化运行时配置
     await runtime_config.init(pool)
+    await permission.init(pool)
 
     # 初始化 LLM provider 管理器
     provider_mgr = ProviderManager(pool)

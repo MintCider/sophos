@@ -49,13 +49,11 @@ _WAITING_FORMAT = (
 
 # ── 类型 ──────────────────────────────────────────────────────
 
-ContextKey = tuple[str, int]  # ("group", group_id) | ("private", user_id)
+ContextKey = tuple[str, int]  # ("conversation", internal conversation_id)
 
 
 def _context_key(ctx: PipelineContext) -> ContextKey:
-    if ctx.message_type == "group":
-        return ("group", ctx.group_id)  # type: ignore[return-value]
-    return ("private", ctx.user_id)
+    return ("conversation", ctx.conversation_id)
 
 
 # ── Token Bucket ──────────────────────────────────────────────

@@ -52,6 +52,13 @@ interface PolicyItem {
   note: string | null
 }
 
+interface UserItem {
+  user_id: number
+  display_name: string
+  roles: string[]
+  identities: Array<{ platform: string; display_name: string }>
+}
+
 // ── 常量 ──
 
 const ALL_PERMS = [
@@ -62,8 +69,7 @@ const ALL_PERMS = [
 ].map(p => ({ label: p, value: p }))
 
 const SCOPE_TYPES = [
-  { label: '群聊', value: 'group' },
-  { label: '私聊', value: 'private' },
+  { label: '会话', value: 'conversation' },
   { label: '全局', value: 'global' },
 ]
 
@@ -76,6 +82,7 @@ const message = useMessage()
 const scopes = ref<ScopeItem[]>([])
 const grants = ref<GrantItem[]>([])
 const policies = ref<PolicyItem[]>([])
+const users = ref<UserItem[]>([])
 const availableTools = ref<string[]>([])
 
 const expandedScope = ref('')
@@ -92,10 +99,12 @@ const deletePolicyTarget = ref<PolicyItem | null>(null)
 
 // ── 表单 ──
 
-const scopeForm = reactive({ scope_type: 'group', scope_id: '', enabled: true })
-const grantForm = reactive({ user_id: '', scope_type: 'global', scope_id: '0', permission: '' })
+const scopeForm = reactive({ scope_type: 'conversation', scope_id: '', enabled: true })
+const grantForm = reactive<{ user_id: number | null; scope_type: string; scope_id: string; permission: string }>({
+  user_id: null, scope_type: 'global', scope_id: '0', permission: '',
+})
 const policyForm = reactive({
-  user_id: '', scope_type: 'global', scope_id: '0',
+  user_id: null as number | null, scope_type: 'global', scope_id: '0',
   suppress_llm_trigger: true, rate_multiplier: 0, suppress_refresh: true, note: '',
 })
 
@@ -108,11 +117,11 @@ function scopeKey(s: { scope_type: string; scope_id: number }) {
 }
 
 function scopeLabel(t: string) {
-  return ({ group: '群聊', private: '私聊', global: '全局' } as Record<string, string>)[t] ?? t
+  return ({ conversation: '会话', global: '全局' } as Record<string, string>)[t] ?? t
 }
 
 function scopeTagType(t: string) {
-  return ({ group: 'info', private: 'success', global: 'warning' } as Record<string, string>)[t] as
+  return ({ conversation: 'info', global: 'warning' } as Record<string, string>)[t] as
     'info' | 'success' | 'warning' | undefined
 }
 
@@ -127,6 +136,16 @@ const availableToolOptions = computed(() => (
   availableTools.value.map(name => ({ label: name, value: name }))
 ))
 
+const userOptions = computed(() => users.value.map(user => ({
+  value: user.user_id,
+  label: `${user.display_name || '未命名用户'} (#${user.user_id})${user.roles.includes('master') ? ' [Master]' : ''}`,
+})))
+
+function userLabel(userId: number) {
+  const user = users.value.find(item => item.user_id === userId)
+  return user ? `${user.display_name || '未命名用户'} (#${userId})` : `#${userId}`
+}
+
 function toolOptionsFor(scope: ScopeItem) {
   const selected = new Set(scope.tools ?? [])
   return availableToolOptions.value.filter(option => !selected.has(option.value))
@@ -138,20 +157,20 @@ function toggleExpanded(scope: ScopeItem) {
 }
 
 function resetScopeForm() {
-  scopeForm.scope_type = 'group'
+  scopeForm.scope_type = 'conversation'
   scopeForm.scope_id = ''
   scopeForm.enabled = true
 }
 
 function resetGrantForm() {
-  grantForm.user_id = ''
+  grantForm.user_id = null
   grantForm.scope_type = 'global'
   grantForm.scope_id = '0'
   grantForm.permission = ''
 }
 
 function resetPolicyForm() {
-  policyForm.user_id = ''
+  policyForm.user_id = null
   policyForm.scope_type = 'global'
   policyForm.scope_id = '0'
   policyForm.suppress_llm_trigger = true
@@ -180,6 +199,15 @@ async function loadAvailableTools() {
       .sort((a: string, b: string) => a.localeCompare(b))
   } catch (e: any) {
     message.error(errorText(e, '加载工具列表失败'))
+  }
+}
+
+async function loadUsers() {
+  try {
+    const { data } = await api.get('/permissions/users')
+    users.value = data.users
+  } catch (e: any) {
+    message.error(errorText(e, '加载统一用户失败'))
   }
 }
 
@@ -290,7 +318,7 @@ async function loadGrants() {
 
 async function createGrant() {
   if (!grantForm.user_id || Number(grantForm.user_id) <= 0 || !grantForm.permission) {
-    message.warning('请填写有效的用户 QQ 和权限')
+    message.warning('请选择统一用户并填写权限')
     return
   }
   if (grantForm.scope_type !== 'global' && Number(grantForm.scope_id) <= 0) {
@@ -343,7 +371,7 @@ async function loadPolicies() {
 
 async function createPolicy() {
   if (!policyForm.user_id || Number(policyForm.user_id) <= 0) {
-    message.warning('请输入有效的用户 QQ')
+    message.warning('请选择统一用户')
     return
   }
   if (policyForm.scope_type !== 'global' && Number(policyForm.scope_id) <= 0) {
@@ -409,6 +437,7 @@ onMounted(() => {
   loadGrants()
   loadPolicies()
   loadAvailableTools()
+  loadUsers()
 })
 </script>
 
@@ -537,7 +566,7 @@ onMounted(() => {
             class="grant-row glass-panel-heavy"
           >
             <div class="grant-info">
-              <span class="grant-user">{{ g.user_id }}</span>
+              <span class="grant-user">{{ userLabel(g.user_id) }}</span>
               <NTag
                 size="small" round :bordered="false"
                 :type="scopeTagType(g.scope_type)"
@@ -580,7 +609,7 @@ onMounted(() => {
           >
             <div class="perm-card__top">
               <div class="perm-card__info">
-                <span class="policy-user">{{ p.user_id }}</span>
+                <span class="policy-user">{{ userLabel(p.user_id) }}</span>
                 <NTag
                   size="small" round :bordered="false"
                   :type="scopeTagType(p.scope_type)"
@@ -649,8 +678,8 @@ onMounted(() => {
             <NSelect v-model:value="scopeForm.scope_type" :options="SESSION_SCOPE_TYPES" />
           </label>
           <label class="field-label">
-            <span>{{ scopeForm.scope_type === 'group' ? '群号' : '用户 QQ' }}</span>
-            <NInput v-model:value="scopeForm.scope_id" placeholder="输入 ID" />
+            <span>内部会话 ID</span>
+            <NInput v-model:value="scopeForm.scope_id" placeholder="conversation_id" />
           </label>
           <label class="field-label">
             <span>启用</span>
@@ -671,16 +700,16 @@ onMounted(() => {
       <NDrawerContent title="添加授权" closable>
         <div class="drawer-form">
           <label class="field-label">
-            <span>用户 QQ</span>
-            <NInput v-model:value="grantForm.user_id" placeholder="QQ 号" />
+            <span>统一用户</span>
+            <NSelect v-model:value="grantForm.user_id" :options="userOptions" filterable />
           </label>
           <label class="field-label">
             <span>作用域</span>
             <NSelect v-model:value="grantForm.scope_type" :options="SCOPE_TYPES" />
           </label>
           <label v-if="grantForm.scope_type !== 'global'" class="field-label">
-            <span>{{ grantForm.scope_type === 'group' ? '群号' : '用户 QQ' }}</span>
-            <NInput v-model:value="grantForm.scope_id" placeholder="输入 ID" />
+            <span>内部会话 ID</span>
+            <NInput v-model:value="grantForm.scope_id" placeholder="conversation_id" />
           </label>
           <label class="field-label">
             <span>权限</span>
@@ -701,16 +730,16 @@ onMounted(() => {
       <NDrawerContent title="添加触发策略" closable>
         <div class="drawer-form">
           <label class="field-label">
-            <span>用户 QQ</span>
-            <NInput v-model:value="policyForm.user_id" placeholder="QQ 号" />
+            <span>统一用户</span>
+            <NSelect v-model:value="policyForm.user_id" :options="userOptions" filterable />
           </label>
           <label class="field-label">
             <span>作用域</span>
             <NSelect v-model:value="policyForm.scope_type" :options="SCOPE_TYPES" />
           </label>
           <label v-if="policyForm.scope_type !== 'global'" class="field-label">
-            <span>{{ policyForm.scope_type === 'group' ? '群号' : '用户 QQ' }}</span>
-            <NInput v-model:value="policyForm.scope_id" placeholder="输入 ID" />
+            <span>内部会话 ID</span>
+            <NInput v-model:value="policyForm.scope_id" placeholder="conversation_id" />
           </label>
           <label class="field-label">
             <span>抑制 LLM 触发</span>

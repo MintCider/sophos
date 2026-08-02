@@ -57,8 +57,7 @@ async def build_chat_context(
 
     Args:
         store:         消息存储实例
-        group_id:      群聊 ID（群聊时传入）
-        user_id:       用户 ID（私聊时传入）
+        conversation_id: Sophos 内部会话 ID
         system_prompt: 系统提示词
 
     Returns:

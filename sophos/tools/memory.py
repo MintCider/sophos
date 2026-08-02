@@ -75,10 +75,7 @@ class SetProfileContextTool(Tool):
 
     async def execute(self, params: dict[str, Any], context: dict[str, Any]) -> Any:
         store = context["memory_store"]
-        msg_type = context["message_type"]
-        scope_type = "group" if msg_type == "group" else "private"
-        scope_id = context["group_id"] if msg_type == "group" else context["user_id"]
-        return await store.set_profile_context(scope_type, scope_id, params["content"])
+        return await store.set_profile_context("conversation", context["conversation_id"], params["content"])
 
 
 class SetProfileUserTool(Tool):
@@ -109,7 +106,7 @@ class SetProfileUserTool(Tool):
         return {
             "type": "object",
             "properties": {
-                "user_id": {"type": "integer", "description": "用户 QQ 号"},
+                "user_id": {"type": "integer", "description": "Sophos 内部用户 ID"},
                 "content": {"type": "string", "description": "档案内容"},
                 "keywords": {
                     "type": "array",
@@ -160,10 +157,7 @@ class WriteMemoryTool(Tool):
 
     async def execute(self, params: dict[str, Any], context: dict[str, Any]) -> Any:
         store = context["memory_store"]
-        msg_type = context["message_type"]
-        scope = "group" if msg_type == "group" else "private"
-        scope_id = context["group_id"] if msg_type == "group" else context["user_id"]
-        return await store.write_memory(params["content"], scope, scope_id)
+        return await store.write_memory(params["content"], "conversation", context["conversation_id"])
 
 
 class SearchMemoryTool(Tool):

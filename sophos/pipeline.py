@@ -34,6 +34,7 @@ from sophos.commands import (
 from sophos.config import settings
 from sophos.db import get_pool
 from sophos.enrichment import get_enrichment_registry
+from sophos.identity_prompt import build_identity_block
 from sophos.llm.context import (
     build_chat_context_snapshot,
     describe_schema,
@@ -287,7 +288,7 @@ def _load_system_prompt() -> str:
     except FileNotFoundError:
         if _system_prompt_cache is None:
             logger.warning("system_prompt.md not found, using fallback")
-            _system_prompt_cache = "你是 {nickname}，一个活跃在 QQ 群聊中的猫娘。回复时请自然、简洁。"
+            _system_prompt_cache = "你是 {nickname}，一个活跃在多个聊天平台中的助手。回复时请自然、简洁。"
         return _system_prompt_cache
 
     if _system_prompt_cache is None or current_mtime != _system_prompt_mtime:
@@ -314,19 +315,19 @@ def _format_recent_global_block(
 ) -> str:
     """将跨上下文最近消息格式化为 [最近动态] 块。
 
-    按 (message_type, group_id/user_id) 分组，每组内时间正序。
+    按内部 conversation_id 分组，每组内时间正序。
     """
     from collections import defaultdict
 
     groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for r in rows:
-        key = f"group:{r.get('group_id', 0)}" if r.get("message_type") == "group" else f"private:{r.get('user_id', 0)}"
+        key = f"{r.get('conversation_kind', 'conversation')}:{r.get('conversation_id', 0)}"
         groups[key].append(r)
 
     sections: list[str] = []
     for key, msgs in groups.items():
         kind, id_str = key.split(":", 1)
-        header = f"## 群聊 {id_str}" if kind == "group" else f"## 私聊 {id_str}"
+        header = f"## {kind} conversation_id={id_str}"
 
         lines: list[str] = [header]
         for m in msgs:
@@ -420,7 +421,7 @@ def _sanitize_fallback_reply(text: str) -> str | None:
         logger.warning("Fallback content looks like raw tool call (%s), skipping", m.group(1))
         return None
 
-    # 纯 JSON 对象 → 可能是 send_msg 参数
+    # 纯 JSON 对象 → 可能是 send_message 参数
     if stripped.startswith("{") and stripped.endswith("}"):
         try:
             data = json.loads(stripped)
@@ -436,7 +437,7 @@ def _sanitize_fallback_reply(text: str) -> str | None:
 
 
 async def _handle_llm_trigger(ctx: PipelineContext) -> None:
-    """构建上下文 → tool loop → LLM 通过 send_msg tool 回复。"""
+    """构建上下文 → tool loop → LLM 通过 send_message tool 回复。"""
     provider = ctx.provider_mgr.get_provider()
     registry = _get_registry()
     await _load_tool_disabled_state(registry)
@@ -446,20 +447,19 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
     tz = ZoneInfo(settings.timezone)
     now_str = datetime.now(tz).strftime("%Y-%m-%d %H:%M")
     tz_label = settings.timezone
-    if ctx.message_type == "group":
-        meta = (
-            f"\n---\n"
-            f"当前时间：{now_str} ({tz_label})\n"
-            f"当前会话：群聊 | 群号: {ctx.group_id} | 你的QQ: {ctx.self_id}\n"
-            f"消息格式：{fmt_desc}"
-        )
-    else:
-        meta = (
-            f"\n---\n"
-            f"当前时间：{now_str} ({tz_label})\n"
-            f"当前会话：私聊 | 对方QQ: {ctx.user_id} | 你的QQ: {ctx.self_id}\n"
-            f"消息格式：{fmt_desc}"
-        )
+    identity_block = await build_identity_block(
+        get_pool(),
+        current_user_id=ctx.user_id,
+        self_user_id=ctx.self_user_id,
+        conversation_id=ctx.conversation_id,
+        conversation_kind=ctx.message.conversation.kind.value,
+    )
+    meta = (
+        f"\n---\n"
+        f"当前时间：{now_str} ({tz_label})\n"
+        f"{identity_block}\n"
+        f"消息格式：{fmt_desc}"
+    )
     system_prompt = _load_system_prompt().replace("{nickname}", nickname)
 
     # ── 记忆注入 ──
@@ -468,10 +468,8 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
         # 保持 embedding provider 同步
         memory_store.update_embedding_provider(ctx.provider_mgr.get_embedding_provider())
 
-        scope_type = "group" if ctx.message_type == "group" else "private"
-        scope_id: int = ctx.group_id if ctx.message_type == "group" else ctx.user_id  # type: ignore[assignment]
-        if scope_id is None:
-            scope_id = ctx.user_id
+        scope_type = "conversation"
+        scope_id = ctx.conversation_id
 
         # 获取最近消息用于档案和联想
         recent_rows = await ctx.store.get_context(
@@ -542,8 +540,8 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
     from sophos import user_policy as _up
 
     _up_cache = await _up._ensure_cache(get_pool())
-    _refresh_scope_type = "group" if ctx.message_type == "group" else "private"
-    _refresh_scope_id: int = ctx.group_id if ctx.message_type == "group" else ctx.user_id  # type: ignore[assignment]
+    _refresh_scope_type = "conversation"
+    _refresh_scope_id = ctx.conversation_id
     _suppressed_uids = _up.get_refresh_suppressed_users(
         _up_cache,
         _refresh_scope_type,
@@ -614,8 +612,8 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
     from sophos import permission as _perm
 
     _pool = get_pool()
-    _scope_type = "group" if ctx.message_type == "group" else "private"
-    _scope_id: int = ctx.group_id if ctx.message_type == "group" else ctx.user_id  # type: ignore[assignment]
+    _scope_type = "conversation"
+    _scope_id = ctx.conversation_id
     whitelist = await _perm.get_tool_whitelist(_pool, _scope_type, _scope_id)
     if whitelist is not None:
         allowed = set(whitelist)
@@ -809,8 +807,8 @@ class CheckScopeStage(Stage):
     async def execute(self, ctx: PipelineContext, next_stage: NextFn) -> None:
         from sophos import permission as _perm
 
-        scope_type = "group" if ctx.message_type == "group" else "private"
-        scope_id: int = ctx.group_id if ctx.message_type == "group" else ctx.user_id  # type: ignore[assignment]
+        scope_type = "conversation"
+        scope_id = ctx.conversation_id
         pool = get_pool()
 
         # 会话已启用 → 放行
@@ -844,7 +842,7 @@ class CheckScopeStage(Stage):
                 await next_stage()
                 return
             # 群聊：bot.group 权限
-            if scope_type == "group" and await _perm.has_permission(
+            if ctx.message_type == "group" and await _perm.has_permission(
                 pool,
                 ctx.user_id,
                 scope_type,
@@ -855,7 +853,7 @@ class CheckScopeStage(Stage):
                 await next_stage()
                 return
             # 私聊：bot.private 权限
-            if scope_type == "private" and await _perm.has_permission(
+            if ctx.message_type == "private" and await _perm.has_permission(
                 pool,
                 ctx.user_id,
                 "global",
@@ -894,8 +892,8 @@ class HandleCommandStage(Stage):
 
         text = ctx.state.get("_cmd_text") or _strip_at_prefix(ctx)
         pool = get_pool()
-        scope_type = "group" if ctx.message_type == "group" else "private"
-        scope_id: int = ctx.group_id if ctx.message_type == "group" else ctx.user_id  # type: ignore[assignment]
+        scope_type = "conversation"
+        scope_id = ctx.conversation_id
 
         # 无需权限
         if text == ".ping":
@@ -934,11 +932,11 @@ class HandleCommandStage(Stage):
                     _perm.is_master(ctx.user_id)
                     or await _perm.has_permission(pool, ctx.user_id, "global", 0, "bot")
                     or (
-                        scope_type == "group"
+                        ctx.message_type == "group"
                         and await _perm.has_permission(pool, ctx.user_id, scope_type, scope_id, "bot.group")
                     )
                     or (
-                        scope_type == "private"
+                        ctx.message_type == "private"
                         and await _perm.has_permission(pool, ctx.user_id, "global", 0, "bot.private")
                     )
                 )
@@ -1086,8 +1084,8 @@ class TriggerLLMStage(Stage):
         cfg = await trigger.load(pool)
         engine = get_trigger_engine()
 
-        scope_type = "group" if ctx.message_type == "group" else "private"
-        scope_id: int = ctx.group_id if ctx.message_type == "group" else ctx.user_id  # type: ignore[assignment]
+        scope_type = "conversation"
+        scope_id = ctx.conversation_id
         policy = await user_policy.get_policy(pool, ctx.user_id, scope_type, scope_id)
 
         # 计算简易触发

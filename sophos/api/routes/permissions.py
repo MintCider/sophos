@@ -9,7 +9,7 @@ from sophos import permission, user_policy
 
 routes = web.RouteTableDef()
 
-_SESSION_SCOPE_TYPES = frozenset({"group", "private"})
+_SESSION_SCOPE_TYPES = frozenset({"conversation"})
 _ALL_SCOPE_TYPES = _SESSION_SCOPE_TYPES | {"global"}
 _PERMISSIONS = frozenset(
     {
@@ -29,12 +29,12 @@ _PERMISSIONS = frozenset(
 
 def _validate_session_scope_type(scope_type: str) -> None:
     if scope_type not in _SESSION_SCOPE_TYPES:
-        raise web.HTTPBadRequest(reason="会话类型必须是 group 或 private")
+        raise web.HTTPBadRequest(reason="会话作用域类型必须是 conversation")
 
 
 def _validate_scope(scope_type: str, scope_id: int) -> None:
     if scope_type not in _ALL_SCOPE_TYPES:
-        raise web.HTTPBadRequest(reason="作用域类型必须是 global、group 或 private")
+        raise web.HTTPBadRequest(reason="作用域类型必须是 global 或 conversation")
     if scope_type == "global" and scope_id != 0:
         raise web.HTTPBadRequest(reason="global 作用域的 scope_id 必须为 0")
     if scope_type != "global" and scope_id <= 0:
@@ -57,6 +57,46 @@ def _parse_float(value: object, field: str) -> float:
     return parsed
 
 
+async def _require_user(pool: asyncpg.Pool, user_id: int) -> None:
+    if not await pool.fetchval("SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)", user_id):
+        raise web.HTTPBadRequest(reason=f"内部用户不存在: {user_id}")
+
+
+async def _require_scope_reference(pool: asyncpg.Pool, scope_type: str, scope_id: int) -> None:
+    if scope_type == "conversation" and not await pool.fetchval(
+        "SELECT EXISTS(SELECT 1 FROM conversations WHERE id = $1)", scope_id
+    ):
+        raise web.HTTPBadRequest(reason=f"内部会话不存在: {scope_id}")
+
+
+@routes.get("/api/permissions/users")
+async def list_users(request: web.Request) -> web.Response:
+    """List unified users with platform identity labels for permission management."""
+    pool: asyncpg.Pool = request.app["pool"]
+    rows = await pool.fetch(
+        """
+        SELECT u.id AS user_id, u.display_name,
+               COALESCE((
+                   SELECT jsonb_agg(jsonb_build_object(
+                       'identity_id', i.id,
+                       'platform', i.platform,
+                       'identity_namespace', i.identity_namespace,
+                       'display_name', i.display_name,
+                       'verified_at', i.verified_at
+                   ) ORDER BY i.id)
+                   FROM user_identities i WHERE i.user_id = u.id
+               ), '[]'::jsonb) AS identities,
+               COALESCE((
+                   SELECT array_agg(r.role ORDER BY r.role)
+                   FROM user_roles r WHERE r.user_id = u.id
+               ), '{}') AS roles
+        FROM users u
+        ORDER BY u.id
+        """
+    )
+    return web.json_response({"users": [dict(row) for row in rows]})
+
+
 # ── 会话权限 (perm_scope + perm_tool) ─────────────────────
 
 
@@ -65,27 +105,29 @@ async def list_scopes(request: web.Request) -> web.Response:
     """列出所有会话权限，附带工具白名单。"""
     pool: asyncpg.Pool = request.app["pool"]
     rows = await pool.fetch(
-        "SELECT scope_type, scope_id, enabled, updated_at "
-        "FROM perm_scope WHERE scope_type = ANY($1::text[]) "
-        "ORDER BY scope_type, scope_id",
+        """
+        SELECT s.scope_type, s.scope_id, s.enabled, s.updated_at,
+               array_agg(t.tool_name ORDER BY t.tool_name)
+                   FILTER (WHERE t.tool_name IS NOT NULL) AS tools
+        FROM perm_scope s
+        LEFT JOIN perm_tool t
+          ON t.scope_type = s.scope_type AND t.scope_id = s.scope_id
+        WHERE s.scope_type = ANY($1::text[])
+        GROUP BY s.scope_type, s.scope_id, s.enabled, s.updated_at
+        ORDER BY s.scope_type, s.scope_id
+        """,
         sorted(_SESSION_SCOPE_TYPES),
     )
-    scopes = []
-    for r in rows:
-        tools = await permission.get_tool_whitelist(
-            pool,
-            r["scope_type"],
-            r["scope_id"],
-        )
-        scopes.append(
-            {
-                "scope_type": r["scope_type"],
-                "scope_id": r["scope_id"],
-                "enabled": r["enabled"],
-                "updated_at": r["updated_at"].isoformat() if r["updated_at"] else None,
-                "tools": tools,
-            }
-        )
+    scopes = [
+        {
+            "scope_type": row["scope_type"],
+            "scope_id": row["scope_id"],
+            "enabled": row["enabled"],
+            "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
+            "tools": row["tools"],
+        }
+        for row in rows
+    ]
     return web.json_response({"scopes": scopes})
 
 
@@ -105,6 +147,7 @@ async def create_scope(request: web.Request) -> web.Response:
         raise web.HTTPBadRequest(reason="scope_id 不能为空")
     parsed_scope_id = _parse_int(scope_id, "scope_id")
     _validate_scope(scope_type, parsed_scope_id)
+    await _require_scope_reference(pool, scope_type, parsed_scope_id)
     if not isinstance(enabled, bool):
         raise web.HTTPBadRequest(reason="enabled 必须是布尔值")
 
@@ -124,6 +167,7 @@ async def update_scope(request: web.Request) -> web.Response:
     _validate_session_scope_type(scope_type)
     scope_id = _parse_int(request.match_info["scope_id"], "scope_id")
     _validate_scope(scope_type, scope_id)
+    await _require_scope_reference(pool, scope_type, scope_id)
     payload = await request.json()
     enabled = payload.get("enabled")
 
@@ -167,6 +211,7 @@ async def set_scope_tools(request: web.Request) -> web.Response:
     _validate_session_scope_type(scope_type)
     scope_id = _parse_int(request.match_info["scope_id"], "scope_id")
     _validate_scope(scope_type, scope_id)
+    await _require_scope_reference(pool, scope_type, scope_id)
     payload = await request.json()
     tools = payload.get("tools", [])
 
@@ -206,6 +251,7 @@ async def reset_scope_tools(request: web.Request) -> web.Response:
     _validate_session_scope_type(scope_type)
     scope_id = _parse_int(request.match_info["scope_id"], "scope_id")
     _validate_scope(scope_type, scope_id)
+    await _require_scope_reference(pool, scope_type, scope_id)
 
     await permission.reset_tools(pool, scope_type, scope_id)
     return web.json_response({"message": "已重置工具白名单（全部可用）"})
@@ -277,10 +323,12 @@ async def create_grant(request: web.Request) -> web.Response:
     if parsed_user_id <= 0:
         raise web.HTTPBadRequest(reason="user_id 必须是正整数")
     _validate_scope(scope_type, parsed_scope_id)
+    await _require_user(pool, parsed_user_id)
+    await _require_scope_reference(pool, scope_type, parsed_scope_id)
     if perm_name not in _PERMISSIONS:
         raise web.HTTPBadRequest(reason=f"未知权限: {perm_name}")
 
-    await permission.grant(pool, parsed_user_id, scope_type, parsed_scope_id, perm_name, 0)
+    await permission.grant(pool, parsed_user_id, scope_type, parsed_scope_id, perm_name, None)
     return web.json_response({"message": f"已授予用户 {user_id} 权限 {perm_name}"})
 
 
@@ -303,6 +351,8 @@ async def revoke_grant(request: web.Request) -> web.Response:
         raise web.HTTPBadRequest(reason="user_id 必须是正整数")
     parsed_scope_id = _parse_int(scope_id, "scope_id")
     _validate_scope(scope_type, parsed_scope_id)
+    await _require_user(pool, parsed_user_id)
+    await _require_scope_reference(pool, scope_type, parsed_scope_id)
     if perm_name not in _PERMISSIONS:
         raise web.HTTPBadRequest(reason=f"未知权限: {perm_name}")
 
@@ -354,6 +404,8 @@ async def upsert_policy(request: web.Request) -> web.Response:
     scope_type = str(payload.get("scope_type", "global"))
     scope_id = _parse_int(payload.get("scope_id", 0), "scope_id")
     _validate_scope(scope_type, scope_id)
+    await _require_user(pool, parsed_user_id)
+    await _require_scope_reference(pool, scope_type, scope_id)
     rate_multiplier = _parse_float(payload.get("rate_multiplier", 0.0), "rate_multiplier")
     if not math.isfinite(rate_multiplier) or not 0 <= rate_multiplier <= 10:
         raise web.HTTPBadRequest(reason="rate_multiplier 必须在 0–10 之间")

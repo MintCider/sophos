@@ -3,6 +3,7 @@ import unittest
 
 from sophos.db import (
     _CREATE_CONVERSATIONS_TABLE,
+    _CREATE_IDENTITY_AUTH_AUDIT_TABLE,
     _CREATE_INDEXES,
     _CREATE_MESSAGES_TABLE,
     _CREATE_USER_IDENTITIES_TABLE,
@@ -49,6 +50,7 @@ class DatabaseSchemaTests(unittest.TestCase):
         self.assertIn("platform, identity_namespace, external_user_id", _CREATE_USER_IDENTITIES_TABLE)
         self.assertIn("parent_conversation_id", _CREATE_CONVERSATIONS_TABLE)
         self.assertIn("'direct', 'group', 'channel', 'thread'", _CREATE_CONVERSATIONS_TABLE)
+        self.assertIn("verification_method", _CREATE_IDENTITY_AUTH_AUDIT_TABLE)
 
     def test_message_query_and_cleanup_indexes_are_declared(self) -> None:
         indexes = "\n".join(_CREATE_INDEXES)

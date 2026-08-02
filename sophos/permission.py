@@ -5,38 +5,53 @@ Flat ACL 模型：
 - perm_grant: 用户权限授予（行存在 = 已授权）
 - perm_tool:  工具白名单（无行 = 全部可用）
 
-Master 隐式拥有所有权限。缓存策略：首次访问全量加载，写操作后 invalidate。
+Master 角色来自 user_roles 并隐式拥有所有权限。缓存策略：首次访问全量加载，写操作后 invalidate。
 """
 
 import logging
 
 import asyncpg
 
-from sophos.config import settings
-
 logger = logging.getLogger(__name__)
 
 # ── Master ────────────────────────────────────────────────
 
-_masters: frozenset[int] | None = None
+_masters: frozenset[int] = frozenset()
+_roles_loaded = False
 
 
-def _get_masters() -> frozenset[int]:
-    global _masters  # noqa: PLW0603
-    if _masters is None:
-        raw = settings.master_qq
-        ids: list[int] = []
-        for part in raw.split(","):
-            part = part.strip()
-            if part.isdigit():
-                ids.append(int(part))
-        _masters = frozenset(ids)
+async def _ensure_role_cache(pool: asyncpg.Pool) -> frozenset[int]:
+    global _masters, _roles_loaded  # noqa: PLW0603
+    if not _roles_loaded:
+        rows = await pool.fetch("SELECT user_id FROM user_roles WHERE role = 'master'")
+        _masters = frozenset(int(row["user_id"]) for row in rows)
+        _roles_loaded = True
     return _masters
 
 
+async def init(pool: asyncpg.Pool) -> None:
+    """Load role and ACL caches before accepting events."""
+    await _ensure_role_cache(pool)
+    await _ensure_scope_cache(pool)
+    await _ensure_grant_cache(pool)
+
+
 def is_master(user_id: int) -> bool:
-    """检查是否为 master。"""
-    return user_id in _get_masters()
+    """检查已加载角色缓存；应用启动时由 init() 预加载。"""
+    return user_id in _masters
+
+
+async def list_masters(pool: asyncpg.Pool) -> list[dict[str, object]]:
+    """Return master users for dynamic agent identity metadata."""
+    await _ensure_role_cache(pool)
+    rows = await pool.fetch(
+        """
+        SELECT u.id AS user_id, u.display_name
+        FROM user_roles r JOIN users u ON u.id = r.user_id
+        WHERE r.role = 'master' ORDER BY u.id
+        """
+    )
+    return [dict(row) for row in rows]
 
 
 # ── 缓存 ─────────────────────────────────────────────────
@@ -98,7 +113,7 @@ async def has_permission(
     permission: str,
 ) -> bool:
     """检查用户是否拥有指定权限。Master 隐式通过。"""
-    if is_master(user_id):
+    if user_id in await _ensure_role_cache(pool):
         return True
     cache = await _ensure_grant_cache(pool)
     # scope-specific
@@ -138,7 +153,7 @@ async def grant(
     scope_type: str,
     scope_id: int,
     permission: str,
-    granted_by: int,
+    granted_by: int | None,
 ) -> None:
     """授予权限。"""
     await pool.execute(
@@ -178,7 +193,7 @@ async def batch_grant(
     scope_type: str,
     scope_id: int,
     permission: str,
-    granted_by: int,
+    granted_by: int | None,
 ) -> int:
     """批量授予权限。返回新增数量。"""
     if not user_ids:

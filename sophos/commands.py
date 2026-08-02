@@ -1,6 +1,6 @@
 """Dot-command 处理器。
 
-处理以 '.' 开头的管理命令（如 .llm），通过 QQ 消息交互。
+处理以 '.' 开头的管理命令（如 .llm），通过来源会话交互。
 """
 
 import logging
@@ -342,35 +342,38 @@ async def handle_trigger_command(
 
     elif sub == "mute":
         if len(parts) < 3:
-            reply = "用法: .trigger mute <QQ号> [备注]"
+            reply = "用法: .trigger mute <内部用户ID> [备注]"
         else:
             target = parts[2]
             if not target.isdigit():
-                reply = "QQ号 必须是数字"
+                reply = "内部用户ID必须是数字"
             else:
                 uid = int(target)
-                note = " ".join(parts[3:]) if len(parts) > 3 else None
-                from sophos import user_policy
+                if not await pool.fetchval("SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)", uid):
+                    reply = f"内部用户不存在: {uid}"
+                else:
+                    note = " ".join(parts[3:]) if len(parts) > 3 else None
+                    from sophos import user_policy
 
-                await user_policy.set_policy(
-                    pool,
-                    uid,
-                    suppress_llm_trigger=True,
-                    rate_multiplier=0.0,
-                    suppress_refresh=True,
-                    note=note,
-                )
-                reply = f"已静默用户 {uid}"
-                if note:
-                    reply += f" ({note})"
+                    await user_policy.set_policy(
+                        pool,
+                        uid,
+                        suppress_llm_trigger=True,
+                        rate_multiplier=0.0,
+                        suppress_refresh=True,
+                        note=note,
+                    )
+                    reply = f"已静默用户 {uid}"
+                    if note:
+                        reply += f" ({note})"
 
     elif sub == "unmute":
         if len(parts) < 3:
-            reply = "用法: .trigger unmute <QQ号>"
+            reply = "用法: .trigger unmute <内部用户ID>"
         else:
             target = parts[2]
             if not target.isdigit():
-                reply = "QQ号 必须是数字"
+                reply = "内部用户ID必须是数字"
             else:
                 uid = int(target)
                 from sophos import user_policy
@@ -416,7 +419,7 @@ async def handle_trigger_command(
                 if field not in valid_fields:
                     reply = f"未知字段: {field}\n可用: {', '.join(sorted(valid_fields))}"
                 elif len(parts) < 5:
-                    reply = f"用法: .trigger policy <QQ号> {field} <值>"
+                    reply = f"用法: .trigger policy <内部用户ID> {field} <值>"
                 else:
                     raw_val = " ".join(parts[4:]) if field == "note" else parts[4]
                     try:
@@ -452,8 +455,8 @@ async def handle_trigger_command(
             reply = (
                 "用法:\n"
                 "  .trigger policy                              — 列出所有策略\n"
-                "  .trigger policy <QQ号>                       — 查看用户策略\n"
-                "  .trigger policy <QQ号> <字段> <值>            — 修改字段\n"
+                "  .trigger policy <内部用户ID>                  — 查看用户策略\n"
+                "  .trigger policy <内部用户ID> <字段> <值>       — 修改字段\n"
                 "字段: suppress_llm_trigger, rate_multiplier, suppress_refresh, note"
             )
 
@@ -465,8 +468,8 @@ async def handle_trigger_command(
             "  .trigger at <on|off>  — @必回开关\n"
             "  .trigger add <词> <boost>\n"
             "  .trigger remove <词>\n"
-            "  .trigger mute <QQ号> [备注]  — 静默用户\n"
-            "  .trigger unmute <QQ号>       — 解除静默\n"
+            "  .trigger mute <内部用户ID> [备注]  — 静默用户\n"
+            "  .trigger unmute <内部用户ID>       — 解除静默\n"
             "  .trigger policy              — 用户策略管理"
         )
 
@@ -825,33 +828,47 @@ _PERM_ALIASES: dict[str, str] = {
 
 
 async def _resolve_targets(
-    api: OneBotAPI,
     target: str,
-    group_id: int | None,
+    *,
+    event: dict[str, Any],
+    pool: asyncpg.Pool,
 ) -> list[int] | str:
     """解析目标用户。返回 user_id 列表或错误消息字符串。"""
-    if target == "admins":
-        if group_id is None:
-            return "admins 仅限群聊使用"
-        members = await api.call("get_group_member_list", {"group_id": group_id})
-        if not isinstance(members, list):
-            return "获取群成员列表失败"
-        return [m["user_id"] for m in members if m.get("role") in ("owner", "admin")]
-    if target == "all":
-        if group_id is None:
-            return "all 仅限群聊使用"
-        members = await api.call("get_group_member_list", {"group_id": group_id})
-        if not isinstance(members, list):
-            return "获取群成员列表失败"
-        return [m["user_id"] for m in members]
-    # 逗号分隔的 QQ 号
+    if target in {"admins", "all"}:
+        from sophos.messaging import MessageService
+        from sophos.platform import Capability, ConversationKind
+
+        service = event.get("_sophos_message_service")
+        conversation_id = event.get("_sophos_conversation_id")
+        if not isinstance(service, MessageService) or not isinstance(conversation_id, int):
+            return "当前消息缺少统一会话上下文"
+        conversation = await service.platform_store.get_conversation(conversation_id)
+        if conversation is None or conversation.kind != ConversationKind.GROUP:
+            return f"{target} 仅限群组会话使用"
+        adapter = service.router.for_account(conversation.account_id, Capability.MEMBER_LIST)
+        list_members = getattr(adapter, "list_conversation_members", None)
+        if list_members is None:
+            return "当前平台不支持成员目录"
+        members = await list_members(conversation)
+        if target == "admins":
+            members = [member for member in members if member.get("role") in {"owner", "admin"}]
+        return [int(member["user_id"]) for member in members]
+
+    # 逗号分隔的内部用户 ID
     ids: list[int] = []
     for part in target.split(","):
         part = part.strip()
         if not part.isdigit():
-            return f"无效的 QQ 号: {part}"
+            return f"无效的内部用户ID: {part}"
         ids.append(int(part))
-    return ids
+    existing = {
+        int(row["id"])
+        for row in await pool.fetch("SELECT id FROM users WHERE id = ANY($1::bigint[])", ids)
+    }
+    missing = [user_id for user_id in ids if user_id not in existing]
+    if missing:
+        return f"内部用户不存在: {', '.join(map(str, missing))}"
+    return list(dict.fromkeys(ids))
 
 
 # ── .help ─────────────────────────────────────────────────
@@ -1000,7 +1017,7 @@ async def _can_delegate_perm(
 
     规则：
     - bot + delegate → 可分发 bot 和 bot.group
-    - bot.group + delegate → 可分发当前群的 bot.group
+    - bot.group + delegate → 可分发当前会话的 bot.group
     - bot.private → 仅 master（调用方已处理）
     - 其他 cmd.* → 拥有该权限即可分发
     """
@@ -1011,8 +1028,8 @@ async def _can_delegate_perm(
         # 有 bot 全局权限 → 可分发 bot 和 bot.group
         if await has_perm_fn(pool, user_id, "global", 0, "bot"):
             return True
-        # 有当前群 bot.group → 只能分发当前群 bot.group
-        if perm_name == "bot.group" and scope_type == "group":
+        # 有当前会话 bot.group → 只能分发当前会话 bot.group
+        if perm_name == "bot.group" and scope_type == "conversation":
             return await has_perm_fn(pool, user_id, scope_type, scope_id, "bot.group")
         return False
     # 其他权限：拥有即可分发
@@ -1073,31 +1090,32 @@ async def handle_perm_command(
             ):
                 reply = f"你没有权限授予 {perm_alias}"
             else:
-                targets = await _resolve_targets(api, parts[3], group_id)
+                targets = await _resolve_targets(parts[3], event=event, pool=pool)
                 if isinstance(targets, str):
                     reply = targets
                 elif perm_name == "bot.private":
-                    # 双写：perm_grant + perm_scope
-                    count = 0
-                    for tid in targets:
-                        await permission.grant(pool, tid, "global", 0, "bot.private", user_id)
-                        await permission.set_scope_enabled(pool, "private", tid, True)
-                        count += 1
-                    reply = f"已为 {count} 人开通私聊"
+                    count = await permission.batch_grant(
+                        pool,
+                        targets,
+                        "global",
+                        0,
+                        "bot.private",
+                        user_id,
+                    )
+                    reply = f"已授予 {count} 人私聊启用权限"
                 elif perm_name == "bot.group":
-                    # 绑定当前群
                     if group_id is None:
-                        reply = "bot.group 仅限群聊中使用"
+                        reply = "bot.group 仅限群组会话中使用"
                     else:
                         count = await permission.batch_grant(
                             pool,
                             targets,
-                            "group",
-                            group_id,
+                            scope_type,
+                            scope_id,
                             "bot.group",
                             user_id,
                         )
-                        reply = f"已授予 {count} 人当前群 bot.group 权限"
+                        reply = f"已授予 {count} 人当前会话 bot.group 权限"
                 elif perm_name == "bot":
                     # 全局 bot 权限
                     count = await permission.batch_grant(
@@ -1142,29 +1160,30 @@ async def handle_perm_command(
             ):
                 reply = f"你没有权限撤销 {perm_alias}"
             else:
-                targets = await _resolve_targets(api, parts[3], group_id)
+                targets = await _resolve_targets(parts[3], event=event, pool=pool)
                 if isinstance(targets, str):
                     reply = targets
                 elif perm_name == "bot.private":
-                    # 双写：删 perm_grant + 关 perm_scope
-                    count = 0
-                    for tid in targets:
-                        await permission.revoke(pool, tid, "global", 0, "bot.private")
-                        await permission.set_scope_enabled(pool, "private", tid, False)
-                        count += 1
-                    reply = f"已关闭 {count} 人的私聊"
+                    count = await permission.batch_revoke(
+                        pool,
+                        targets,
+                        "global",
+                        0,
+                        "bot.private",
+                    )
+                    reply = f"已撤销 {count} 人的私聊启用权限"
                 elif perm_name == "bot.group":
                     if group_id is None:
-                        reply = "bot.group 仅限群聊中使用"
+                        reply = "bot.group 仅限群组会话中使用"
                     else:
                         count = await permission.batch_revoke(
                             pool,
                             targets,
-                            "group",
-                            group_id,
+                            scope_type,
+                            scope_id,
                             "bot.group",
                         )
-                        reply = f"已撤销 {count} 人当前群 bot.group 权限"
+                        reply = f"已撤销 {count} 人当前会话 bot.group 权限"
                 elif perm_name == "bot":
                     count = await permission.batch_revoke(
                         pool,
@@ -1185,12 +1204,12 @@ async def handle_perm_command(
                     reply = f"已撤销 {count} 人的 {perm_alias} 权限"
 
     elif sub == "list":
-        target_qq = parts[2] if len(parts) > 2 else None
-        if target_qq:
-            if not target_qq.isdigit():
-                reply = "用法: .perm list [QQ号]"
+        target_user = parts[2] if len(parts) > 2 else None
+        if target_user:
+            if not target_user.isdigit():
+                reply = "用法: .perm list [内部用户ID]"
             else:
-                uid = int(target_qq)
+                uid = int(target_user)
                 perms = await permission.list_user_grants(pool, uid, scope_type, scope_id)
                 reply = f"{uid} 的权限: {', '.join(perms)}" if perms else f"{uid} 无权限"
         else:
@@ -1211,9 +1230,9 @@ async def handle_perm_command(
             "  .perm                          — 权限概览\n"
             "  .perm grant <权限> <目标>       — 授予权限\n"
             "  .perm revoke <权限> <目标>      — 撤销权限\n"
-            "  .perm list [QQ号]              — 列出权限\n"
+            "  .perm list [内部用户ID]         — 列出权限\n"
             f"权限: {', '.join(sorted(_PERM_ALIASES))}\n"
-            "目标: QQ号 | QQ1,QQ2 | admins | all"
+            "目标: 内部用户ID | ID1,ID2 | admins | all"
         )
 
     await _reply(api, event, reply)

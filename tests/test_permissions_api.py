@@ -14,11 +14,16 @@ from sophos.api.routes.permissions import (
 class PermissionApiValidationTests(unittest.TestCase):
     def test_valid_scopes(self) -> None:
         _validate_scope("global", 0)
-        _validate_scope("group", 123)
-        _validate_scope("private", 456)
+        _validate_scope("conversation", 123)
 
     def test_invalid_scope_combinations_are_rejected(self) -> None:
-        for scope_type, scope_id in (("global", 1), ("group", 0), ("private", -1), ("other", 1)):
+        for scope_type, scope_id in (
+            ("global", 1),
+            ("conversation", 0),
+            ("group", 1),
+            ("private", 1),
+            ("other", 1),
+        ):
             with self.subTest(scope_type=scope_type, scope_id=scope_id), self.assertRaises(web.HTTPBadRequest):
                 _validate_scope(scope_type, scope_id)
 
@@ -33,6 +38,7 @@ class PermissionApiValidationTests(unittest.TestCase):
 
     def test_expected_routes_are_registered(self) -> None:
         registered = {(route.method, route.path) for route in routes}
+        self.assertIn(("GET", "/api/permissions/users"), registered)
         self.assertIn(("GET", "/api/permissions/scopes"), registered)
         self.assertIn(("PUT", "/api/permissions/scopes/{scope_type}/{scope_id}/tools"), registered)
         self.assertIn(("POST", "/api/permissions/grants"), registered)
