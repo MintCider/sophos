@@ -4,6 +4,7 @@ import aiohttp_cors
 import asyncpg
 from aiohttp import web
 
+from sophos.api.frontend import setup_frontend_routes
 from sophos.api.middleware import auth_middleware, error_middleware
 from sophos.api.routes import setup_routes
 from sophos.llm.provider_manager import ProviderManager
@@ -41,4 +42,5 @@ async def create_app(
     )
 
     setup_routes(app, cors)
+    setup_frontend_routes(app)
     return app

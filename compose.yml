@@ -1,39 +1,54 @@
-# ============================================================
-# Sophos — 开发环境
-# ============================================================
-# 只启动基础设施（PostgreSQL + NapCat），Sophos 在主机上用 uv run 跑。
-# 用法：
-#   cp .env.example .env   # 然后编辑 .env 填入你的配置
-#   docker compose up -d
-#   uv run python -m sophos.main
-# ============================================================
-
 services:
   postgres:
     image: pgvector/pgvector:pg17
-    container_name: sophos-postgres
-    env_file: .env
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-sophos}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sophos_dev}
+      POSTGRES_DB: ${POSTGRES_DB:-sophos}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - ./data/postgres:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sophos}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sophos} -d ${POSTGRES_DB:-sophos}"]
       interval: 5s
       timeout: 3s
       retries: 5
+    restart: unless-stopped
 
-  napcat:
-    image: mlikiowa/napcat-docker:latest
-    container_name: sophos-napcat
+  sophos:
+    image: ghcr.io/mintcider/sophos:${SOPHOS_VERSION:-latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file: .env
     environment:
-      - NAPCAT_UID=${NAPCAT_UID}
-      - NAPCAT_GID=${NAPCAT_GID}
-      - ACCOUNT=${NAPCAT_ACCOUNT:-}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-sophos}:${POSTGRES_PASSWORD:-sophos_dev}@postgres:5432/${POSTGRES_DB:-sophos}
+      ONEBOT_WS_URL: ${CONTAINER_ONEBOT_WS_URL:-ws://host.docker.internal:3001}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
-      - "3001:3001"   # OneBot WebSocket — Sophos 从主机连这个
-      - "6099:6099"   # NapCat WebUI — 浏览器管理/登录
+      - "${SOPHOS_PORT:-8080}:8080"
     volumes:
-      - ./data/napcat/config:/app/napcat/config   # NapCat 配置持久化
-      - ./data/napcat/qq:/app/.config/QQ          # QQ 登录态持久化
+      - type: bind
+        source: ./system_prompt.md
+        target: /app/system_prompt.md
+        read_only: true
+        bind:
+          create_host_path: false
+      - ./logs:/app/logs
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/api/health', timeout=3)
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    init: true
     restart: unless-stopped
