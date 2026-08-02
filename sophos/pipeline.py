@@ -20,6 +20,15 @@ import aiohttp
 import asyncpg
 
 from sophos import runtime_config, trigger
+from sophos.agent import (
+    AgentTool,
+    LLMNodeExecutor,
+    LLMWorkflowContext,
+    WorkflowEngine,
+    WorkflowRun,
+    collector_actor_workflow,
+    transcript_from_messages,
+)
 from sophos.commands import (
     CommandContext,
     handle_bot_command,
@@ -44,7 +53,6 @@ from sophos.llm.context import (
     get_display_name,
 )
 from sophos.llm.provider_manager import ProviderManager
-from sophos.llm.tool_loop import run_tool_loop
 from sophos.memory.association import auto_retrieve, format_association_block
 from sophos.memory.profile import build_profile_block
 from sophos.message_store import MessageStore
@@ -414,8 +422,7 @@ def _sanitize_fallback_reply(text: str) -> str | None:
 
 
 async def _handle_llm_trigger(ctx: PipelineContext) -> None:
-    """构建上下文 → tool loop → LLM 通过 send_message tool 回复。"""
-    provider = ctx.provider_mgr.get_provider()
+    """Build context and execute the configured provider-neutral agent graph."""
     registry = _get_registry()
     await _load_tool_disabled_state(registry)
 
@@ -610,50 +617,55 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
 
     # schema 过滤用于引导模型，执行层再次校验才是权限边界。
     allowed_tool_names = {s["function"]["name"] for s in tool_schemas}
-    sent_via_tool = False
-
     async def tool_executor(name: str, params: dict[str, Any]) -> Any:
-        nonlocal sent_via_tool
-        result = await registry.execute(
+        return await registry.execute(
             name,
             params,
             tool_context,
             allowed_tools=allowed_tool_names,
         )
-        if name == "send_message":
-            sent_via_tool = True
-        return result
+
+    agent_tools: list[AgentTool] = []
+    for schema in tool_schemas:
+        name = str(schema["function"]["name"])
+        tool = registry.get(name)
+        if tool is not None:
+            agent_tools.append(AgentTool(name=name, category=tool.category, schema=schema))
+
+    default_provider = ctx.provider_mgr.get_provider()
+    trigger_provider = ctx.provider_mgr.get_trigger_provider()
+
+    def resolve_provider(slot: str):
+        if slot == "default":
+            return default_provider
+        if slot == "trigger":
+            if trigger_provider is None:
+                logger.warning("No trigger provider configured; collector uses default provider")
+                return default_provider
+            return trigger_provider
+        raise RuntimeError(f"No provider configured for workflow model slot: {slot}")
+
+    workflow = collector_actor_workflow()
+    transcript = transcript_from_messages(messages)
+    llm_context = LLMWorkflowContext(
+        messages=messages,
+        tools=tuple(agent_tools),
+        provider_resolver=resolve_provider,
+        tool_executor=tool_executor,
+        conversation_id=ctx.conversation_id,
+        context_refresher=_refresh_context,
+        max_rounds_per_node=runtime_config.get("llm_max_tool_rounds"),
+    )
+    run = WorkflowRun(workflow=workflow, transcript=transcript)
+    engine = WorkflowEngine({"llm": LLMNodeExecutor(llm_context)})
 
     try:
-        result_messages = await run_tool_loop(
-            provider,
-            messages,
-            tools=tool_schemas,
-            tool_executor=tool_executor,
-            max_rounds=runtime_config.get("llm_max_tool_rounds"),
-            context_refresher=_refresh_context,
-        )
+        await engine.run(run)
     except Exception:
-        logger.exception("LLM tool loop failed")
+        logger.exception("Agent workflow failed")
         return
-
-    # 兜底：LLM 没调 send_message 时提取 content 直接发送
-    if not sent_via_tool:
-        final_msg = result_messages[-1] if result_messages else None
-        reply_text = (final_msg.get("content") or "") if final_msg else ""
-        if not reply_text:
-            logger.warning("LLM returned empty response and didn't call send_message")
-            return
-
-        reply_text = _sanitize_fallback_reply(reply_text)
-        if not reply_text:
-            return
-
-        logger.info("LLM didn't call send_message, using fallback")
-        sent = await ctx.message_service.send_message(
-            SendMessageRequest(conversation_id=ctx.conversation_id, text=reply_text)
-        )
-        logger.debug("Fallback reply sent (message_id=%s)", sent.message_id)
+    ctx.state["agent_workflow"] = run.to_state_dict()
+    ctx.state["agent_transcript"] = transcript.to_list()
 
 
 # ── Stage 实现 ───────────────────────────────────────────────

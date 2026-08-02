@@ -51,7 +51,7 @@ def collector_actor_workflow() -> WorkflowDefinition:
                     "根据完整对话和读取工具历史完成请求。只使用当前开放的输出工具。"
                     "若缺少必要信息，调用 request_more_information 返回收集节点。"
                 ),
-                model=ModelPolicy(slot="default"),
+                model=ModelPolicy(slot="default", require_tool_call=True),
                 tools=ToolPolicy(include_categories=("output",)),
                 cache=CachePolicy(scope="node"),
                 input_ports=(PortSpec("collected"),),
@@ -110,4 +110,3 @@ def collector_actor_workflow() -> WorkflowDefinition:
             ),
         ),
     )
-
