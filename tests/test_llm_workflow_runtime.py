@@ -98,6 +98,7 @@ class LLMWorkflowRuntimeTests(unittest.IsolatedAsyncioTestCase):
             provider_resolver=lambda slot: collector if slot == "trigger" else actor,
             tool_executor=execute,
             conversation_id=7,
+            system_prompts_by_slot={"trigger": "collector prompt"},
         )
         run = WorkflowRun(collector_actor_workflow(), Transcript())
         await WorkflowEngine({"llm": LLMNodeExecutor(context)}).run(run)
@@ -110,6 +111,8 @@ class LLMWorkflowRuntimeTests(unittest.IsolatedAsyncioTestCase):
         actor_names = {tool["function"]["name"] for tool in actor.calls[0]["tools"]}
         self.assertEqual(collector_names, {"query_messages", "complete_collection"})
         self.assertEqual(actor_names, {"send_message", "request_more_information"})
+        self.assertTrue(collector.calls[0]["messages"][0]["content"].startswith("collector prompt"))
+        self.assertTrue(actor.calls[0]["messages"][0]["content"].startswith("base prompt"))
         actor_history = actor.calls[0]["messages"]
         self.assertTrue(
             any(message.get("name") == "query_messages" for message in actor_history)

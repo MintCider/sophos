@@ -41,6 +41,7 @@ class LLMWorkflowContext:
     context_refresher: ContextRefresher | None = None
     max_rounds_per_node: int = 10
     completion_tools: frozenset[str] = field(default_factory=lambda: frozenset({"send_message"}))
+    system_prompts_by_slot: dict[str, str] = field(default_factory=dict)
 
 
 class LLMNodeExecutionError(RuntimeError):
@@ -70,7 +71,11 @@ class LLMNodeExecutor:
         )
 
         for round_number in range(1, self.context.max_rounds_per_node + 1):
-            request_messages = _with_node_instructions(self.context.messages, node.instructions)
+            request_messages = _with_node_instructions(
+                self.context.messages,
+                node.instructions,
+                system_prompt=self.context.system_prompts_by_slot.get(node.model.slot),
+            )
             response = await provider.chat(
                 request_messages,
                 tools=schemas,
@@ -183,16 +188,22 @@ def _select_tools(tools: tuple[AgentTool, ...], policy: ToolPolicy) -> tuple[Age
     return tuple(tool for tool in selected if tool.name not in excluded)
 
 
-def _with_node_instructions(messages: list[Message], instructions: str) -> list[Message]:
+def _with_node_instructions(
+    messages: list[Message],
+    instructions: str,
+    *,
+    system_prompt: str | None = None,
+) -> list[Message]:
     """Create a node-specific request view while leaving shared history untouched."""
     projected = [dict(message) for message in messages]
-    if not instructions:
-        return projected
-    stage_block = f"\n\n---\n[当前工作流节点指令]\n{instructions}"
     if projected and projected[0].get("role") == "system":
-        projected[0]["content"] = str(projected[0].get("content") or "") + stage_block
+        if system_prompt is not None:
+            projected[0]["content"] = system_prompt
     else:
-        projected.insert(0, {"role": "system", "content": stage_block.lstrip()})
+        projected.insert(0, {"role": "system", "content": system_prompt or ""})
+    if instructions:
+        stage_block = f"\n\n---\n[当前工作流节点指令]\n{instructions}"
+        projected[0]["content"] = str(projected[0].get("content") or "") + stage_block
     return projected
 
 

@@ -250,45 +250,65 @@ async def _process_event_images(
 
 _tool_registry: ToolRegistry | None = None
 
-_SYSTEM_PROMPT_FILE = Path(__file__).resolve().parent.parent / "system_prompt.md"
-_system_prompt_cache: str | None = None
-_system_prompt_mtime: float = 0.0
+_PROMPT_FILES = {
+    "system": Path(__file__).resolve().parent.parent / "system_prompt.md",
+    "collector": Path(__file__).resolve().parent.parent / "collector_prompt.md",
+}
+_PROMPT_CONFIG_KEYS = {
+    "system": "system_prompt",
+    "collector": "collector_system_prompt",
+}
+_PROMPT_FALLBACKS = {
+    "system": (
+        "你是 {nickname}，一个活跃在多个聊天平台中的助手。回复时请自然、简洁。\n\n"
+        "{runtime_context}"
+    ),
+    "collector": (
+        "你是 {nickname} 的信息收集节点。使用读取工具获取后续执行所需的信息。\n\n"
+        "{runtime_context}"
+    ),
+}
+_prompt_cache: dict[str, str] = {}
+_prompt_mtimes: dict[str, float] = {}
 
 
 def _load_system_prompt() -> str:
-    """加载 system prompt。优先 runtime_config（webUI），其次文件（mtime 缓存）。"""
-    global _system_prompt_cache, _system_prompt_mtime
+    """Load the default actor prompt."""
+    return _load_prompt("system")
 
-    # webUI 接口：runtime_config 中有 system_prompt 则优先使用
-    db_prompt = runtime_config.get("system_prompt")
+
+def _load_collector_prompt() -> str:
+    """Load the collector prompt independently from the default actor prompt."""
+    return _load_prompt("collector")
+
+
+def _load_prompt(kind: str) -> str:
+    """Load one prompt from runtime config or an mtime-cached file."""
+    db_prompt = runtime_config.get(_PROMPT_CONFIG_KEYS[kind])
     if db_prompt is not None:
-        return db_prompt
+        return str(db_prompt)
 
-    # 文件模式：mtime 变化时自动重载
+    prompt_file = _PROMPT_FILES[kind]
     try:
-        current_mtime = _SYSTEM_PROMPT_FILE.stat().st_mtime
+        current_mtime = prompt_file.stat().st_mtime
     except FileNotFoundError:
-        if _system_prompt_cache is None:
-            logger.warning("system_prompt.md not found, using fallback")
-            _system_prompt_cache = (
-                "你是 {nickname}，一个活跃在多个聊天平台中的助手。回复时请自然、简洁。\n\n"
-                "{runtime_context}"
-            )
-        return _system_prompt_cache
+        if kind not in _prompt_cache:
+            logger.warning("%s not found, using fallback", prompt_file.name)
+            _prompt_cache[kind] = _PROMPT_FALLBACKS[kind]
+        return _prompt_cache[kind]
 
-    if _system_prompt_cache is None or current_mtime != _system_prompt_mtime:
-        _system_prompt_cache = _SYSTEM_PROMPT_FILE.read_text(encoding="utf-8").strip()
-        _system_prompt_mtime = current_mtime
-        logger.info("Loaded system prompt from %s (mtime=%.0f)", _SYSTEM_PROMPT_FILE, current_mtime)
+    if kind not in _prompt_cache or current_mtime != _prompt_mtimes.get(kind):
+        _prompt_cache[kind] = prompt_file.read_text(encoding="utf-8").strip()
+        _prompt_mtimes[kind] = current_mtime
+        logger.info("Loaded %s prompt from %s (mtime=%.0f)", kind, prompt_file, current_mtime)
 
-    return _system_prompt_cache
+    return _prompt_cache[kind]
 
 
 def clear_system_prompt_cache() -> None:
-    """清除 system prompt 缓存，下次触发时重新读取。"""
-    global _system_prompt_cache, _system_prompt_mtime
-    _system_prompt_cache = None
-    _system_prompt_mtime = 0.0
+    """Clear both actor and collector file caches."""
+    _prompt_cache.clear()
+    _prompt_mtimes.clear()
 
 
 # ── 最近动态 ──────────────────────────────────────────────
@@ -452,7 +472,14 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
             "runtime_context": runtime_context,
         }
     )
-    system_prompt = render_system_prompt(_load_system_prompt(), prompt_values)
+    system_prompts = {
+        "default": render_system_prompt(_load_system_prompt(), prompt_values),
+        "trigger": render_system_prompt(_load_collector_prompt(), prompt_values),
+    }
+
+    def append_system_block(block: str) -> None:
+        for key in system_prompts:
+            system_prompts[key] += f"\n---\n{block}"
 
     # ── 记忆注入 ──
     memory_store = ctx.state.get("memory_store")
@@ -480,7 +507,7 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
                 context_text=context_text,
             )
             if profile_block:
-                system_prompt += f"\n---\n{profile_block}"
+                append_system_block(profile_block)
         except Exception:
             logger.warning("Failed to build profile block", exc_info=True)
 
@@ -494,7 +521,7 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
                 try:
                     assoc_memories = await auto_retrieve(memory_store, embed_provider, recent_rows)
                     if assoc_memories:
-                        system_prompt += f"\n---\n{format_association_block(assoc_memories)}"
+                        append_system_block(format_association_block(assoc_memories))
                 except Exception:
                     logger.warning("Failed to retrieve associations", exc_info=True)
 
@@ -507,7 +534,7 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
         )
         if recent_global:
             block = _format_recent_global_block(recent_global, nickname)
-            system_prompt += f"\n---\n{block}"
+            append_system_block(block)
     except Exception:
         logger.warning("Failed to build recent global block", exc_info=True)
 
@@ -522,8 +549,18 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
     messages, _cursor_id = await build_chat_context_snapshot(
         ctx.store,
         conversation_id=ctx.conversation_id,
-        system_prompt=system_prompt,
+        system_prompt=system_prompts["default"],
     )
+    # build_chat_context_snapshot may append cross-conversation background to the
+    # default prompt. Preserve the same dynamic suffix in the collector prompt.
+    rendered_default = str(messages[0].get("content") or "") if messages else ""
+    default_prefix = system_prompts["default"]
+    dynamic_suffix = (
+        rendered_default[len(default_prefix) :]
+        if rendered_default.startswith(default_prefix)
+        else ""
+    )
+    system_prompts["trigger"] += dynamic_suffix
 
     # ── 上下文刷新闭包（tool loop 间隙注入新消息）──
     # Pre-compute refresh-suppressed user set for filtering
@@ -655,6 +692,7 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
         conversation_id=ctx.conversation_id,
         context_refresher=_refresh_context,
         max_rounds_per_node=runtime_config.get("llm_max_tool_rounds"),
+        system_prompts_by_slot=system_prompts,
     )
     run = WorkflowRun(workflow=workflow, transcript=transcript)
     engine = WorkflowEngine({"llm": LLMNodeExecutor(llm_context)})
