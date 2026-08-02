@@ -57,7 +57,14 @@ class ToolRegistry:
     def is_disabled(self, name: str) -> bool:
         return name in self._disabled_tools
 
-    async def execute(self, name: str, params: dict[str, Any], context: dict[str, Any]) -> Any:
+    async def execute(
+        self,
+        name: str,
+        params: dict[str, Any],
+        context: dict[str, Any],
+        *,
+        allowed_tools: set[str] | None = None,
+    ) -> Any:
         """按名称调用工具。
 
         这是代码直接调用工具的入口，也是 LLM tool calling 的执行入口。
@@ -66,6 +73,10 @@ class ToolRegistry:
         tool = self._tools.get(name)
         if tool is None:
             raise ValueError(f"Unknown tool: {name}")
+        if name in self._disabled_tools:
+            raise PermissionError(f"Tool is disabled: {name}")
+        if allowed_tools is not None and name not in allowed_tools:
+            raise PermissionError(f"Tool is not allowed in this context: {name}")
 
         # 轻量参数校验：检查 required 字段是否齐全
         schema = tool.parameters

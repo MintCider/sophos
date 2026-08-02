@@ -1,7 +1,8 @@
-"""后台数据清理：聊天记录 / 记忆 LRU 淘汰。"""
+"""后台数据清理：按有效行逻辑大小执行聊天记录 / 记忆 LRU 淘汰。"""
 
 import asyncio
 import logging
+from dataclasses import dataclass
 
 import asyncpg
 
@@ -9,70 +10,128 @@ from sophos import runtime_config
 
 logger = logging.getLogger(__name__)
 
+_MEBIBYTE = 1024 * 1024
+_LOW_WATERMARK_NUMERATOR = 9
+_LOW_WATERMARK_DENOMINATOR = 10
+_BATCH_DIVISOR = 20
+_DEFAULT_INTERVAL_SECONDS = 3600
 
-async def _table_size(pool: asyncpg.Pool, table: str) -> int:
-    """返回表的总大小（含索引和 TOAST），单位字节。"""
+
+@dataclass(frozen=True)
+class _CleanupSpec:
+    table: str
+    lru_expression: str
+
+
+@dataclass(frozen=True)
+class _TableStats:
+    logical_bytes: int
+    row_count: int
+
+
+_CLEANUP_SPECS = {
+    "messages": _CleanupSpec(
+        table="messages",
+        lru_expression="COALESCE(last_accessed, timestamp)",
+    ),
+    "memories": _CleanupSpec(
+        table="memories",
+        lru_expression="COALESCE(last_hit, created_at)",
+    ),
+}
+
+
+def _require_positive_int(value: object, name: str) -> int:
+    """返回正整数配置值，拒绝 bool、浮点数和非正值。"""
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{name} must be a positive integer, got {value!r}")
+    return value
+
+
+def _spec(table: str) -> _CleanupSpec:
+    try:
+        return _CLEANUP_SPECS[table]
+    except KeyError:
+        raise ValueError(f"unsupported cleanup table: {table}") from None
+
+
+async def _logical_table_stats(pool: asyncpg.Pool, table: str) -> _TableStats:
+    """一次扫描返回有效行逻辑大小和行数。"""
+    spec = _spec(table)
     row = await pool.fetchrow(
-        "SELECT pg_total_relation_size($1) AS size_bytes",
-        table,
+        f"""
+        SELECT
+            COALESCE(SUM(pg_column_size(row_data)::bigint), 0) AS logical_bytes,
+            COUNT(*) AS row_count
+        FROM {spec.table} AS row_data
+        """
     )
-    return int(row["size_bytes"]) if row else 0
+    if not row:
+        return _TableStats(logical_bytes=0, row_count=0)
+    return _TableStats(
+        logical_bytes=int(row["logical_bytes"]),
+        row_count=int(row["row_count"]),
+    )
+
+
+async def _cleanup_table(pool: asyncpg.Pool, table: str, max_bytes: int) -> None:
+    """超过高水位后，按 LRU 分批删除到 90% 低水位。"""
+    max_bytes = _require_positive_int(max_bytes, f"cleanup_{table}_max_bytes")
+    spec = _spec(table)
+    stats = await _logical_table_stats(pool, table)
+    size = stats.logical_bytes
+    if size <= max_bytes:
+        return
+
+    target_bytes = max_bytes * _LOW_WATERMARK_NUMERATOR // _LOW_WATERMARK_DENOMINATOR
+    batch = max(stats.row_count // _BATCH_DIVISOR, 1)
+
+    while size > target_bytes:
+        logger.info(
+            "%s logical cleanup: %d MiB / %d MiB, deleting up to %d rows",
+            spec.table,
+            size // _MEBIBYTE,
+            max_bytes // _MEBIBYTE,
+            batch,
+        )
+        deleted = await pool.fetch(
+            f"""
+            DELETE FROM {spec.table}
+            WHERE id IN (
+                SELECT id FROM {spec.table}
+                ORDER BY {spec.lru_expression} ASC, id ASC
+                LIMIT $1
+            )
+            RETURNING pg_column_size({spec.table})::bigint AS logical_bytes
+            """,
+            batch,
+        )
+        if not deleted:
+            logger.warning(
+                "%s logical cleanup stopped before reaching target: %d MiB / %d MiB",
+                spec.table,
+                size // _MEBIBYTE,
+                target_bytes // _MEBIBYTE,
+            )
+            return
+        size -= sum(int(row["logical_bytes"]) for row in deleted)
+
+    logger.info(
+        "%s logical cleanup complete: approximately %d MiB / %d MiB",
+        spec.table,
+        max(size, 0) // _MEBIBYTE,
+        max_bytes // _MEBIBYTE,
+    )
 
 
 async def cleanup_messages(pool: asyncpg.Pool, max_bytes: int) -> None:
-    """按 LRU 清理 messages 表，每轮删 5% 直到低于阈值。"""
-    while True:
-        size = await _table_size(pool, "messages")
-        if size <= max_bytes:
-            return
-        count = await pool.fetchval("SELECT count(*) FROM messages")
-        if not count:
-            return
-        batch = max(count // 20, 1)
-        logger.info(
-            "messages cleanup: %d MB / %d MB, deleting %d rows",
-            size // (1024 * 1024),
-            max_bytes // (1024 * 1024),
-            batch,
-        )
-        await pool.execute(
-            """
-            DELETE FROM messages WHERE id IN (
-                SELECT id FROM messages
-                ORDER BY COALESCE(last_accessed, timestamp) ASC
-                LIMIT $1
-            )
-            """,
-            batch,
-        )
+    """按逻辑大小和 LRU 清理 messages。"""
+    await _cleanup_table(pool, "messages", max_bytes)
 
 
 async def cleanup_memories(pool: asyncpg.Pool, max_bytes: int) -> None:
-    """按 LRU 清理 memories 表，每轮删 5% 直到低于阈值。"""
-    while True:
-        size = await _table_size(pool, "memories")
-        if size <= max_bytes:
-            return
-        count = await pool.fetchval("SELECT count(*) FROM memories")
-        if not count:
-            return
-        batch = max(count // 20, 1)
-        logger.info(
-            "memories cleanup: %d MB / %d MB, deleting %d rows",
-            size // (1024 * 1024),
-            max_bytes // (1024 * 1024),
-            batch,
-        )
-        await pool.execute(
-            """
-            DELETE FROM memories WHERE id IN (
-                SELECT id FROM memories
-                ORDER BY COALESCE(last_hit, created_at) ASC
-                LIMIT $1
-            )
-            """,
-            batch,
-        )
+    """按逻辑大小和 LRU 清理 memories。"""
+    await _cleanup_table(pool, "memories", max_bytes)
 
 
 async def run_cleanup_loop(pool: asyncpg.Pool) -> None:
@@ -80,13 +139,34 @@ async def run_cleanup_loop(pool: asyncpg.Pool) -> None:
     try:
         while True:
             try:
-                msg_max = runtime_config.get("cleanup_messages_max_bytes")
-                mem_max = runtime_config.get("cleanup_memories_max_bytes")
+                interval = _require_positive_int(
+                    runtime_config.get("cleanup_interval_seconds"),
+                    "cleanup_interval_seconds",
+                )
+            except ValueError:
+                logger.exception(
+                    "invalid cleanup interval; using default %d seconds",
+                    _DEFAULT_INTERVAL_SECONDS,
+                )
+                interval = _DEFAULT_INTERVAL_SECONDS
+
+            try:
+                msg_max = _require_positive_int(
+                    runtime_config.get("cleanup_messages_max_bytes"),
+                    "cleanup_messages_max_bytes",
+                )
+                mem_max = _require_positive_int(
+                    runtime_config.get("cleanup_memories_max_bytes"),
+                    "cleanup_memories_max_bytes",
+                )
                 await cleanup_messages(pool, msg_max)
                 await cleanup_memories(pool, mem_max)
             except Exception:
                 logger.exception("cleanup error")
-            interval = runtime_config.get("cleanup_interval_seconds")
             await asyncio.sleep(interval)
     except asyncio.CancelledError:
         logger.debug("cleanup loop cancelled")
+
+
+# TODO: 增加显式的物理空间整理操作。VACUUM FULL 会独占锁表且需要额外临时磁盘空间，
+#       必须由管理员确认并展示运行状态，不能放进这个自动清理循环。

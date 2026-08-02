@@ -89,6 +89,7 @@ CREATE TABLE IF NOT EXISTS messages (
 
     -- 时间
     timestamp       TIMESTAMPTZ     NOT NULL,
+    last_accessed   TIMESTAMPTZ,
 
     -- 预留扩展
     extra           JSONB
@@ -344,6 +345,16 @@ _CREATE_INDEXES = [
     """\
     CREATE INDEX IF NOT EXISTS idx_messages_ts_desc
     ON messages (timestamp DESC);
+    """,
+    # 消息逻辑容量清理的 LRU 顺序
+    """\
+    CREATE INDEX IF NOT EXISTS idx_messages_lru
+    ON messages (COALESCE(last_accessed, timestamp), id);
+    """,
+    # 记忆逻辑容量清理的 LRU 顺序
+    """\
+    CREATE INDEX IF NOT EXISTS idx_memories_lru
+    ON memories (COALESCE(last_hit, created_at), id);
     """,
     # 权限系统：按 scope 查询授权
     """\

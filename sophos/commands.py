@@ -741,6 +741,9 @@ _VALIDATORS: dict[str, tuple[Any, str]] = {
     "trigger_bucket_capacity": (lambda v: v > 0, "必须 > 0"),
     "trigger_bucket_refill": (lambda v: v > 0, "必须 > 0"),
     "tavily_max_results": (lambda v: 1 <= v <= 20, "范围 1~20"),
+    "cleanup_messages_max_bytes": (lambda v: v > 0, "必须 > 0"),
+    "cleanup_memories_max_bytes": (lambda v: v > 0, "必须 > 0"),
+    "cleanup_interval_seconds": (lambda v: v > 0, "必须 > 0"),
 }
 
 

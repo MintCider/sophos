@@ -580,15 +580,6 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
     vision_provider = ctx.provider_mgr.get_vision_provider()
     if vision_provider:
         tool_context["vision_provider"] = vision_provider
-    sent_via_tool = False
-
-    async def tool_executor(name: str, params: dict[str, Any]) -> Any:
-        nonlocal sent_via_tool
-        result = await registry.execute(name, params, tool_context)
-        if name == "send_msg":
-            sent_via_tool = True
-        return result
-
     tool_schemas = registry.get_function_schemas(
         scope=ctx.message_type,
         description_overrides=await _load_description_overrides(),
@@ -613,6 +604,22 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
         _disabled.add("view_image")
     if _disabled:
         tool_schemas = [s for s in tool_schemas if s["function"]["name"] not in _disabled]
+
+    # schema 过滤用于引导模型，执行层再次校验才是权限边界。
+    allowed_tool_names = {s["function"]["name"] for s in tool_schemas}
+    sent_via_tool = False
+
+    async def tool_executor(name: str, params: dict[str, Any]) -> Any:
+        nonlocal sent_via_tool
+        result = await registry.execute(
+            name,
+            params,
+            tool_context,
+            allowed_tools=allowed_tool_names,
+        )
+        if name == "send_msg":
+            sent_via_tool = True
+        return result
 
     try:
         result_messages = await run_tool_loop(
