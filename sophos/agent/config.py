@@ -10,7 +10,7 @@ from sophos.agent.workflow import WorkflowDefinition, WorkflowValidationError
 
 ACTIVE_WORKFLOW_KEY = "agent_workflow"
 SUPPORTED_NODE_KINDS = frozenset({"llm", "terminal"})
-SUPPORTED_MODEL_SLOTS = frozenset({"default", "trigger"})
+SUPPORTED_MODEL_SLOTS = frozenset({"default", "collector", "trigger"})
 
 
 def load_active_workflow() -> WorkflowDefinition:

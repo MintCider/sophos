@@ -2,6 +2,7 @@
 
 from aiohttp import web
 
+from sophos.llm.provider import normalize_provider_policy
 from sophos.llm.provider_manager import ProviderManager, _normalize_base_urls, resolve_base_url
 
 routes = web.RouteTableDef()
@@ -77,6 +78,12 @@ async def create_provider(request: web.Request) -> web.Response:
     alias = str(payload.get("alias", "")).strip()
     api_key = str(payload.get("api_key", "")).strip()
     base_urls = _normalize_base_urls(payload.get("base_urls"))
+    request_policy = None
+    if "request_policy" in payload:
+        try:
+            request_policy = normalize_provider_policy(payload["request_policy"])
+        except (TypeError, ValueError) as exc:
+            raise web.HTTPBadRequest(reason=str(exc)) from exc
 
     if not alias:
         raise web.HTTPBadRequest(reason="alias 不能为空")
@@ -85,21 +92,36 @@ async def create_provider(request: web.Request) -> web.Response:
     if not base_urls:
         raise web.HTTPBadRequest(reason="至少提供一个 Base URL")
 
-    result = await provider_mgr.add_provider(alias, base_urls, api_key)
+    result = await provider_mgr.add_provider(
+        alias,
+        base_urls,
+        api_key,
+        request_policy=request_policy,
+    )
     status = 400 if "已存在" in result or "至少提供" in result else 200
     return web.json_response({"message": result}, status=status)
 
 
 @routes.put("/api/providers/{alias}")
 async def update_provider(request: web.Request) -> web.Response:
-    """更新 provider 的 base URLs。"""
+    """更新 provider 的 base URLs 和请求策略。"""
     provider_mgr: ProviderManager = request.app["provider_mgr"]
     alias = request.match_info["alias"]
     payload = await request.json()
     base_urls = _normalize_base_urls(payload.get("base_urls"))
     if not base_urls:
         raise web.HTTPBadRequest(reason="至少提供一个 Base URL")
-    result = await provider_mgr.update_provider(alias, base_urls=base_urls)
+    request_policy = None
+    if "request_policy" in payload:
+        try:
+            request_policy = normalize_provider_policy(payload["request_policy"])
+        except (TypeError, ValueError) as exc:
+            raise web.HTTPBadRequest(reason=str(exc)) from exc
+    result = await provider_mgr.update_provider(
+        alias,
+        base_urls=base_urls,
+        request_policy=request_policy,
+    )
     status = 404 if "不存在" in result else 200
     return web.json_response({"message": result}, status=status)
 

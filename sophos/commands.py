@@ -56,14 +56,17 @@ async def handle_llm_command(
         else:
             lines = []
             for p in providers:
-                marker = " ← 活跃" if p["is_active"] else ""
-                model_info = f" ({p['active_model']})" if p["is_active"] else ""
+                active_slots = p["active_slots"]
+                active_info = ", ".join(
+                    f"{slot['key']}={slot['model']}" for slot in active_slots
+                )
+                marker = f" ← {active_info}" if active_info else ""
                 urls = p["base_urls"]
                 url_display = urls.get("openai", "?")
                 extra_urls = [f"{k}={v}" for k, v in urls.items() if k != "openai"]
                 if extra_urls:
                     url_display += f" ({', '.join(extra_urls)})"
-                lines.append(f"  {p['alias']}: {url_display} [{p['model_count']} models]{model_info}{marker}")
+                lines.append(f"  {p['alias']}: {url_display} [{p['model_count']} models]{marker}")
             reply = "Providers:\n" + "\n".join(lines)
 
     elif sub == "add":
@@ -182,6 +185,58 @@ async def handle_llm_command(
                 "  .llm vision off          — 关闭 vision"
             )
 
+    elif sub == "collector":
+        collector_sub = parts[2] if len(parts) > 2 else ""
+        if collector_sub == "":
+            info = provider_mgr.current_info()
+            if info.get("collector_alias"):
+                ctype = (
+                    f" ({info['collector_api_type']})"
+                    if info.get("collector_api_type", "openai") != "openai"
+                    else ""
+                )
+                reply = (
+                    f"Collector 模型: {info['collector_alias']} / "
+                    f"{info['collector_model']}{ctype}"
+                )
+            else:
+                reply = "Collector 未配置"
+        elif collector_sub == "switch":
+            if len(parts) < 4 or "/" not in parts[3]:
+                reply = "用法: .llm collector switch <alias>/<model> [--type openai|gemini|anthropic]"
+            else:
+                alias, _, model = parts[3].partition("/")
+                api_type = _extract_type_flag(parts[4:])
+                reply = await provider_mgr.switch_collector(alias, model, api_type=api_type)
+        elif collector_sub == "extra_body":
+            if len(parts) < 4:
+                reply = await provider_mgr.get_active_extra_body("collector")
+            else:
+                arg = " ".join(parts[3:])
+                reply = await provider_mgr.set_provider_extra_body(
+                    "collector",
+                    "" if arg == "clear" else arg,
+                )
+        elif collector_sub == "timeout":
+            if len(parts) < 4:
+                timeout = await provider_mgr._pool.fetchval(
+                    "SELECT request_timeout FROM llm_active WHERE key = 'collector'"
+                )
+                reply = f"Collector timeout: {timeout or 60}s"
+            else:
+                try:
+                    reply = await provider_mgr.set_timeout("collector", int(parts[3]))
+                except ValueError:
+                    reply = "用法: .llm collector timeout <秒>"
+        else:
+            reply = (
+                "用法:\n"
+                "  .llm collector              — 当前 collector 模型\n"
+                "  .llm collector switch <alias>/<model>\n"
+                "  .llm collector extra_body [json|clear]\n"
+                "  .llm collector timeout <秒>"
+            )
+
     elif sub == "trigger":
         trigger_sub = parts[2] if len(parts) > 2 else ""
         if trigger_sub == "":
@@ -261,6 +316,7 @@ async def handle_llm_command(
             "  .llm switch <alias>/<model> [--type openai|gemini|anthropic]\n"
             "  .llm extra_body [json|clear]  — 当前模型的 extra_body\n"
             "  .llm timeout [秒]  — 请求超时\n"
+            "  .llm collector — collector 模型管理\n"
             "  .llm vision   — vision 模型管理\n"
             "  .llm trigger  — trigger 模型管理"
         )

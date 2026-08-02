@@ -6,7 +6,7 @@ Sophos 的消息处理不再由固定的 tool loop 表达，而是由版本化�
 
 `WorkflowDefinition` 包含稳定的 `workflow_id`、`revision`、入口节点、节点和边。节点通过具名输入/输出端口连接；模型触发的输出端口会被编译成严格控制工具，宿主触发的端口用于表达 `send_message` 成功等确定事件。边允许形成环，并用 `max_traversals` 限制单条边的循环次数；运行器另有全局 `max_steps` 上限。
 
-本版本可激活 `llm` 和 `terminal` 节点，支持 `default`、`trigger` 模型槽。IR 已预留 `router`、`policy`、`human_approval`、`subworkflow`，但在对应 executor 实现前不能激活，API 会明确拒绝。
+本版本可激活 `llm` 和 `terminal` 节点，支持 `default`、`collector`、`trigger` 模型槽。IR 已预留 `router`、`policy`、`human_approval`、`subworkflow`，但在对应 executor 实现前不能激活，API 会明确拒绝。
 
 工作流配置接口：
 
@@ -18,9 +18,9 @@ Sophos 的消息处理不再由固定的 tool loop 表达，而是由版本化�
 
 ## Collector / Actor 语义
 
-collector 使用 `trigger` 槽，只暴露 `category=input` 的读取工具和 `complete_collection`。它不生成总结；工具调用和结果本身就是 handover 内容。actor 使用 `default` 槽，读取完整原始历史，只暴露 `category=output` 工具和 `request_more_information`。actor 缺少信息时返回 collector；只有 `send_message` 成功后宿主才沿 `completed` 端口结束。
+collector 使用独立的 `collector` 槽，与 `default` 具有相同的 provider 生命周期、常规生成上限和热切换能力，只暴露 `category=input` 的读取工具和 `complete_collection`。工具调用和结果本身就是 handover 内容。actor 使用 `default` 槽，读取完整原始历史，只暴露 `category=output` 工具和 `request_more_information`。actor 缺少信息时返回 collector；只有 `send_message` 成功后宿主才沿 `completed` 端口结束。
 
-未配置 trigger provider 时，collector 明确记录 warning 并使用 default provider。`web_search` 当前作为读取工具只在 collector 开放；未来可以通过节点 `ToolPolicy` 调整，无需改运行器。
+collector 与 default 都是工作流需要显式配置的一级模型槽；collector 未配置时不会借用 default。`trigger` 槽仅供触发判定使用。`web_search` 当前作为读取工具只在 collector 开放；未来可以通过节点 `ToolPolicy` 调整，无需改运行器。
 
 ## Transcript 与跨 Provider 传递
 
@@ -47,3 +47,14 @@ Provider 返回的 cache read/write token 与原生 usage 会进入统一 `Usage
 - Gemini GenerateContent 依赖其隐式缓存，并从 `cachedContentTokenCount` 读取命中量。显式 CachedContent 需要独立生命周期管理，暂不伪装成通用 key。
 
 system prompt 与节点指令保持在请求前缀，动态消息和工具历史排在其后。不同节点使用不同 cache key，避免 collector/actor 的工具集与指令互相污染缓存。
+
+## Provider 请求策略
+
+`llm_providers.request_policy` 保存 provider 级的 JSON 能力声明，不绑定某一个模型槽。OpenAI-compatible 编译器目前识别：
+
+- `allowed_body_parameters`：请求体允许字段白名单；必须包含 `model` 和 `messages`。
+- `accumulated_message_fields`：流式 delta 中需拼接并回放的 assistant 字段，例如 DeepSeek 的 `reasoning_content`。
+- `requires_assistant_content_for_tool_calls`：工具调用历史中是否必须同时携带 assistant `content`。
+- `strict_optional_mode`：`nullable` 用 `null` 保留可选语义；`required` 用于不接受 `null` 类型的 strict JSON Schema 实现。
+
+未声明白名单时保持开放的 OpenAI-compatible 行为。已声明白名单时，编译器在最后一步过滤请求体，包括 `extra_body` 中的字段；响应的 provider-native 字段仍保留在共享消息历史和 transcript 中。

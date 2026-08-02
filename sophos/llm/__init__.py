@@ -14,6 +14,7 @@ from sophos.llm.provider import (
     ProviderPolicy,
     ProviderRequestOptions,
     ToolCall,
+    normalize_provider_policy,
 )
 from sophos.llm.tool_loop import run_tool_loop
 
@@ -29,4 +30,5 @@ __all__ = [
     "ToolCall",
     "build_chat_context",
     "run_tool_loop",
+    "normalize_provider_policy",
 ]

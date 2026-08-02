@@ -47,6 +47,7 @@ interface ProviderItem {
   models: string[]
   model_count: number
   active_slots: ActiveSlot[]
+  request_policy: Record<string, unknown>
 }
 
 const message = useMessage()
@@ -66,6 +67,7 @@ const deletingProvider = ref<ProviderItem | null>(null)
 const modelSearch = reactive<Record<string, string>>({})
 
 const editDrafts = reactive<Record<string, Partial<Record<ApiType, string>>>>({})
+const requestPolicyDrafts = reactive<Record<string, string>>({})
 
 const addForm = reactive<{
   alias: string
@@ -73,12 +75,14 @@ const addForm = reactive<{
   openai: string
   anthropic: string
   gemini: string
+  requestPolicy: string
 }>({
   alias: '',
   apiKey: '',
   openai: 'https://api.openai.com/v1',
   anthropic: '',
   gemini: '',
+  requestPolicy: '{}',
 })
 
 const apiTypes: ApiType[] = ['openai', 'anthropic', 'gemini']
@@ -125,12 +129,14 @@ function beginEdit(provider: ProviderItem) {
     anthropic: provider.base_urls.anthropic ?? '',
     gemini: provider.base_urls.gemini ?? '',
   }
+  requestPolicyDrafts[provider.alias] = JSON.stringify(provider.request_policy ?? {}, null, 2)
   expandedAlias.value = provider.alias
 }
 
 function cancelEdit(alias: string) {
   editingAliases.value.delete(alias)
   delete editDrafts[alias]
+  delete requestPolicyDrafts[alias]
 }
 
 function openAddDrawer() {
@@ -149,6 +155,7 @@ function resetAddForm() {
   addForm.openai = 'https://api.openai.com/v1'
   addForm.anthropic = ''
   addForm.gemini = ''
+  addForm.requestPolicy = '{}'
   advancedAddOpen.value = false
 }
 
@@ -166,6 +173,20 @@ function validateBaseUrls(baseUrls: Partial<Record<ApiType, string>>) {
     return '至少填写一个 Base URL'
   }
   return ''
+}
+
+function parseRequestPolicy(raw: string): Record<string, unknown> | null {
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (parsed === null || Array.isArray(parsed) || typeof parsed !== 'object') {
+      message.warning('请求策略必须是 JSON object')
+      return null
+    }
+    return parsed as Record<string, unknown>
+  } catch {
+    message.warning('请求策略不是合法 JSON')
+    return null
+  }
 }
 
 async function loadProviders() {
@@ -219,12 +240,15 @@ async function createProvider() {
     message.warning(validation)
     return
   }
+  const requestPolicy = parseRequestPolicy(addForm.requestPolicy)
+  if (requestPolicy === null) return
 
   try {
     const { data } = await api.post('/providers', {
       alias: addForm.alias.trim(),
       api_key: addForm.apiKey.trim(),
       base_urls: baseUrls,
+      request_policy: requestPolicy,
     })
     message.success(data.message)
     addDrawerOpen.value = false
@@ -242,10 +266,13 @@ async function saveProvider(alias: string) {
     message.warning(validation)
     return
   }
+  const requestPolicy = parseRequestPolicy(requestPolicyDrafts[alias] ?? '{}')
+  if (requestPolicy === null) return
 
   try {
     const { data } = await api.put(`/providers/${encodeURIComponent(alias)}`, {
       base_urls: baseUrls,
+      request_policy: requestPolicy,
     })
     message.success(data.message)
     cancelEdit(alias)
@@ -402,6 +429,20 @@ onMounted(loadProviders)
             </template>
           </div>
 
+          <div class="provider-policy-panel">
+            <div class="provider-expanded-header">
+              <span>请求策略</span>
+            </div>
+            <NInput
+              v-if="isEditing(provider.alias)"
+              v-model:value="requestPolicyDrafts[provider.alias]"
+              type="textarea"
+              :autosize="{ minRows: 5, maxRows: 16 }"
+              placeholder="{}"
+            />
+            <pre v-else class="provider-policy-value">{{ JSON.stringify(provider.request_policy ?? {}, null, 2) }}</pre>
+          </div>
+
           <div v-if="isEditing(provider.alias)" class="provider-edit-actions">
             <NButton @click="cancelEdit(provider.alias)">
               <template #icon><X :size="16" /></template>
@@ -476,8 +517,18 @@ onMounted(loadProviders)
               <NInput v-model:value="addForm.gemini" placeholder="https://generativelanguage.googleapis.com" />
             </label>
 
+            <label class="field-label">
+              <span>请求策略（JSON）</span>
+              <NInput
+                v-model:value="addForm.requestPolicy"
+                type="textarea"
+                :autosize="{ minRows: 5, maxRows: 14 }"
+                placeholder="{}"
+              />
+            </label>
+
             <p class="drawer-tip">
-              填了 Anthropic 或 Gemini URL 后，OpenAI URL 可以留空。
+              填了 Anthropic 或 Gemini URL 后，OpenAI URL 可以留空。请求策略用于声明兼容接口允许的请求字段和响应历史保留规则。
             </p>
           </div>
         </div>
@@ -785,6 +836,25 @@ onMounted(loadProviders)
   justify-content: flex-end;
   gap: 10px;
   margin-top: 16px;
+}
+
+.provider-policy-panel {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px dashed var(--glass-border);
+}
+
+.provider-policy-value {
+  max-height: 300px;
+  margin: 0;
+  padding: 12px;
+  overflow: auto;
+  border-radius: 10px;
+  background: rgba(127, 127, 148, 0.08);
+  font-family: var(--font-mono);
+  font-size: 0.84rem;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .provider-models-panel {

@@ -31,7 +31,7 @@ def collector_actor_workflow() -> WorkflowDefinition:
                     "只调用读取工具收集回答当前请求所需的信息。"
                     "收集完成后调用 complete_collection。"
                 ),
-                model=ModelPolicy(slot="trigger", require_tool_call=True),
+                model=ModelPolicy(slot="collector", require_tool_call=True),
                 tools=ToolPolicy(include_categories=("input",), exclude_names=("generate_image",)),
                 cache=CachePolicy(scope="node"),
                 input_ports=(PortSpec("initial"), PortSpec("follow_up")),

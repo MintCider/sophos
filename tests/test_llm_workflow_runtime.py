@@ -95,10 +95,10 @@ class LLMWorkflowRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 {"role": "user", "content": "question"},
             ],
             tools=(agent_tool("query_messages", "input"), agent_tool("send_message", "output")),
-            provider_resolver=lambda slot: collector if slot == "trigger" else actor,
+            provider_resolver=lambda slot: collector if slot == "collector" else actor,
             tool_executor=execute,
             conversation_id=7,
-            system_prompts_by_slot={"trigger": "collector prompt"},
+            system_prompts_by_slot={"collector": "collector prompt"},
         )
         run = WorkflowRun(collector_actor_workflow(), Transcript())
         await WorkflowEngine({"llm": LLMNodeExecutor(context)}).run(run)
@@ -154,7 +154,7 @@ class LLMWorkflowRuntimeTests(unittest.IsolatedAsyncioTestCase):
         context = LLMWorkflowContext(
             messages=[{"role": "user", "content": "question"}],
             tools=(agent_tool("query_messages", "input"), agent_tool("send_message", "output")),
-            provider_resolver=lambda slot: collector if slot == "trigger" else actor,
+            provider_resolver=lambda slot: collector if slot == "collector" else actor,
             tool_executor=execute,
         )
         run = WorkflowRun(collector_actor_workflow(), Transcript())

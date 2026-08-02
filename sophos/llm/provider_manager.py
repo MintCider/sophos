@@ -21,7 +21,7 @@ from sophos.llm.anthropic import AnthropicProvider
 from sophos.llm.embedding import EmbeddingProvider
 from sophos.llm.gemini import GeminiProvider
 from sophos.llm.openai_compat import OpenAICompatProvider
-from sophos.llm.provider import LLMProvider, ProviderPolicy
+from sophos.llm.provider import LLMProvider, ProviderPolicy, normalize_provider_policy
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +71,11 @@ class ProviderManager:
         self._current_alias: str = ""
         self._current_model: str = ""
         self._current_api_type: str = "openai"
+        # Collector slot (information-gathering agent stage)
+        self._collector_provider: LLMProvider | None = None
+        self._collector_alias: str = ""
+        self._collector_model: str = ""
+        self._collector_api_type: str = "openai"
         # Vision slot
         self._vision_provider: LLMProvider | None = None
         self._vision_alias: str = ""
@@ -107,6 +112,7 @@ class ProviderManager:
                 self._current_alias,
                 self._current_model,
             )
+            await self._init_collector()
             await self._init_vision()
             await self._init_trigger()
             await self._init_embedding()
@@ -115,15 +121,39 @@ class ProviderManager:
         # DB 无记录 → 尝试从 .env seed
         if not settings.llm_base_url:
             logger.warning("No LLM provider configured (DB empty, LLM_BASE_URL not set)")
+            await self._init_collector()
             await self._init_vision()
             await self._init_trigger()
             await self._init_embedding()
             return
 
         await self._seed_from_env()
+        await self._init_collector()
         await self._init_vision()
         await self._init_trigger()
         await self._init_embedding()
+
+    async def _init_collector(self) -> None:
+        """Load the collector slot independently from default and trigger."""
+        row = await self._pool.fetchrow(
+            """
+            SELECT p.id, p.alias, p.base_urls, p.api_key, p.request_policy,
+                   a.extra_body, p.stream, a.request_timeout,
+                   a.model, a.api_type
+            FROM llm_active a
+            JOIN llm_providers p ON p.id = a.provider_id
+            WHERE a.key = 'collector'
+            """,
+        )
+        if not row:
+            logger.info("No collector provider configured")
+            return
+        self._apply_collector_row(row, api_type=row.get("api_type", "openai") or "openai")
+        logger.info(
+            "Loaded collector provider from DB: %s / %s",
+            self._collector_alias,
+            self._collector_model,
+        )
 
     async def _init_vision(self) -> None:
         """启动时加载 vision slot。DB 有记录则用，否则从 .env seed。"""
@@ -306,6 +336,9 @@ class ProviderManager:
         if self._provider is not None:
             await self._provider.close()
             self._provider = None
+        if self._collector_provider is not None:
+            await self._collector_provider.close()
+            self._collector_provider = None
         if self._vision_provider is not None:
             await self._vision_provider.close()
             self._vision_provider = None
@@ -331,6 +364,10 @@ class ProviderManager:
             "model": self._current_model,
             "api_type": self._current_api_type,
         }
+        if self._collector_alias:
+            info["collector_alias"] = self._collector_alias
+            info["collector_model"] = self._collector_model
+            info["collector_api_type"] = self._collector_api_type
         if self._vision_alias:
             info["vision_alias"] = self._vision_alias
             info["vision_model"] = self._vision_model
@@ -347,6 +384,12 @@ class ProviderManager:
     def get_vision_provider(self) -> LLMProvider | None:
         """获取 vision provider。未配置时返回 None（优雅降级）。"""
         return self._vision_provider
+
+    def get_collector_provider(self) -> LLMProvider:
+        """Get the independently configured collector provider."""
+        if self._collector_provider is None:
+            raise RuntimeError("No collector provider configured")
+        return self._collector_provider
 
     def get_trigger_provider(self) -> LLMProvider | None:
         """获取 trigger provider。未配置时返回 None。"""
@@ -365,22 +408,25 @@ class ProviderManager:
         api_key: str,
         *,
         stream: bool = True,
+        request_policy: dict[str, Any] | None = None,
     ) -> str:
         """新增 provider 到 DB。返回确认信息。"""
         base_urls = _normalize_base_urls(base_urls)
         if not base_urls:
             return "至少提供一个 Base URL"
         base_urls_json = json.dumps(base_urls, ensure_ascii=False)
+        policy_json = json.dumps(normalize_provider_policy(request_policy), ensure_ascii=False)
         try:
             await self._pool.execute(
                 """
-                INSERT INTO llm_providers (alias, base_urls, api_key, stream)
-                VALUES ($1, $2::jsonb, $3, $4)
+                INSERT INTO llm_providers (alias, base_urls, api_key, stream, request_policy)
+                VALUES ($1, $2::jsonb, $3, $4, $5::jsonb)
                 """,
                 alias,
                 base_urls_json,
                 api_key,
                 stream,
+                policy_json,
             )
         except asyncpg.UniqueViolationError:
             return f"provider '{alias}' 已存在"
@@ -411,6 +457,7 @@ class ProviderManager:
             base_urls_json,
             alias,
         )
+        await self._reload_active_chat_slots(alias)
         if url is None:
             return f"已清除 '{alias}' 的 {api_type} URL（回退到自动推导）"
         return f"已设置 '{alias}' 的 {api_type} URL: {url}"
@@ -430,8 +477,9 @@ class ProviderManager:
         alias: str,
         *,
         base_urls: dict[str, str] | None = None,
+        request_policy: dict[str, Any] | None = None,
     ) -> str:
-        """更新 provider 配置。当前仅支持编辑 base_urls。"""
+        """Update provider URLs and request policy, then hot-reload active chat slots."""
         row = await self._pool.fetchrow(
             "SELECT id FROM llm_providers WHERE alias = $1",
             alias,
@@ -448,6 +496,14 @@ class ProviderManager:
                 json.dumps(normalized, ensure_ascii=False),
                 alias,
             )
+        if request_policy is not None:
+            normalized_policy = normalize_provider_policy(request_policy)
+            await self._pool.execute(
+                "UPDATE llm_providers SET request_policy = $1::jsonb WHERE alias = $2",
+                json.dumps(normalized_policy, ensure_ascii=False),
+                alias,
+            )
+        await self._reload_active_chat_slots(alias)
         return f"已更新 provider '{alias}'"
 
     async def remove_provider(self, alias: str) -> str:
@@ -483,7 +539,7 @@ class ProviderManager:
         """列出所有 provider（含 active slots、masked key）。"""
         rows = await self._pool.fetch(
             """
-            SELECT p.alias, p.base_urls, p.api_key, p.models
+            SELECT p.alias, p.base_urls, p.api_key, p.models, p.request_policy
             FROM llm_providers p
             ORDER BY p.created_at
             """,
@@ -511,6 +567,9 @@ class ProviderManager:
             if isinstance(models_raw, str):
                 models_raw = json.loads(models_raw)
             base_urls = _normalize_base_urls(r["base_urls"])
+            request_policy = r["request_policy"]
+            if isinstance(request_policy, str):
+                request_policy = json.loads(request_policy)
             result.append(
                 {
                     "alias": r["alias"],
@@ -519,9 +578,42 @@ class ProviderManager:
                     "models": models_raw or [],
                     "model_count": len(models_raw) if models_raw else 0,
                     "active_slots": active_by_alias.get(r["alias"], []),
+                    "request_policy": request_policy or {},
                 }
             )
         return result
+
+    async def _reload_active_chat_slots(self, alias: str) -> None:
+        """Rebuild active chat providers after provider-level policy or URL edits."""
+        rows = await self._pool.fetch(
+            """
+            SELECT a.key, p.id, p.alias, p.base_urls, p.api_key, p.request_policy,
+                   a.extra_body, p.stream, a.request_timeout, a.model, a.api_type
+            FROM llm_active a
+            JOIN llm_providers p ON p.id = a.provider_id
+            WHERE p.alias = $1 AND a.key = ANY($2::text[])
+            """,
+            alias,
+            ["default", "collector", "vision", "trigger"],
+        )
+        for row in rows:
+            api_type = row.get("api_type", "openai") or "openai"
+            if row["key"] == "default":
+                if self._provider is not None:
+                    await self._provider.close()
+                self._apply_row(row, api_type=api_type)
+            elif row["key"] == "collector":
+                if self._collector_provider is not None:
+                    await self._collector_provider.close()
+                self._apply_collector_row(row, api_type=api_type)
+            elif row["key"] == "vision":
+                if self._vision_provider is not None:
+                    await self._vision_provider.close()
+                self._apply_vision_row(row, api_type=api_type)
+            elif row["key"] == "trigger":
+                if self._trigger_provider is not None:
+                    await self._trigger_provider.close()
+                self._apply_trigger_row(row, api_type=api_type)
 
     async def get_provider_api_key(self, alias: str) -> str | None:
         """获取 provider 的原始 API Key，不存在则返回 None。"""
@@ -586,7 +678,7 @@ class ProviderManager:
         return f"已更新 '{alias}' 的模型列表（{len(models)} 个）"
 
     async def set_provider_extra_body(self, slot: str, extra_body_json: str) -> str:
-        """设置活跃 slot 的 extra_body 并热重载。slot: 'default' | 'vision'。"""
+        """设置活跃聊天或 embedding slot 的 extra_body 并热重载。"""
         try:
             parsed = json.loads(extra_body_json) if extra_body_json else None
         except json.JSONDecodeError:
@@ -603,6 +695,9 @@ class ProviderManager:
         if slot == "default" and self._provider is not None:
             self._provider._extra_body = parsed or {}
             logger.debug("Hot-reloaded extra_body for default slot")
+        elif slot == "collector" and self._collector_provider is not None:
+            self._collector_provider._extra_body = parsed or {}
+            logger.debug("Hot-reloaded extra_body for collector slot")
         elif slot == "vision" and self._vision_provider is not None:
             self._vision_provider._extra_body = parsed or {}
             logger.debug("Hot-reloaded extra_body for vision slot")
@@ -628,6 +723,7 @@ class ProviderManager:
         # 热重载
         provider = {
             "default": self._provider,
+            "collector": self._collector_provider,
             "vision": self._vision_provider,
             "trigger": self._trigger_provider,
             "embedding": self._embedding_provider,
@@ -723,6 +819,44 @@ class ProviderManager:
 
         logger.info("Switched LLM to %s / %s (api_type=%s)", alias, model, api_type)
         return f"已切换到 {alias} / {model}" + (f" (api_type={api_type})" if api_type != "openai" else "")
+
+    async def switch_collector(self, alias: str, model: str, *, api_type: str = "openai") -> str:
+        """Hot-switch the collector slot without changing trigger or default."""
+        row, err = await self._fetch_and_validate(alias, api_type, "collector")
+        if err:
+            return err
+        existing_timeout = (
+            await self._pool.fetchval(
+                "SELECT request_timeout FROM llm_active WHERE key = 'collector'",
+            )
+            or 60
+        )
+        if self._collector_provider is not None:
+            await self._collector_provider.close()
+        self._apply_collector_row(
+            {**dict(row), "model": model, "extra_body": None, "request_timeout": existing_timeout},
+            api_type=api_type,
+        )
+        await self._pool.execute(
+            """
+            INSERT INTO llm_active (key, provider_id, model, api_type, extra_body, request_timeout, updated_at)
+            VALUES ('collector', $1, $2, $3, NULL, $4, now())
+            ON CONFLICT (key) DO UPDATE
+            SET provider_id = EXCLUDED.provider_id,
+                model = EXCLUDED.model,
+                api_type = EXCLUDED.api_type,
+                extra_body = NULL,
+                updated_at = EXCLUDED.updated_at
+            """,
+            row["id"],
+            model,
+            api_type,
+            existing_timeout,
+        )
+        logger.info("Switched collector to %s / %s (api_type=%s)", alias, model, api_type)
+        return f"已切换 collector 到 {alias} / {model}" + (
+            f" (api_type={api_type})" if api_type != "openai" else ""
+        )
 
     async def switch_vision(self, alias: str, model: str, *, api_type: str = "openai") -> str:
         """热切换 vision slot 到指定 provider + model。"""
@@ -1157,6 +1291,36 @@ class ProviderManager:
         self._current_alias = row["alias"]
         self._current_model = row["model"]
         self._current_api_type = api_type
+
+    def _apply_collector_row(
+        self,
+        row: dict[str, Any] | asyncpg.Record,
+        api_type: str = "openai",
+    ) -> None:
+        """Build the collector provider with the same generation defaults as default."""
+        extra_body = row.get("extra_body")
+        if isinstance(extra_body, str):
+            extra_body = json.loads(extra_body)
+        kwargs = {
+            "base_url": resolve_base_url(row.get("base_urls"), api_type),
+            "api_key": row["api_key"],
+            "model": row["model"],
+            "default_temperature": runtime_config.get("llm_temperature"),
+            "default_max_tokens": runtime_config.get("llm_max_tokens"),
+            "request_timeout": row.get("request_timeout", 60) or 60,
+            "stream": row.get("stream", True) if row.get("stream") is not None else True,
+            "extra_body": extra_body,
+        }
+        if api_type == "gemini":
+            self._collector_provider = GeminiProvider(**kwargs)
+        elif api_type == "anthropic":
+            self._collector_provider = AnthropicProvider(**kwargs)
+        else:
+            policy = ProviderPolicy.from_value(row.get("request_policy"))
+            self._collector_provider = OpenAICompatProvider(**kwargs, request_policy=policy.openai)
+        self._collector_alias = row["alias"]
+        self._collector_model = row["model"]
+        self._collector_api_type = api_type
 
     async def _seed_from_env(self) -> None:
         """从 .env 配置 seed 一个 'default' provider 到 DB。"""

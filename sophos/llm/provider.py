@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Literal, TypedDict
 
@@ -172,6 +173,57 @@ class ProviderPolicy:
                 openai if isinstance(openai, dict) else None
             )
         )
+
+
+def normalize_provider_policy(value: Any) -> dict[str, Any]:
+    """Validate known policy fields while preserving future API-surface sections."""
+    if value is None:
+        return {}
+    if isinstance(value, str):
+        import json
+
+        value = json.loads(value)
+    if not isinstance(value, dict):
+        raise ValueError("request_policy must be a JSON object")
+    normalized = deepcopy(value)
+    openai = normalized.get("openai")
+    if openai is None:
+        return normalized
+    if not isinstance(openai, dict):
+        raise ValueError("request_policy.openai must be a JSON object")
+
+    allowed = openai.get("allowed_body_parameters")
+    if allowed is not None:
+        if not isinstance(allowed, list) or not all(
+            isinstance(item, str) and item.strip() for item in allowed
+        ):
+            raise ValueError("allowed_body_parameters must be an array of non-empty strings")
+        normalized_allowed = list(dict.fromkeys(item.strip() for item in allowed))
+        missing = sorted({"model", "messages"} - set(normalized_allowed))
+        if missing:
+            raise ValueError(
+                f"allowed_body_parameters must include: {', '.join(missing)}"
+            )
+        openai["allowed_body_parameters"] = normalized_allowed
+
+    accumulated = openai.get("accumulated_message_fields")
+    if accumulated is not None:
+        if not isinstance(accumulated, list) or not all(
+            isinstance(item, str) and item.strip() for item in accumulated
+        ):
+            raise ValueError("accumulated_message_fields must be an array of non-empty strings")
+        openai["accumulated_message_fields"] = list(
+            dict.fromkeys(item.strip() for item in accumulated)
+        )
+
+    required_content = openai.get("requires_assistant_content_for_tool_calls")
+    if required_content is not None and not isinstance(required_content, bool):
+        raise ValueError("requires_assistant_content_for_tool_calls must be boolean")
+
+    optional_mode = openai.get("strict_optional_mode")
+    if optional_mode is not None and optional_mode not in {"nullable", "required"}:
+        raise ValueError("strict_optional_mode must be nullable or required")
+    return normalized
 
 
 # ── Provider 抽象基类 ────────────────────────────────────

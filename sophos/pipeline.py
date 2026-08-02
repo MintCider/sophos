@@ -474,7 +474,7 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
     )
     system_prompts = {
         "default": render_system_prompt(_load_system_prompt(), prompt_values),
-        "trigger": render_system_prompt(_load_collector_prompt(), prompt_values),
+        "collector": render_system_prompt(_load_collector_prompt(), prompt_values),
     }
 
     def append_system_block(block: str) -> None:
@@ -560,7 +560,7 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
         if rendered_default.startswith(default_prefix)
         else ""
     )
-    system_prompts["trigger"] += dynamic_suffix
+    system_prompts["collector"] += dynamic_suffix
 
     # ── 上下文刷新闭包（tool loop 间隙注入新消息）──
     # Pre-compute refresh-suppressed user set for filtering
@@ -670,16 +670,13 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
             agent_tools.append(AgentTool(name=name, category=tool.category, schema=schema))
 
     default_provider = ctx.provider_mgr.get_provider()
-    trigger_provider = ctx.provider_mgr.get_trigger_provider()
+    collector_provider = ctx.provider_mgr.get_collector_provider()
 
     def resolve_provider(slot: str):
         if slot == "default":
             return default_provider
-        if slot == "trigger":
-            if trigger_provider is None:
-                logger.warning("No trigger provider configured; collector uses default provider")
-                return default_provider
-            return trigger_provider
+        if slot == "collector":
+            return collector_provider
         raise RuntimeError(f"No provider configured for workflow model slot: {slot}")
 
     workflow = load_active_workflow()
