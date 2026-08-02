@@ -11,19 +11,28 @@ def close_json_schema(schema: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def compile_openai_strict_schema(schema: dict[str, Any]) -> dict[str, Any]:
+def compile_openai_strict_schema(
+    schema: dict[str, Any],
+    *,
+    optional_mode: str = "nullable",
+) -> dict[str, Any]:
     """Compile canonical tool parameters to OpenAI strict-mode JSON Schema.
 
-    OpenAI strict function calling requires every declared property to appear in
-    ``required``. Canonically optional fields therefore become required-but-nullable
-    at the API boundary. The canonical schema remains unchanged.
+    Strict function calling requires every declared property to appear in
+    ``required``. ``nullable`` mode preserves canonical optionality using null;
+    ``required`` mode retains the original type for providers without null support.
+    The canonical schema remains unchanged.
     """
     result = deepcopy(schema)
-    _compile_openai_node(result)
+    _compile_openai_node(result, optional_mode=optional_mode)
     return result
 
 
-def compile_openai_strict_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def compile_openai_strict_tools(
+    tools: list[dict[str, Any]],
+    *,
+    optional_mode: str = "nullable",
+) -> list[dict[str, Any]]:
     """Return OpenAI tools with strict mode enabled and compliant parameters."""
     compiled = deepcopy(tools)
     for tool in compiled:
@@ -32,7 +41,10 @@ def compile_openai_strict_tools(tools: list[dict[str, Any]]) -> list[dict[str, A
         function = tool.get("function", {})
         parameters = function.get("parameters")
         if isinstance(parameters, dict):
-            function["parameters"] = compile_openai_strict_schema(parameters)
+            function["parameters"] = compile_openai_strict_schema(
+                parameters,
+                optional_mode=optional_mode,
+            )
         function["strict"] = True
     return compiled
 
@@ -69,7 +81,7 @@ def _close_objects(schema: Any) -> None:
             _close_objects(branch)
 
 
-def _compile_openai_node(schema: Any) -> None:
+def _compile_openai_node(schema: Any, *, optional_mode: str) -> None:
     if not isinstance(schema, dict):
         return
 
@@ -79,15 +91,15 @@ def _compile_openai_node(schema: Any) -> None:
         schema["additionalProperties"] = False
         schema["required"] = list(properties)
         for name, child in properties.items():
-            _compile_openai_node(child)
-            if name not in canonical_required:
+            _compile_openai_node(child, optional_mode=optional_mode)
+            if name not in canonical_required and optional_mode == "nullable":
                 properties[name] = _make_nullable(child)
 
     if "items" in schema:
-        _compile_openai_node(schema["items"])
+        _compile_openai_node(schema["items"], optional_mode=optional_mode)
     for keyword in ("anyOf", "oneOf", "allOf"):
         for branch in schema.get(keyword, []):
-            _compile_openai_node(branch)
+            _compile_openai_node(branch, optional_mode=optional_mode)
 
 
 def _make_nullable(schema: dict[str, Any]) -> dict[str, Any]:

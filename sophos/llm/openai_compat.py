@@ -17,6 +17,7 @@ from sophos.llm.provider import (
     FirstTokenCallback,
     LLMProvider,
     Message,
+    OpenAIRequestPolicy,
     ProviderRequestOptions,
     UsageInfo,
 )
@@ -41,6 +42,7 @@ class OpenAICompatProvider(LLMProvider):
         request_timeout: int = 60,
         stream: bool = True,
         extra_body: dict[str, Any] | None = None,
+        request_policy: OpenAIRequestPolicy | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
@@ -50,6 +52,7 @@ class OpenAICompatProvider(LLMProvider):
         self._request_timeout = request_timeout
         self._stream = stream
         self._extra_body = extra_body or {}
+        self._request_policy = request_policy or OpenAIRequestPolicy()
         self._session: aiohttp.ClientSession | None = None
 
     def _get_session(self) -> aiohttp.ClientSession:
@@ -82,7 +85,10 @@ class OpenAICompatProvider(LLMProvider):
             payload["temperature"] = temp
         if tools and options.tool_choice != "none":
             payload["tools"] = (
-                compile_openai_strict_tools(tools)
+                compile_openai_strict_tools(
+                    tools,
+                    optional_mode=self._request_policy.strict_optional_mode,
+                )
                 if options.strict_tools
                 else tools
             )
@@ -95,7 +101,7 @@ class OpenAICompatProvider(LLMProvider):
 
         if self._extra_body:
             payload.update(self._extra_body)
-        return payload
+        return self._request_policy.filter_body(payload)
 
     async def chat(
         self,
@@ -118,7 +124,8 @@ class OpenAICompatProvider(LLMProvider):
         session = self._get_session()
         logger.log(TRACE, "LLM payload:\n%s", json.dumps(payload, ensure_ascii=False, indent=2))
 
-        if self._stream:
+        use_stream = self._stream and self._request_policy.allows("stream")
+        if use_stream:
             payload["stream"] = True
             logger.debug(
                 "LLM request (stream): model=%s, messages=%d, tools=%s",
@@ -207,7 +214,13 @@ class OpenAICompatProvider(LLMProvider):
             # 透传 provider 特有的顶层字段（如 Gemini 的额外字段）
             for key, value in delta.items():
                 if key not in ("role", "content", "tool_calls"):
-                    extra_fields[key] = value
+                    if (
+                        key in self._request_policy.accumulated_message_fields
+                        and isinstance(value, str)
+                    ):
+                        extra_fields[key] = str(extra_fields.get(key, "")) + value
+                    else:
+                        extra_fields[key] = value
             if "tool_calls" in delta:
                 for tc_delta in delta["tool_calls"]:
                     idx = tc_delta.get("index", 0)
@@ -246,6 +259,8 @@ class OpenAICompatProvider(LLMProvider):
             message["content"] = content
         if tool_calls_map:
             message["tool_calls"] = [tool_calls_map[i] for i in sorted(tool_calls_map)]
+            if self._request_policy.requires_assistant_content_for_tool_calls and "content" not in message:
+                message["content"] = ""
         # 透传 provider 特有字段（如 Gemini 的额外字段）
         for key, value in extra_fields.items():
             message[key] = value  # type: ignore[literal-required]
@@ -282,8 +297,7 @@ class OpenAICompatProvider(LLMProvider):
         logger.log(TRACE, "LLM response:\n%s", json.dumps(result, ensure_ascii=False, indent=2, default=str))
         return result
 
-    @staticmethod
-    def _parse_response(data: dict[str, Any]) -> ChatResponse:
+    def _parse_response(self, data: dict[str, Any]) -> ChatResponse:
         """将 OpenAI API 响应解析为 ChatResponse。
 
         直接透传 API 返回的 message 结构，不丢弃 provider 特有字段
@@ -300,6 +314,8 @@ class OpenAICompatProvider(LLMProvider):
         if raw_msg.get("tool_calls"):
             # 保留 tool_calls 原始结构（含 provider 特有字段如 thought_signature）
             message["tool_calls"] = raw_msg["tool_calls"]
+            if self._request_policy.requires_assistant_content_for_tool_calls:
+                message["content"] = raw_msg.get("content") or ""
         # 透传 provider 特有的顶层字段
         for key, value in raw_msg.items():
             if key not in ("role", "content", "tool_calls"):

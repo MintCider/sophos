@@ -204,6 +204,7 @@ CREATE TABLE IF NOT EXISTS llm_providers (
     api_key         TEXT            NOT NULL,
     models          JSONB           DEFAULT '[]'::jsonb,
     stream          BOOLEAN         DEFAULT true,
+    request_policy  JSONB           NOT NULL DEFAULT '{}'::jsonb,
     created_at      TIMESTAMPTZ     DEFAULT now()
 );
 """

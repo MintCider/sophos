@@ -10,6 +10,8 @@ from sophos.llm.provider import (
     ChatResponse,
     LLMProvider,
     Message,
+    OpenAIRequestPolicy,
+    ProviderPolicy,
     ProviderRequestOptions,
     ToolCall,
 )
@@ -21,6 +23,8 @@ __all__ = [
     "LLMProvider",
     "Message",
     "OpenAICompatProvider",
+    "OpenAIRequestPolicy",
+    "ProviderPolicy",
     "ProviderRequestOptions",
     "ToolCall",
     "build_chat_context",

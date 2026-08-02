@@ -6,6 +6,7 @@ from sophos.db import (
     _CREATE_CUSTOM_TOOLS_TABLE,
     _CREATE_IDENTITY_AUTH_AUDIT_TABLE,
     _CREATE_INDEXES,
+    _CREATE_LLM_PROVIDERS_TABLE,
     _CREATE_MESSAGES_TABLE,
     _CREATE_USER_IDENTITIES_TABLE,
     SCHEMA_VERSION,
@@ -68,6 +69,10 @@ class DatabaseSchemaTests(unittest.TestCase):
         self.assertIn("COALESCE(last_accessed_at, occurred_at), id", indexes)
         self.assertIn("idx_memories_lru", indexes)
         self.assertIn("COALESCE(last_hit, created_at), id", indexes)
+
+    def test_provider_schema_declares_request_policy_without_runtime_migration(self) -> None:
+        columns = _declared_columns(_CREATE_LLM_PROVIDERS_TABLE)
+        self.assertIn("request_policy", columns)
 
 
 if __name__ == "__main__":

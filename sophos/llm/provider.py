@@ -4,6 +4,8 @@
 TypedDict 提供类型提示但零运行时开销，可直接 json.dumps。
 """
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -89,6 +91,87 @@ class ProviderRequestOptions:
     tool_choice: Literal["auto", "required", "none"] = "auto"
     strict_tools: bool = True
     cache: CachePlan | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class OpenAIRequestPolicy:
+    """Provider-declared compatibility rules for an OpenAI-style endpoint."""
+
+    allowed_body_parameters: frozenset[str] | None = None
+    accumulated_message_fields: frozenset[str] = frozenset()
+    requires_assistant_content_for_tool_calls: bool = False
+    strict_optional_mode: Literal["nullable", "required"] = "nullable"
+
+    def allows(self, parameter: str) -> bool:
+        return self.allowed_body_parameters is None or parameter in self.allowed_body_parameters
+
+    def filter_body(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if self.allowed_body_parameters is None:
+            return payload
+        return {key: value for key, value in payload.items() if key in self.allowed_body_parameters}
+
+    def to_dict(self) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "accumulated_message_fields": sorted(self.accumulated_message_fields),
+            "requires_assistant_content_for_tool_calls": (
+                self.requires_assistant_content_for_tool_calls
+            ),
+            "strict_optional_mode": self.strict_optional_mode,
+        }
+        if self.allowed_body_parameters is not None:
+            result["allowed_body_parameters"] = sorted(self.allowed_body_parameters)
+        return result
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any] | None) -> OpenAIRequestPolicy:
+        value = value or {}
+        allowed = value.get("allowed_body_parameters")
+        accumulated = value.get("accumulated_message_fields")
+        return cls(
+            allowed_body_parameters=(
+                frozenset(str(item) for item in allowed)
+                if isinstance(allowed, list)
+                else None
+            ),
+            accumulated_message_fields=frozenset(
+                str(item) for item in accumulated
+            )
+            if isinstance(accumulated, list)
+            else frozenset(),
+            requires_assistant_content_for_tool_calls=bool(
+                value.get("requires_assistant_content_for_tool_calls", False)
+            ),
+            strict_optional_mode=(
+                "required"
+                if value.get("strict_optional_mode") == "required"
+                else "nullable"
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderPolicy:
+    """Extensible provider policy, grouped by native API surface."""
+
+    openai: OpenAIRequestPolicy = OpenAIRequestPolicy()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"openai": self.openai.to_dict()}
+
+    @classmethod
+    def from_value(cls, value: Any) -> ProviderPolicy:
+        if isinstance(value, str):
+            import json
+
+            value = json.loads(value)
+        if not isinstance(value, dict):
+            value = {}
+        openai = value.get("openai")
+        return cls(
+            openai=OpenAIRequestPolicy.from_dict(
+                openai if isinstance(openai, dict) else None
+            )
+        )
 
 
 # ── Provider 抽象基类 ────────────────────────────────────

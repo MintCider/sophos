@@ -21,7 +21,7 @@ from sophos.llm.anthropic import AnthropicProvider
 from sophos.llm.embedding import EmbeddingProvider
 from sophos.llm.gemini import GeminiProvider
 from sophos.llm.openai_compat import OpenAICompatProvider
-from sophos.llm.provider import LLMProvider
+from sophos.llm.provider import LLMProvider, ProviderPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +92,7 @@ class ProviderManager:
         """启动时加载活跃配置。DB 有记录则用，否则从 .env seed。"""
         row = await self._pool.fetchrow(
             """
-            SELECT p.id, p.alias, p.base_urls, p.api_key,
+            SELECT p.id, p.alias, p.base_urls, p.api_key, p.request_policy,
                    a.extra_body, p.stream, a.request_timeout,
                    a.model, a.api_type
             FROM llm_active a
@@ -129,7 +129,7 @@ class ProviderManager:
         """启动时加载 vision slot。DB 有记录则用，否则从 .env seed。"""
         row = await self._pool.fetchrow(
             """
-            SELECT p.id, p.alias, p.base_urls, p.api_key,
+            SELECT p.id, p.alias, p.base_urls, p.api_key, p.request_policy,
                    a.extra_body, p.stream, a.request_timeout,
                    a.model, a.api_type
             FROM llm_active a
@@ -156,7 +156,7 @@ class ProviderManager:
         """启动时加载 trigger slot。DB 有记录则用，否则从 .env seed。"""
         row = await self._pool.fetchrow(
             """
-            SELECT p.id, p.alias, p.base_urls, p.api_key,
+            SELECT p.id, p.alias, p.base_urls, p.api_key, p.request_policy,
                    a.extra_body, p.stream, a.request_timeout,
                    a.model, a.api_type
             FROM llm_active a
@@ -666,7 +666,7 @@ class ProviderManager:
         """拉取 provider 行并校验 base_url，返回 (row, None) 或 (None, err)。"""
         row = await self._pool.fetchrow(
             """
-            SELECT id, alias, base_urls, api_key, stream
+            SELECT id, alias, base_urls, api_key, stream, request_policy
             FROM llm_providers WHERE alias = $1
             """,
             alias,
@@ -1152,7 +1152,8 @@ class ProviderManager:
         elif api_type == "anthropic":
             self._provider = AnthropicProvider(**kwargs)
         else:
-            self._provider = OpenAICompatProvider(**kwargs)
+            policy = ProviderPolicy.from_value(row.get("request_policy"))
+            self._provider = OpenAICompatProvider(**kwargs, request_policy=policy.openai)
         self._current_alias = row["alias"]
         self._current_model = row["model"]
         self._current_api_type = api_type
@@ -1244,7 +1245,8 @@ class ProviderManager:
         elif api_type == "anthropic":
             self._vision_provider = AnthropicProvider(**kwargs)
         else:
-            self._vision_provider = OpenAICompatProvider(**kwargs)
+            policy = ProviderPolicy.from_value(row.get("request_policy"))
+            self._vision_provider = OpenAICompatProvider(**kwargs, request_policy=policy.openai)
         self._vision_alias = row["alias"]
         self._vision_model = row["model"]
         self._vision_api_type = api_type
@@ -1346,7 +1348,8 @@ class ProviderManager:
         elif api_type == "anthropic":
             self._trigger_provider = AnthropicProvider(**kwargs)
         else:
-            self._trigger_provider = OpenAICompatProvider(**kwargs)
+            policy = ProviderPolicy.from_value(row.get("request_policy"))
+            self._trigger_provider = OpenAICompatProvider(**kwargs, request_policy=policy.openai)
         self._trigger_alias = row["alias"]
         self._trigger_model = row["model"]
         self._trigger_api_type = api_type
