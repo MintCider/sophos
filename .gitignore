@@ -47,4 +47,4 @@ htmlcov/
 # Frontend
 node_modules/
 web/dist/
-pnpm-lock.yaml
+web/*.tsbuildinfo
