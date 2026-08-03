@@ -1,6 +1,9 @@
 import json
 import unittest
 from collections import deque
+from unittest.mock import AsyncMock, patch
+
+import aiohttp
 
 from sophos.llm.anthropic import AnthropicProvider
 from sophos.llm.gemini import GeminiProvider
@@ -291,6 +294,123 @@ class ProviderStreamingPolicyTests(unittest.IsolatedAsyncioTestCase):
         assert usage is not None
         self.assertEqual(usage["cached_input_tokens"], 80)
         self.assertEqual(response["native_metadata"]["responseId"], "response-1")
+
+
+class GeminiRetryTests(unittest.IsolatedAsyncioTestCase):
+    class Response:
+        def __init__(
+            self,
+            status: int,
+            *,
+            body: str = "",
+            data: dict | None = None,
+            headers: dict[str, str] | None = None,
+        ) -> None:
+            self.status = status
+            self._body = body
+            self._data = data or {}
+            self.headers = headers or {}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+        async def text(self) -> str:
+            return self._body
+
+        async def json(self) -> dict:
+            return self._data
+
+    class Session:
+        closed = False
+
+        def __init__(self, outcomes: list) -> None:
+            self.outcomes = deque(outcomes)
+            self.post_count = 0
+
+        def post(self, *args, **kwargs):
+            self.post_count += 1
+            outcome = self.outcomes.popleft()
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+    @staticmethod
+    def _provider(session) -> GeminiProvider:
+        provider = GeminiProvider(
+            base_url="https://generativelanguage.googleapis.com",
+            api_key="test",
+            model="model",
+            stream=False,
+        )
+        provider._session = session
+        return provider
+
+    async def test_retries_transient_response_and_honors_retry_after(self) -> None:
+        session = self.Session(
+            [
+                self.Response(
+                    503,
+                    body='{"error":{"code":503}}',
+                    headers={"Retry-After": "2"},
+                ),
+                self.Response(
+                    200,
+                    data={
+                        "candidates": [
+                            {"content": {"parts": [{"text": "ok"}]}, "finishReason": "STOP"}
+                        ]
+                    },
+                ),
+            ]
+        )
+        provider = self._provider(session)
+
+        with patch("sophos.llm.gemini.asyncio.sleep", new=AsyncMock()) as sleep:
+            response = await provider.chat([{"role": "user", "content": "hello"}])
+
+        self.assertEqual(response["message"]["content"], "ok")
+        self.assertEqual(session.post_count, 2)
+        sleep.assert_awaited_once_with(2.0)
+
+    async def test_does_not_retry_gateway_429_wrapping_upstream_400(self) -> None:
+        body = '{"error":{"message":"invalid schema","code":"400"}}'
+        session = self.Session([self.Response(429, body=body)])
+        provider = self._provider(session)
+
+        with (
+            patch("sophos.llm.gemini.asyncio.sleep", new=AsyncMock()) as sleep,
+            self.assertRaisesRegex(RuntimeError, "Gemini API error 429"),
+        ):
+            await provider.chat([{"role": "user", "content": "hello"}])
+
+        self.assertEqual(session.post_count, 1)
+        sleep.assert_not_awaited()
+
+    async def test_retries_connection_failure_with_exponential_backoff(self) -> None:
+        session = self.Session(
+            [
+                aiohttp.ClientConnectionError("disconnected"),
+                aiohttp.ClientConnectionError("disconnected"),
+                self.Response(
+                    200,
+                    data={
+                        "candidates": [
+                            {"content": {"parts": [{"text": "ok"}]}, "finishReason": "STOP"}
+                        ]
+                    },
+                ),
+            ]
+        )
+        provider = self._provider(session)
+
+        with patch("sophos.llm.gemini.asyncio.sleep", new=AsyncMock()) as sleep:
+            await provider.chat([{"role": "user", "content": "hello"}])
+
+        self.assertEqual(session.post_count, 3)
+        self.assertEqual([call.args for call in sleep.await_args_list], [(1.0,), (2.0,)])
 
 
 if __name__ == "__main__":

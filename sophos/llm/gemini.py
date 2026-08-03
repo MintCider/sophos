@@ -5,9 +5,12 @@
 内部消息格式统一为 OpenAI Chat Completions 格式。
 """
 
+import asyncio
 import json
 import logging
 import uuid
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import aiohttp
@@ -25,6 +28,18 @@ from sophos.llm.schema import compile_gemini_schema
 logger = logging.getLogger(__name__)
 
 TRACE = 5
+_MAX_REQUEST_ATTEMPTS = 3
+_INITIAL_RETRY_DELAY_SECONDS = 1.0
+_MAX_RETRY_DELAY_SECONDS = 30.0
+_RETRYABLE_HTTP_STATUSES = frozenset({429, 500, 502, 503, 504})
+
+
+class _GeminiAPIError(RuntimeError):
+    def __init__(self, status: int, body: str, retry_after: str | None) -> None:
+        super().__init__(f"Gemini API error {status}: {body}")
+        self.status = status
+        self.body = body
+        self.retry_after = retry_after
 
 
 class GeminiProvider(LLMProvider):
@@ -309,13 +324,65 @@ class GeminiProvider(LLMProvider):
             json.dumps(payload, ensure_ascii=False, indent=2),
         )
 
+        first_token_notified = False
+
+        async def notify_first_token_once() -> None:
+            nonlocal first_token_notified
+            if first_token_notified or on_first_token is None:
+                return
+            first_token_notified = True
+            await on_first_token()
+
+        for attempt in range(1, _MAX_REQUEST_ATTEMPTS + 1):
+            try:
+                return await self._chat_once(
+                    session,
+                    payload,
+                    messages_count=len(messages),
+                    tools_count=len(tools) if tools else 0,
+                    on_first_token=notify_first_token_once,
+                )
+            except _GeminiAPIError as exc:
+                if attempt >= _MAX_REQUEST_ATTEMPTS or not self._is_retryable_response(
+                    exc.status,
+                    exc.body,
+                ):
+                    raise
+                delay = self._retry_delay(exc.retry_after, attempt)
+                reason = f"HTTP {exc.status}"
+            except (aiohttp.ClientError, TimeoutError) as exc:
+                if attempt >= _MAX_REQUEST_ATTEMPTS:
+                    raise
+                delay = self._retry_delay(None, attempt)
+                reason = type(exc).__name__
+
+            logger.warning(
+                "Gemini request failed with %s; retrying in %.1fs (attempt %d/%d)",
+                reason,
+                delay,
+                attempt + 1,
+                _MAX_REQUEST_ATTEMPTS,
+            )
+            await asyncio.sleep(delay)
+
+        raise AssertionError("unreachable")
+
+    async def _chat_once(
+        self,
+        session: aiohttp.ClientSession,
+        payload: dict[str, Any],
+        *,
+        messages_count: int,
+        tools_count: int,
+        on_first_token: FirstTokenCallback,
+    ) -> ChatResponse:
         if self._stream:
             url = f"{self._root}/v1beta/models/{self._model}:streamGenerateContent?alt=sse"
             logger.debug(
                 "Gemini request (stream): model=%s, messages=%d, tools=%s",
                 self._model,
-                len(messages),
-                len(tools) if tools else 0,
+                messages_count,
+                tools_count,
             )
             timeout = aiohttp.ClientTimeout(
                 total=self._request_timeout * 5,
@@ -324,23 +391,68 @@ class GeminiProvider(LLMProvider):
             async with session.post(url, json=payload, timeout=timeout) as resp:
                 if resp.status != 200:
                     body = await resp.text()
-                    raise RuntimeError(f"Gemini API error {resp.status}: {body}")
+                    raise _GeminiAPIError(
+                        resp.status,
+                        body,
+                        resp.headers.get("Retry-After"),
+                    )
                 return await self._consume_stream(resp, on_first_token=on_first_token)
         else:
             url = f"{self._root}/v1beta/models/{self._model}:generateContent"
             logger.debug(
                 "Gemini request: model=%s, messages=%d, tools=%s",
                 self._model,
-                len(messages),
-                len(tools) if tools else 0,
+                messages_count,
+                tools_count,
             )
             timeout = aiohttp.ClientTimeout(total=self._request_timeout)
             async with session.post(url, json=payload, timeout=timeout) as resp:
                 if resp.status != 200:
                     body = await resp.text()
-                    raise RuntimeError(f"Gemini API error {resp.status}: {body}")
+                    raise _GeminiAPIError(
+                        resp.status,
+                        body,
+                        resp.headers.get("Retry-After"),
+                    )
                 data = await resp.json()
             return self._parse_gemini_response(data)
+
+    @staticmethod
+    def _is_retryable_response(status: int, body: str) -> bool:
+        if status not in _RETRYABLE_HTTP_STATUSES:
+            return False
+
+        try:
+            error = json.loads(body).get("error", {})
+        except (json.JSONDecodeError, AttributeError):
+            return True
+        if not isinstance(error, dict):
+            return True
+
+        upstream_code = error.get("code")
+        try:
+            upstream_status = int(upstream_code)
+        except (TypeError, ValueError):
+            return True
+        return not (400 <= upstream_status < 500 and upstream_status != 429)
+
+    @staticmethod
+    def _retry_delay(retry_after: str | None, failed_attempt: int) -> float:
+        delay: float | None = None
+        if retry_after:
+            try:
+                delay = float(retry_after)
+            except ValueError:
+                try:
+                    retry_at = parsedate_to_datetime(retry_after)
+                    if retry_at.tzinfo is None:
+                        retry_at = retry_at.replace(tzinfo=UTC)
+                    delay = (retry_at - datetime.now(UTC)).total_seconds()
+                except (TypeError, ValueError, OverflowError):
+                    delay = None
+        if delay is None:
+            delay = _INITIAL_RETRY_DELAY_SECONDS * (2 ** (failed_attempt - 1))
+        return min(max(delay, 0.0), _MAX_RETRY_DELAY_SECONDS)
 
     # ── Streaming ─────────────────────────────────────────
 
