@@ -49,6 +49,18 @@ def compile_openai_strict_tools(
     return compiled
 
 
+def compile_gemini_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Compile canonical JSON Schema to Gemini's supported schema subset.
+
+    Gemini's native ``FunctionDeclaration.parameters`` schema rejects the
+    standard ``additionalProperties`` keyword.  Remove it at every schema node
+    without mutating the canonical tool definition.
+    """
+    result = deepcopy(schema)
+    _compile_gemini_node(result)
+    return result
+
+
 def strip_boundary_nulls(value: Any, canonical_schema: dict[str, Any]) -> Any:
     """Remove null placeholders introduced only by strict boundary compilation."""
     if isinstance(value, dict):
@@ -65,6 +77,33 @@ def strip_boundary_nulls(value: Any, canonical_schema: dict[str, Any]) -> Any:
         item_schema = canonical_schema.get("items", {})
         return [strip_boundary_nulls(item, item_schema) for item in value]
     return value
+
+
+def _compile_gemini_node(schema: Any) -> None:
+    if not isinstance(schema, dict):
+        return
+
+    schema.pop("additionalProperties", None)
+
+    properties = schema.get("properties")
+    if isinstance(properties, dict):
+        for child in properties.values():
+            _compile_gemini_node(child)
+
+    for keyword in ("items", "contains", "not", "if", "then", "else"):
+        _compile_gemini_node(schema.get(keyword))
+
+    for keyword in ("anyOf", "oneOf", "allOf", "prefixItems"):
+        branches = schema.get(keyword)
+        if isinstance(branches, list):
+            for branch in branches:
+                _compile_gemini_node(branch)
+
+    for keyword in ("$defs", "definitions", "dependentSchemas", "patternProperties"):
+        definitions = schema.get(keyword)
+        if isinstance(definitions, dict):
+            for child in definitions.values():
+                _compile_gemini_node(child)
 
 
 def _close_objects(schema: Any) -> None:

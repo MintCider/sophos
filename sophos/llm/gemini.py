@@ -20,6 +20,7 @@ from sophos.llm.provider import (
     ProviderRequestOptions,
     UsageInfo,
 )
+from sophos.llm.schema import compile_gemini_schema
 
 logger = logging.getLogger(__name__)
 
@@ -155,7 +156,7 @@ class GeminiProvider(LLMProvider):
                 "description": fn.get("description", ""),
             }
             if fn.get("parameters"):
-                decl["parameters"] = fn["parameters"]
+                decl["parameters"] = compile_gemini_schema(fn["parameters"])
             declarations.append(decl)
         return [{"functionDeclarations": declarations}] if declarations else []
 

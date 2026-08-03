@@ -242,6 +242,37 @@ class ProviderStreamingPolicyTests(unittest.IsolatedAsyncioTestCase):
             "VALIDATED",
         )
 
+    def test_gemini_removes_unsupported_additional_properties_recursively(self) -> None:
+        tool = {
+            "type": "function",
+            "function": {
+                "name": "lookup",
+                "parameters": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "filters": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "properties": {"owner": {"type": "string"}},
+                        }
+                    },
+                },
+            },
+        }
+        provider = GeminiProvider(
+            base_url="https://generativelanguage.googleapis.com",
+            api_key="test",
+            model="model",
+        )
+
+        payload = provider._build_payload(self.messages, [tool], None, None, self.options)
+
+        parameters = payload["tools"][0]["functionDeclarations"][0]["parameters"]
+        self.assertNotIn("additionalProperties", parameters)
+        self.assertNotIn("additionalProperties", parameters["properties"]["filters"])
+        self.assertFalse(tool["function"]["parameters"]["additionalProperties"])
+
     def test_native_cache_usage_is_preserved(self) -> None:
         response = GeminiProvider._parse_gemini_response(
             {
