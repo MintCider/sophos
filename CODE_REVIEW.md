@@ -12,12 +12,10 @@
 - WebSocket 事件处理任务没有并发上限、顺序控制和关闭阶段的任务回收。
 - Trigger 评估任务创建后没有同步切换状态，并发消息可能重复创建评估循环并绕过 QPS 控制。
 - Provider 超时热更新写入 `_timeout`，聊天、视觉和触发 Provider 实际读取 `_request_timeout`。
-- 日志 SSE 不处理 RotatingFileHandler 更换文件，首次轮转后会停留在旧文件 EOF。
 - `memories.embedding` 使用无固定维度的 `vector`，普通 HNSW 索引创建失败后被忽略，向量搜索退化为全表扫描。
 
 ## 低效与耦合
 
-- 日志 tail 接口同步读取完整文件后再截断，会阻塞事件循环。
 - 权限 scope 列表逐项查询工具白名单，存在 N+1 查询。
 - 前端 API 超时为 10 秒，Provider 模型刷新后端允许等待 15 秒，可能出现前端报错但后端成功。
 - ProviderManager 和部分 API 路由仍直接访问其他模块私有状态，Provider slot 切换流程仍有重复实现，可能造成热更新行为不一致。
@@ -25,7 +23,8 @@
 ## TODO
 
 - 增加管理员手动触发的数据库物理空间整理功能；需要处理 `VACUUM FULL` 的独占锁、额外临时磁盘需求、二次确认和运行状态展示。
+- 重新梳理日志等级及各调用点，明确 INFO、DEBUG、TRACE 的用途、敏感信息边界和体积约束；当前分类仍不够一致。
 
 ## 测试缺口
 
-- 缺少真实 PostgreSQL schema、消息 ID 冲突、消息并发顺序、工具执行权限、日志轮转、Provider 热更新和后台任务生命周期测试。
+- 缺少真实 PostgreSQL schema、消息 ID 冲突、消息并发顺序、工具执行权限、Provider 热更新和后台任务生命周期测试。

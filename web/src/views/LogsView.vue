@@ -3,9 +3,16 @@ import {
   NInput,
   NSelect,
   NSpace,
+  NVirtualList,
+  type VirtualListInst,
 } from 'naive-ui'
 import { h, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import { useLogs, LOG_LEVELS, type LogLevel } from '@/composables/useLogs'
+import {
+  useLogs,
+  LOG_LEVELS,
+  type LogLevel,
+  type LogLine,
+} from '@/composables/useLogs'
 import { useTheme } from '@/composables/useTheme'
 import api from '@/api'
 
@@ -75,17 +82,14 @@ function renderLevelLabel(option: { label: string; value: string }) {
 
 // ── 滚动与跟踪 ────────────────────────────────────────
 
-const logContainer = ref<HTMLElement | null>(null)
+const virtualList = ref<VirtualListInst | null>(null)
 
 function scrollToBottom() {
-  const el = logContainer.value
-  if (el) {
-    el.scrollTop = el.scrollHeight
-  }
+  virtualList.value?.scrollTo({ position: 'bottom', debounce: false })
 }
 
-function onScroll() {
-  const el = logContainer.value
+function onScroll(event: Event) {
+  const el = event.target as HTMLElement | null
   if (!el) return
   // 距底部 50px 以内视为"在底部"
   const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 50
@@ -111,31 +115,47 @@ function handleResumeClick() {
   nextTick(scrollToBottom)
 }
 
-// ── 折叠状态（基于视觉行数） ──────────────────────────────
+// ── 大体积内容折叠 ─────────────────────────────────────
 
 const expandedIds = ref(new Set<number>())
-/** 记录哪些日志条目内容溢出了（需要折叠） */
-const overflowIds = ref(new Set<number>())
+const COLLAPSED_PREVIEW_CHARS = 1200
 
 function toggleExpand(id: number) {
   const isCollapsing = expandedIds.value.has(id)
   if (isCollapsing) {
     expandedIds.value.delete(id)
-    // 收起后滚回到该条目位置
-    nextTick(() => {
-      const container = logContainer.value
-      if (!container) return
-      const el = container.querySelector<HTMLElement>(`[data-id="${id}"]`)
-      if (el) {
-        const lineEl = el.closest('.log-line') as HTMLElement | null
-        if (lineEl) {
-          lineEl.scrollIntoView({ block: 'nearest' })
-        }
-      }
-    })
+    nextTick(() => virtualList.value?.scrollTo({ key: id }))
   } else {
     expandedIds.value.add(id)
   }
+}
+
+function isCollapsible(line: LogLine): boolean {
+  return line.contentLength > COLLAPSED_PREVIEW_CHARS || line.continuation.length > 2
+}
+
+function previewMessage(message: string): string {
+  return message.slice(0, COLLAPSED_PREVIEW_CHARS)
+}
+
+function previewContinuation(
+  line: LogLine,
+): string {
+  let remaining = COLLAPSED_PREVIEW_CHARS - Math.min(
+    line.message.length,
+    COLLAPSED_PREVIEW_CHARS,
+  )
+  if (remaining <= 0) return ''
+
+  let preview = ''
+  for (const part of line.continuation) {
+    const separator = preview ? '\n' : ''
+    const addition = `${separator}${part}`
+    preview += addition.slice(0, remaining)
+    remaining -= addition.length
+    if (remaining <= 0) break
+  }
+  return preview
 }
 
 function formatJson(text: string): string {
@@ -146,44 +166,12 @@ function formatJson(text: string): string {
   }
 }
 
-/** 渲染后检测哪些日志条目内容溢出了 3 行高度 */
-function detectOverflow() {
-  const container = logContainer.value
-  if (!container) return
-  const items = container.querySelectorAll<HTMLElement>('.log-line-body')
-  const newSet = new Set<number>()
-  items.forEach((el) => {
-    const id = Number(el.dataset.id)
-    if (el.scrollHeight > el.clientHeight + 1) {
-      newSet.add(id)
-    }
-  })
-  // 保留已展开条目的溢出标记
-  for (const id of expandedIds.value) {
-    if (overflowIds.value.has(id)) {
-      newSet.add(id)
-    }
-  }
-  overflowIds.value = newSet
-}
-
-// 日志变化后重新检测溢出
-watch(
-  () => filteredLines.value.length,
-  () => {
-    nextTick(detectOverflow)
-  },
-)
-
 // ── 生命周期 ──────────────────────────────────────────
 
 onMounted(async () => {
   await loadFileList()
   await start()
-  nextTick(() => {
-    scrollToBottom()
-    detectOverflow()
-  })
+  nextTick(scrollToBottom)
 })
 
 onUnmounted(() => {
@@ -229,59 +217,59 @@ onUnmounted(() => {
 
     <!-- 日志区域 -->
     <div class="logs-container glass-panel-heavy">
-      <div class="logs-scroll" ref="logContainer" @scroll="onScroll">
-        <div v-if="loading" class="logs-loading">加载中...</div>
-        <div v-else-if="filteredLines.length === 0" class="logs-empty">
-          暂无日志
-        </div>
-        <template v-else>
-          <div
-            v-for="line in filteredLines"
-            :key="line.id"
-            :class="['log-line', `log-line--${line.level.toLowerCase() || 'unknown'}`]"
-        >
-          <!-- 折叠指示器（绝对定位在左 margin 区域） -->
-          <span
-            v-if="overflowIds.has(line.id)"
-            class="log-fold-indicator"
-            @click="toggleExpand(line.id)"
-          >{{ expandedIds.has(line.id) ? '▼' : '▶' }}</span>
-          <!-- 首行：时间 + 等级 + 组件 -->
-          <div class="log-line-header">
-            <span class="log-ts">{{ line.ts }}</span>
-            <span :class="['log-level', `log-level--${line.level.toLowerCase() || 'unknown'}`]">
-              {{ line.level.padEnd(8) }}
-            </span>
-            <span class="log-logger">{{ line.logger }}</span>
-          </div>
-          <!-- 内容区：message + continuation，用 max-height 控制折叠 -->
-          <div
-            class="log-line-body"
-            :class="{ 'log-line-body--collapsed': !expandedIds.has(line.id) }"
-            :data-id="line.id"
-          >
-            <span class="log-message">{{ line.message }}</span>
-            <template v-if="line.continuation.length > 0">
-              <div class="log-continuation">{{ expandedIds.has(line.id)
-                ? formatJson(line.continuation.join('\n'))
-                : line.continuation.join('\n') }}</div>
-            </template>
-          </div>
-          <!-- 折叠时的展开提示 -->
-          <span
-            v-if="!expandedIds.has(line.id) && overflowIds.has(line.id)"
-            class="log-fold-bar"
-            @click="toggleExpand(line.id)"
-          >··· 展开 ···</span>
-          <!-- 展开时的底部收起 -->
-          <span
-            v-if="expandedIds.has(line.id) && overflowIds.has(line.id)"
-            class="log-fold-bar"
-            @click="toggleExpand(line.id)"
-          >··· 收起 ···</span>
-        </div>
-      </template>
+      <div v-if="loading" class="logs-loading">加载中...</div>
+      <div v-else-if="filteredLines.length === 0" class="logs-empty">
+        暂无日志
       </div>
+      <NVirtualList
+        v-else
+        ref="virtualList"
+        class="logs-scroll"
+        :items="filteredLines"
+        :item-size="68"
+        item-resizable
+        key-field="id"
+        @scroll="onScroll"
+      >
+        <template #default="{ item: line }">
+          <div
+            :class="['log-line', `log-line--${line.level.toLowerCase() || 'unknown'}`]"
+          >
+            <!-- 折叠指示器（绝对定位在左 margin 区域） -->
+            <span
+              v-if="isCollapsible(line)"
+              class="log-fold-indicator"
+              @click="toggleExpand(line.id)"
+            >{{ expandedIds.has(line.id) ? '▼' : '▶' }}</span>
+            <!-- 首行：时间 + 等级 + 组件 -->
+            <div class="log-line-header">
+              <span class="log-ts">{{ line.ts }}</span>
+              <span :class="['log-level', `log-level--${line.level.toLowerCase() || 'unknown'}`]">
+                {{ line.level.padEnd(8) }}
+              </span>
+              <span class="log-logger">{{ line.logger }}</span>
+            </div>
+            <div
+              class="log-line-body"
+              :class="{ 'log-line-body--collapsed': !expandedIds.has(line.id) }"
+            >
+              <span class="log-message">{{ expandedIds.has(line.id)
+                ? line.message
+                : previewMessage(line.message) }}</span>
+              <template v-if="line.continuation.length > 0">
+                <div class="log-continuation">{{ expandedIds.has(line.id)
+                  ? formatJson(line.continuation.join('\n'))
+                  : previewContinuation(line) }}</div>
+              </template>
+            </div>
+            <span
+              v-if="isCollapsible(line)"
+              class="log-fold-bar"
+              @click="toggleExpand(line.id)"
+            >{{ expandedIds.has(line.id) ? '··· 收起 ···' : '··· 展开 ···' }}</span>
+          </div>
+        </template>
+      </NVirtualList>
     </div>
 
     <!-- 浮动提示：有新日志 -->

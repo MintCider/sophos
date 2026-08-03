@@ -1,8 +1,10 @@
-import { ref, watch, type Ref } from 'vue'
+import { ref, type Ref } from 'vue'
 
 export interface SSEOptions {
   /** 收到一条 SSE data 消息时的回调 */
   onMessage: (data: string) => void
+  /** 服务端无法续接旧游标时重新加载历史快照 */
+  onReset?: () => void
   /** 连接断开后自动重连延迟（ms），0 表示不重连 */
   reconnectDelay?: number
 }
@@ -16,6 +18,7 @@ export function useLogStream(url: Ref<string>, options: SSEOptions) {
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null
   let watchdogTimer: ReturnType<typeof setInterval> | null = null
   let lastActivity = 0
+  let resumeCursor = ''
 
   function resetActivity() {
     lastActivity = Date.now()
@@ -45,9 +48,25 @@ export function useLogStream(url: Ref<string>, options: SSEOptions) {
     }
   }
 
-  function connect() {
+  function updateCursor(event: MessageEvent) {
+    if (event.lastEventId) {
+      resumeCursor = event.lastEventId
+    }
+  }
+
+  function streamUrl(): string {
+    if (!resumeCursor) return url.value
+    const parsed = new URL(url.value, window.location.href)
+    parsed.searchParams.set('cursor', resumeCursor)
+    return parsed.toString()
+  }
+
+  function connect(cursor?: string) {
     disconnect()
-    source = new EventSource(url.value)
+    if (cursor !== undefined) {
+      resumeCursor = cursor
+    }
+    source = new EventSource(streamUrl())
 
     source.onopen = () => {
       connected.value = true
@@ -57,12 +76,20 @@ export function useLogStream(url: Ref<string>, options: SSEOptions) {
 
     source.onmessage = (event) => {
       resetActivity()
+      updateCursor(event)
       options.onMessage(event.data)
     }
 
     // 监听心跳事件（不触发 onmessage，需要单独监听）
-    source.addEventListener('heartbeat', () => {
+    source.addEventListener('heartbeat', (event) => {
       resetActivity()
+      updateCursor(event as MessageEvent)
+    })
+
+    source.addEventListener('reset', (event) => {
+      resetActivity()
+      updateCursor(event as MessageEvent)
+      options.onReset?.()
     })
 
     source.onerror = () => {
@@ -91,14 +118,6 @@ export function useLogStream(url: Ref<string>, options: SSEOptions) {
     connected.value = false
     lastActivity = 0
   }
-
-  // URL 变化时自动重连（如 level 参数变化）
-  watch(url, () => {
-    if (source !== null || reconnectTimer !== null) {
-      disconnect()
-      connect()
-    }
-  })
 
   return { connected, connect, disconnect }
 }

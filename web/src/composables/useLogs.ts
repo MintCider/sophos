@@ -1,4 +1,4 @@
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import api from '@/api'
 import { useLogStream } from './useLogStream'
 
@@ -11,6 +11,7 @@ export interface LogLine {
   ts: string
   logger: string
   message: string
+  contentLength: number
   /** 多行消息的续行 */
   continuation: string[]
 }
@@ -53,6 +54,7 @@ function parseLine(raw: string): LogLine {
       level: m[2],
       logger: m[3],
       message: m[4],
+      contentLength: m[4].length,
       continuation: [],
     }
   }
@@ -64,6 +66,7 @@ function parseLine(raw: string): LogLine {
     level: '',
     logger: '',
     message: raw,
+    contentLength: raw.length,
     continuation: [],
   }
 }
@@ -78,6 +81,7 @@ function parseLines(rawLines: string[]): LogLine[] {
     if (parsed.level === '' && result.length > 0) {
       // 续行：合并到上一条
       result[result.length - 1].continuation.push(raw)
+      result[result.length - 1].contentLength += raw.length + 1
     } else {
       result.push(parsed)
     }
@@ -92,8 +96,10 @@ function matchesFilter(line: LogLine, minPriority: number, query: string): boole
     if (p < minPriority) return false
   }
   if (query) {
-    const text = line.raw + line.continuation.join('\n')
-    if (!text.toLowerCase().includes(query)) return false
+    if (
+      !line.raw.toLowerCase().includes(query)
+      && !line.continuation.some((part) => part.toLowerCase().includes(query))
+    ) return false
   }
   return true
 }
@@ -108,36 +114,43 @@ export function useLogs() {
   const minLevel = ref<LogLevel>('INFO')
   const searchQuery = ref('')
   const loading = ref(false)
+  let started = false
+  let loadSequence = 0
 
   // SSE URL
   const streamUrl = computed(() => `/api/logs/stream?level=${minLevel.value}`)
 
+  function trim(target: LogLine[]) {
+    if (target.length > MAX_ENTRIES) {
+      target.splice(0, target.length - MAX_ENTRIES)
+    }
+  }
+
+  function appendRawLines(target: LogLine[], rawLines: string[]) {
+    for (const raw of rawLines) {
+      const parsed = parseLine(raw)
+      if (parsed.level === '' && target.length > 0) {
+        target[target.length - 1].continuation.push(raw)
+        target[target.length - 1].contentLength += raw.length + 1
+      } else {
+        target.push(parsed)
+      }
+    }
+    trim(target)
+  }
+
   const { connected, connect, disconnect } = useLogStream(streamUrl, {
     onMessage(data: string) {
       try {
-        const msg = JSON.parse(data) as { line: string; level: string }
-        const parsed = parseLine(msg.line)
-        // 续行合并
-        if (parsed.level === '') {
-          const target = isFollowing.value ? lines : buffer
-          if (target.value.length > 0) {
-            target.value[target.value.length - 1].continuation.push(msg.line)
-            return
-          }
-        }
-
-        if (isFollowing.value) {
-          lines.value.push(parsed)
-          // FIFO 裁剪
-          if (lines.value.length > MAX_ENTRIES) {
-            lines.value.splice(0, lines.value.length - MAX_ENTRIES)
-          }
-        } else {
-          buffer.value.push(parsed)
-        }
+        const msg = JSON.parse(data) as { lines: string[] }
+        const target = isFollowing.value ? lines.value : buffer.value
+        appendRawLines(target, msg.lines)
       } catch {
         // 忽略解析错误
       }
+    },
+    onReset() {
+      void reloadCurrent()
     },
     reconnectDelay: 3000,
   })
@@ -159,17 +172,41 @@ export function useLogs() {
   })
 
   /** 加载初始日志 */
-  async function loadInitial() {
+  async function loadInitial(): Promise<string | null> {
+    const sequence = ++loadSequence
+    const filename = selectedFile.value
+    const level = minLevel.value
     loading.value = true
     try {
-      const { data } = await api.get(`/logs/${selectedFile.value}`, {
-        params: { tail: INITIAL_ENTRIES },
+      const { data } = await api.get(`/logs/${filename}`, {
+        params: { tail: INITIAL_ENTRIES, level },
       })
+      if (sequence !== loadSequence) return null
       lines.value = parseLines(data.lines as string[])
+      return data.cursor as string
     } catch (e) {
-      console.error('Failed to load logs:', e)
+      if (sequence === loadSequence) {
+        console.error('Failed to load logs:', e)
+      }
+      return null
     } finally {
-      loading.value = false
+      if (sequence === loadSequence) {
+        loading.value = false
+      }
+    }
+  }
+
+  /** 重新加载当前选择，并用快照游标无缝续接实时流。 */
+  async function reloadCurrent() {
+    disconnect()
+    buffer.value = []
+    const cursor = await loadInitial()
+    if (
+      cursor !== null
+      && started
+      && selectedFile.value === 'sophos.log'
+    ) {
+      connect(cursor)
     }
   }
 
@@ -177,9 +214,7 @@ export function useLogs() {
   function resumeFollowing() {
     lines.value.push(...buffer.value)
     buffer.value = []
-    if (lines.value.length > MAX_ENTRIES) {
-      lines.value.splice(0, lines.value.length - MAX_ENTRIES)
-    }
+    trim(lines.value)
     isFollowing.value = true
   }
 
@@ -194,22 +229,33 @@ export function useLogs() {
     disconnect()
     buffer.value = []
     isFollowing.value = filename === 'sophos.log'
-    await loadInitial()
-    if (filename === 'sophos.log') {
-      connect()
+    const cursor = await loadInitial()
+    if (cursor !== null && started && filename === 'sophos.log') {
+      connect(cursor)
     }
   }
 
   /** 启动：加载初始数据 + 连接 SSE */
   async function start() {
-    await loadInitial()
-    connect()
+    started = true
+    const cursor = await loadInitial()
+    if (cursor !== null) {
+      connect(cursor)
+    }
   }
 
   /** 停止：断开 SSE */
   function stop() {
+    started = false
+    loadSequence += 1
     disconnect()
   }
+
+  watch(minLevel, () => {
+    if (started) {
+      void reloadCurrent()
+    }
+  })
 
   return {
     lines,
