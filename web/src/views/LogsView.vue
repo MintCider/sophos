@@ -226,7 +226,7 @@ onUnmounted(() => {
         ref="virtualList"
         class="logs-scroll"
         :items="filteredLines"
-        :item-size="68"
+        :item-size="44"
         item-resizable
         key-field="id"
         @scroll="onScroll"
@@ -348,8 +348,9 @@ onUnmounted(() => {
 }
 
 /* ── 日志行 ──────────────────────────────────────────── */
-
+/* min-height 须 ≥ NVirtualList 的 item-size（vueuc 约定 item-size 为最小行高） */
 .log-line {
+  min-height: 44px;
   padding: 2px 24px;
   border-radius: 4px;
   white-space: pre-wrap;
