@@ -221,7 +221,7 @@ class OpenAICompatProvider(LLMProvider):
                         extra_fields[key] = str(extra_fields.get(key, "")) + value
                     else:
                         extra_fields[key] = value
-            if "tool_calls" in delta:
+            if delta.get("tool_calls"):
                 for tc_delta in delta["tool_calls"]:
                     idx = tc_delta.get("index", 0)
                     if idx not in tool_calls_map:
