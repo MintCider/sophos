@@ -89,6 +89,14 @@ class LLMNodeExecutor:
 
             tool_calls = assistant_message.get("tool_calls") or []
             if not tool_calls:
+                implicit = await self._implicit_outcome(
+                    node,
+                    assistant_message,
+                    allowed_action_names,
+                    transition_names,
+                )
+                if implicit is not None:
+                    return implicit
                 raise LLMNodeExecutionError(
                     f"node {node.node_id} returned without a tool or transition call"
                 )
@@ -153,6 +161,27 @@ class LLMNodeExecutor:
         raise LLMNodeExecutionError(
             f"node {node.node_id} exceeded max_rounds={self.context.max_rounds_per_node}"
         )
+
+    async def _implicit_outcome(
+        self,
+        node: NodeSpec,
+        assistant_message: Message,
+        allowed_action_names: set[str],
+        transition_names: set[str],
+    ) -> NodeOutcome | None:
+        content = str(assistant_message.get("content") or "").strip()
+        if "send_message" in allowed_action_names and content:
+            try:
+                result = await self.context.tool_executor("send_message", {"text": content})
+            except Exception:
+                logger.exception("Implicit send_message failed in node %s", node.node_id)
+                return None
+            if _is_success(result):
+                return NodeOutcome("completed", {"completion_tool": "send_message"})
+            return None
+        if len(transition_names) == 1 and "send_message" not in allowed_action_names:
+            return NodeOutcome(next(iter(transition_names)), {})
+        return None
 
     async def _refresh_context(self, transcript: Transcript, node_id: str) -> None:
         if self.context.context_refresher is None:

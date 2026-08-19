@@ -28,6 +28,85 @@ logger = logging.getLogger(__name__)
 # 自定义 TRACE 级别（与 main.py 一致）
 TRACE = 5
 
+_STANDARD_MESSAGE_KEYS = {
+    "system": ("role", "content"),
+    "user": ("role", "content"),
+    "assistant": ("role", "content", "tool_calls"),
+    "tool": ("role", "content", "tool_call_id", "name"),
+}
+
+
+def sanitize_openai_messages(
+    messages: list[Message],
+    *,
+    extra_message_fields: frozenset[str] = frozenset(),
+) -> list[Message]:
+    """Drop provider-private fields and repair broken tool-call sequences."""
+    cleaned: list[Message] = []
+    for message in messages:
+        role = str(message.get("role") or "user")
+        allowed = set(_STANDARD_MESSAGE_KEYS.get(role, ("role", "content")))
+        allowed.update(extra_message_fields)
+        item: dict[str, Any] = {"role": role}
+        for key in allowed:
+            if key == "role" or key not in message:
+                continue
+            item[key] = message[key]
+        if role == "assistant":
+            raw_calls = item.get("tool_calls")
+            if not raw_calls:
+                item.pop("tool_calls", None)
+            else:
+                item["tool_calls"] = [_sanitize_tool_call(call) for call in raw_calls]
+        elif role in {"system", "user", "tool"} and "content" not in item:
+            item["content"] = ""
+        cleaned.append(item)  # type: ignore[arg-type]
+
+    repaired: list[Message] = []
+    index = 0
+    while index < len(cleaned):
+        message = cleaned[index]
+        calls = message.get("tool_calls") if message.get("role") == "assistant" else None
+        if calls:
+            expected = {str(call.get("id")) for call in calls if call.get("id")}
+            cursor = index + 1
+            found: set[str] = set()
+            while cursor < len(cleaned) and cleaned[cursor].get("role") == "tool":
+                found.add(str(cleaned[cursor].get("tool_call_id") or ""))
+                cursor += 1
+            if expected and expected <= found:
+                repaired.extend(cleaned[index:cursor])
+                index = cursor
+                continue
+            plain = {key: value for key, value in message.items() if key != "tool_calls"}
+            if "content" not in plain:
+                plain["content"] = ""
+            repaired.append(plain)  # type: ignore[arg-type]
+            index += 1
+            while index < len(cleaned) and cleaned[index].get("role") == "tool":
+                index += 1
+            continue
+        if message.get("role") == "tool":
+            index += 1
+            continue
+        repaired.append(message)
+        index += 1
+    return repaired
+
+
+def _sanitize_tool_call(call: dict[str, Any]) -> dict[str, Any]:
+    function = call.get("function") if isinstance(call.get("function"), dict) else {}
+    sanitized: dict[str, Any] = {
+        "type": call.get("type") or "function",
+        "function": {
+            "name": function.get("name") or "",
+            "arguments": function.get("arguments") or "{}",
+        },
+    }
+    if call.get("id"):
+        sanitized["id"] = call["id"]
+    return sanitized
+
 
 class OpenAICompatProvider(LLMProvider):
     """OpenAI 兼容 API 的 Provider。"""
@@ -77,7 +156,10 @@ class OpenAICompatProvider(LLMProvider):
         options = request_options or ProviderRequestOptions()
         payload: dict[str, Any] = {
             "model": self._model,
-            "messages": messages,
+            "messages": sanitize_openai_messages(
+                messages,
+                extra_message_fields=self._request_policy.accumulated_message_fields,
+            ),
             "max_tokens": max_tokens if max_tokens is not None else self._default_max_tokens,
         }
         temp = temperature if temperature is not None else self._default_temperature

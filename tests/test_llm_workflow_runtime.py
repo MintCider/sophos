@@ -170,6 +170,68 @@ class LLMWorkflowRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("tool_call", event_kinds)
         self.assertIn("tool_result", event_kinds)
 
+    async def test_actor_sends_plain_text_when_model_skips_tools(self) -> None:
+        collector = FakeProvider([tool_response("complete_collection", {}, "handover-1")])
+        actor = FakeProvider(
+            [
+                {
+                    "message": {"role": "assistant", "content": "plain reply"},
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                    "finish_reason": "stop",
+                    "provider": "fake",
+                }
+            ]
+        )
+        sent: list[str] = []
+
+        async def execute(name: str, params: dict[str, Any]) -> dict[str, Any]:
+            if name == "send_message":
+                sent.append(str(params["text"]))
+                return {"status": "ok"}
+            return {"status": "ok"}
+
+        context = LLMWorkflowContext(
+            messages=[{"role": "user", "content": "question"}],
+            tools=(agent_tool("send_message", "output"),),
+            provider_resolver=lambda slot: collector if slot == "collector" else actor,
+            tool_executor=execute,
+        )
+        run = WorkflowRun(collector_actor_workflow(), Transcript())
+        await WorkflowEngine({"llm": LLMNodeExecutor(context)}).run(run)
+
+        self.assertEqual(run.status, "completed")
+        self.assertEqual(sent, ["plain reply"])
+
+    async def test_collector_plain_text_completes_collection(self) -> None:
+        collector = FakeProvider(
+            [
+                {
+                    "message": {"role": "assistant", "content": "enough context"},
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                    "finish_reason": "stop",
+                    "provider": "fake",
+                }
+            ]
+        )
+        actor = FakeProvider([tool_response("send_message", {"text": "ok"}, "send-1")])
+        executed: list[str] = []
+
+        async def execute(name: str, params: dict[str, Any]) -> dict[str, Any]:
+            executed.append(name)
+            return {"status": "ok"}
+
+        context = LLMWorkflowContext(
+            messages=[{"role": "user", "content": "question"}],
+            tools=(agent_tool("send_message", "output"),),
+            provider_resolver=lambda slot: collector if slot == "collector" else actor,
+            tool_executor=execute,
+        )
+        run = WorkflowRun(collector_actor_workflow(), Transcript())
+        await WorkflowEngine({"llm": LLMNodeExecutor(context)}).run(run)
+
+        self.assertEqual(run.status, "completed")
+        self.assertEqual(executed, ["send_message"])
+
 
 if __name__ == "__main__":
     unittest.main()

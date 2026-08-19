@@ -340,15 +340,21 @@ class TriggerEngine:
 
         max_tokens = int(runtime_config.get("trigger_eval_max_tokens", 64))
         temperature = float(runtime_config.get("trigger_eval_temperature", 0.0))
-        try:
-            response = await provider.chat(
-                messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
-        except Exception:
-            logger.warning("Trigger eval failed for %s", key, exc_info=True)
-            return "irrelevant"
+        response = None
+        for attempt in range(2):
+            try:
+                response = await provider.chat(
+                    messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+                break
+            except Exception:
+                if attempt == 0:
+                    logger.warning("Trigger eval failed for %s, retrying", key, exc_info=True)
+                    continue
+                logger.warning("Trigger eval failed for %s", key, exc_info=True)
+                return "irrelevant"
 
         content = (response["message"].get("content") or "").strip().lower()
         logger.debug("Trigger eval raw response for %s: %r", key, content)

@@ -138,6 +138,68 @@ class ProviderCompilationTests(unittest.TestCase):
         self.assertEqual(response["message"]["reasoning_content"], "full reasoning")
         self.assertEqual(response["message"]["content"], "")
 
+    def test_openai_payload_strips_private_fields_and_repairs_tool_sequences(self) -> None:
+        provider = OpenAICompatProvider(
+            base_url="https://gateway.example/v1",
+            api_key="test",
+            model="model",
+            request_policy=OpenAIRequestPolicy(
+                accumulated_message_fields=frozenset({"reasoning_content"}),
+            ),
+        )
+        messages = [
+            {"role": "system", "content": "stable"},
+            {
+                "role": "assistant",
+                "content": "thinking",
+                "reasoning_content": "keep me",
+                "function_call": {"name": "legacy"},
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "lookup", "arguments": "{}"},
+                        "thought_signature": "secret",
+                    }
+                ],
+            },
+            {"role": "user", "content": "follow up"},
+        ]
+        payload = provider._build_payload(messages, [TOOL], None, None, self.options)
+        sent = payload["messages"]
+
+        self.assertEqual(sent[1]["reasoning_content"], "keep me")
+        self.assertNotIn("function_call", sent[1])
+        self.assertNotIn("tool_calls", sent[1])
+        self.assertEqual(sent[1]["content"], "thinking")
+        self.assertEqual(sent[2]["role"], "user")
+
+    def test_openai_payload_keeps_matched_tool_results(self) -> None:
+        provider = OpenAICompatProvider(
+            base_url="https://gateway.example/v1",
+            api_key="test",
+            model="model",
+        )
+        messages = [
+            {"role": "user", "content": "q"},
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "lookup", "arguments": "{}"},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call-1", "name": "lookup", "content": "{}"},
+        ]
+        payload = provider._build_payload(messages, [TOOL], None, None, self.options)
+        sent = payload["messages"]
+        self.assertEqual(sent[1]["tool_calls"][0]["id"], "call-1")
+        self.assertEqual(sent[2]["role"], "tool")
+        self.assertNotIn("thought_signature", sent[1]["tool_calls"][0])
+
 
 class ProviderStreamingPolicyTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
