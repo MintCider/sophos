@@ -23,6 +23,7 @@ import {
   Orbit,
   Shield,
   Wrench,
+  FileText,
   LogOut,
   Sun,
   Moon,
@@ -64,6 +65,7 @@ const menuOptions = [
   { label: '仪表盘', key: 'dashboard', icon: renderIcon(Gauge) },
   { label: '日志', key: 'logs', icon: renderIcon(ScrollText) },
   { label: '模型服务商', key: 'providers', icon: renderIcon(Orbit) },
+  { label: 'Prompt', key: 'prompts', icon: renderIcon(FileText) },
   { label: '工具管理', key: 'tools', icon: renderIcon(Wrench) },
   { label: '权限管理', key: 'permissions', icon: renderIcon(Shield) },
 ]

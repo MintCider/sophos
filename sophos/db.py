@@ -54,7 +54,7 @@ def get_pool() -> asyncpg.Pool:
 
 # ── Schema DDL ──────────────────────────────────────────────
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _CREATE_SCHEMA_META_TABLE = """\
 CREATE TABLE schema_meta (
@@ -397,7 +397,31 @@ CREATE TABLE IF NOT EXISTS tool_description_overrides (
 );
 """
 
+_CREATE_CUSTOM_PROMPTS_TABLE = """\
+CREATE TABLE custom_prompts (
+    key             TEXT            PRIMARY KEY,
+    title           TEXT            NOT NULL DEFAULT '',
+    description     TEXT            NOT NULL DEFAULT '',
+    created_at      TIMESTAMPTZ     NOT NULL DEFAULT now()
+);
+"""
+
+_CREATE_PROMPT_VERSIONS_TABLE = """\
+CREATE TABLE prompt_versions (
+    id              BIGSERIAL       PRIMARY KEY,
+    prompt_key      TEXT            NOT NULL,
+    scope           TEXT            NOT NULL DEFAULT 'global',
+    content         TEXT            NOT NULL,
+    note            TEXT            NOT NULL DEFAULT '',
+    created_at      TIMESTAMPTZ     NOT NULL DEFAULT now()
+);
+"""
+
 _CREATE_INDEXES = [
+    """\
+    CREATE INDEX idx_prompt_versions_key
+    ON prompt_versions (prompt_key, scope, id DESC);
+    """,
     # 完整协议定位符仅在相同适配器绑定和会话内唯一。
     """\
     CREATE UNIQUE INDEX uidx_messages_external_locator
@@ -522,6 +546,8 @@ async def _init_schema(pool: asyncpg.Pool) -> None:
                 _CREATE_USER_TRIGGER_POLICY_TABLE,
                 _CREATE_CUSTOM_TOOLS_TABLE,
                 _CREATE_TOOL_DESCRIPTION_OVERRIDES_TABLE,
+                _CREATE_CUSTOM_PROMPTS_TABLE,
+                _CREATE_PROMPT_VERSIONS_TABLE,
             ):
                 await conn.execute(ddl)
             for ddl in _CREATE_INDEXES:

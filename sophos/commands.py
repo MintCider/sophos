@@ -843,7 +843,6 @@ _VALIDATORS: dict[str, tuple[Any, str]] = {
     "cross_context_mode": (lambda v: v in ("system", "inline", "off"), "可选值: system / inline / off"),
     "llm_user_schema": (lambda v: "{{message}}" in v, "必须包含 {{message}} 占位符"),
     "llm_bot_schema": (lambda v: "{{message}}" in v, "必须包含 {{message}} 占位符"),
-    "vision_refine_prompt": (lambda v: "{prev_description}" in v, "必须包含 {prev_description} 占位符"),
     "forward_head_count": (lambda v: v >= 1, "必须 >= 1"),
     "forward_tail_count": (lambda v: v >= 1, "必须 >= 1"),
     "forward_max_depth": (lambda v: v >= 1, "必须 >= 1"),
@@ -879,29 +878,24 @@ async def handle_prompt_command(
     context: CommandContext,
 ) -> bool:
     """处理 .prompt 命令。返回 True 表示已处理。"""
-    from sophos.pipeline import _load_system_prompt, clear_system_prompt_cache
+    from sophos import prompts
 
     parts = text.split()
     sub = parts[1] if len(parts) > 1 else ""
+    prompt = prompts.get("persona.system")
 
     if sub == "":
-        prompt = _load_system_prompt()
         reply = prompt[:500] + f"\n... (共 {len(prompt)} 字，用 .prompt full 查看完整)" if len(prompt) > 500 else prompt
 
     elif sub == "full":
-        reply = _load_system_prompt()
-
-    elif sub == "reload":
-        clear_system_prompt_cache()
-        prompt = _load_system_prompt()
-        reply = f"System prompt 已重载 ({len(prompt)} 字)"
+        reply = prompt
 
     else:
         reply = (
             "用法:\n"
             "  .prompt          — 查看当前 prompt（截断 500 字）\n"
             "  .prompt full     — 完整显示\n"
-            "  .prompt reload   — 重新加载文件"
+            "编辑请使用 WebUI"
         )
 
     await _reply(context, reply)

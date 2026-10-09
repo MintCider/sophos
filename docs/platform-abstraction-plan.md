@@ -55,7 +55,7 @@ LIMIT $2;
 - 会话类型权限统一为 `bot.shared` 和 `bot.direct`，不再使用 `bot.group` / `bot.private` 表达平台形态。
 - Master 是 `user_roles(role='master')` 中的内部用户角色，不读取环境变量或硬编码外部账号。
 
-推荐在 `system_prompt.md` 中放置 `{runtime_context}`。每次 Agent 调用会动态渲染为以下结构：
+推荐在主系统提示词中放置 `{{runtime_context}}`。每次 Agent 调用会动态渲染为以下结构：
 
 ```text
 当前时间：<本地时间> (<时区>)
@@ -69,7 +69,7 @@ Master（主人）用户：
 消息格式：<当前消息格式说明>
 ```
 
-也可以单独放置 `{master_users}`、`{identity_context}` 等已声明变量。渲染器只替换已知变量，保留 prompt 中其他花括号。旧 prompt 没有变量时会在末尾追加完整运行时块。
+也可以单独放置 `{{master_users}}`、`{{identity_context}}` 等已声明变量。保存时会拒绝未声明的变量。
 
 ## Agent 工具模型
 

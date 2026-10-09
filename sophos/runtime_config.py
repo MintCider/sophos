@@ -27,8 +27,6 @@ _DEFAULTS: dict[str, Any] = {
     "cross_context_mode": settings.cross_context_mode,
     "recent_global_limit": 50,
     "recent_global_min_self": 5,
-    "vision_system_prompt": settings.vision_system_prompt,
-    "vision_refine_prompt": settings.vision_refine_prompt,
     "forward_head_count": 3,
     "forward_tail_count": 2,
     "forward_max_depth": 2,
@@ -42,7 +40,6 @@ _DEFAULTS: dict[str, Any] = {
     "trigger_eval_context_limit": 20,
     "trigger_eval_max_tokens": 64,
     "trigger_eval_temperature": 0.0,
-    "trigger_eval_persona": "",
     "trigger_bucket_capacity": 10,
     "trigger_bucket_refill": 6.0,
     # Tavily 联网搜索

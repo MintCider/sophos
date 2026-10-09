@@ -28,6 +28,11 @@ const router = createRouter({
           component: () => import('@/views/ProvidersView.vue'),
         },
         {
+          path: 'prompts',
+          name: 'prompts',
+          component: () => import('@/views/PromptsView.vue'),
+        },
+        {
           path: 'tools',
           name: 'tools',
           component: () => import('@/views/ToolsView.vue'),

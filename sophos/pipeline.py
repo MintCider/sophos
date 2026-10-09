@@ -11,15 +11,12 @@ import re
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import datetime
-from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
 
 import aiohttp
 import asyncpg
 
-from sophos import runtime_config, trigger
+from sophos import prompts, runtime_config, trigger
 from sophos.agent import (
     AgentTool,
     LLMNodeExecutor,
@@ -44,10 +41,9 @@ from sophos.commands import (
 from sophos.config import settings
 from sophos.db import get_pool
 from sophos.enrichment import get_enrichment_registry
-from sophos.identity_prompt import build_identity_variables
+from sophos.identity_prompt import build_prompt_values
 from sophos.llm.context import (
     build_chat_context_snapshot,
-    describe_schema,
     format_new_messages,
     format_timestamp,
     get_display_name,
@@ -58,7 +54,6 @@ from sophos.memory.profile import build_profile_block
 from sophos.message_store import MessageStore
 from sophos.messaging import MessageService
 from sophos.platform import ConversationKind, MessageEvent, PlatformAdapter, SendMessageRequest
-from sophos.prompt_template import render_system_prompt
 from sophos.tools.image_gen import IMAGE_GEN_TOOLS
 from sophos.tools.memory import MEMORY_TOOLS
 from sophos.tools.messaging import ALL_MESSAGING_TOOLS
@@ -250,66 +245,6 @@ async def _process_event_images(
 
 _tool_registry: ToolRegistry | None = None
 
-_PROMPT_FILES = {
-    "system": Path(__file__).resolve().parent.parent / "system_prompt.md",
-    "collector": Path(__file__).resolve().parent.parent / "collector_prompt.md",
-}
-_PROMPT_CONFIG_KEYS = {
-    "system": "system_prompt",
-    "collector": "collector_system_prompt",
-}
-_PROMPT_FALLBACKS = {
-    "system": (
-        "你是 {nickname}，一个活跃在多个聊天平台中的助手。回复时请自然、简洁。\n\n"
-        "{runtime_context}"
-    ),
-    "collector": (
-        "你是 {nickname} 的信息收集节点。使用读取工具获取后续执行所需的信息。\n\n"
-        "{runtime_context}"
-    ),
-}
-_prompt_cache: dict[str, str] = {}
-_prompt_mtimes: dict[str, float] = {}
-
-
-def _load_system_prompt() -> str:
-    """Load the default actor prompt."""
-    return _load_prompt("system")
-
-
-def _load_collector_prompt() -> str:
-    """Load the collector prompt independently from the default actor prompt."""
-    return _load_prompt("collector")
-
-
-def _load_prompt(kind: str) -> str:
-    """Load one prompt from runtime config or an mtime-cached file."""
-    db_prompt = runtime_config.get(_PROMPT_CONFIG_KEYS[kind])
-    if db_prompt is not None:
-        return str(db_prompt)
-
-    prompt_file = _PROMPT_FILES[kind]
-    try:
-        current_mtime = prompt_file.stat().st_mtime
-    except FileNotFoundError:
-        if kind not in _prompt_cache:
-            logger.warning("%s not found, using fallback", prompt_file.name)
-            _prompt_cache[kind] = _PROMPT_FALLBACKS[kind]
-        return _prompt_cache[kind]
-
-    if kind not in _prompt_cache or current_mtime != _prompt_mtimes.get(kind):
-        _prompt_cache[kind] = prompt_file.read_text(encoding="utf-8").strip()
-        _prompt_mtimes[kind] = current_mtime
-        logger.info("Loaded %s prompt from %s (mtime=%.0f)", kind, prompt_file, current_mtime)
-
-    return _prompt_cache[kind]
-
-
-def clear_system_prompt_cache() -> None:
-    """Clear both actor and collector file caches."""
-    _prompt_cache.clear()
-    _prompt_mtimes.clear()
-
 
 # ── 最近动态 ──────────────────────────────────────────────
 
@@ -459,34 +394,19 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
     await _load_tool_disabled_state(registry)
 
     nickname = settings.bot_nickname or "Sophos"
-    fmt_desc = describe_schema(runtime_config.get("llm_user_schema"))
-    tz = ZoneInfo(settings.timezone)
-    now_str = datetime.now(tz).strftime("%Y-%m-%d %H:%M")
-    tz_label = settings.timezone
-    prompt_values = await build_identity_variables(
+    prompt_values = await build_prompt_values(
         get_pool(),
         current_user_id=ctx.user_id,
         self_user_id=ctx.self_user_id,
         conversation_id=ctx.conversation_id,
         conversation_kind=ctx.message.conversation.kind.value,
     )
-    runtime_context = (
-        f"当前时间：{now_str} ({tz_label})\n"
-        f"{prompt_values['identity_context']}\n"
-        f"消息格式：{fmt_desc}"
-    )
-    prompt_values.update(
-        {
-            "nickname": nickname,
-            "current_time": now_str,
-            "timezone": tz_label,
-            "message_format": fmt_desc,
-            "runtime_context": runtime_context,
-        }
-    )
+    rendered_system = prompts.render("persona.system", prompt_values)
+    rendered_collector = prompts.render("persona.collector", prompt_values)
+    ctx.state["prompt_versions"] = {**rendered_system.versions, **rendered_collector.versions}
     system_prompts = {
-        "default": render_system_prompt(_load_system_prompt(), prompt_values),
-        "collector": render_system_prompt(_load_collector_prompt(), prompt_values),
+        "default": rendered_system.text,
+        "collector": rendered_collector.text,
     }
 
     def append_system_block(block: str) -> None:

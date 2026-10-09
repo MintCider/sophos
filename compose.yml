@@ -33,18 +33,6 @@ services:
     ports:
       - "${SOPHOS_PORT:-8080}:8080"
     volumes:
-      - type: bind
-        source: ./system_prompt.md
-        target: /app/system_prompt.md
-        read_only: true
-        bind:
-          create_host_path: false
-      - type: bind
-        source: ./collector_prompt.md
-        target: /app/collector_prompt.md
-        read_only: true
-        bind:
-          create_host_path: false
       - ./logs:/app/logs
     healthcheck:
       test:

@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 import asyncpg
 
-from sophos import permission
+from sophos import permission, runtime_config
+from sophos.config import settings
+from sophos.llm.context import describe_schema
 
 
 async def build_identity_variables(
@@ -47,6 +52,38 @@ async def build_identity_variables(
         "master_users": master_users,
         "identity_context": identity_context,
     }
+
+
+async def build_prompt_values(
+    pool: asyncpg.Pool,
+    *,
+    current_user_id: int,
+    self_user_id: int,
+    conversation_id: int,
+    conversation_kind: str,
+) -> dict[str, str]:
+    """All runtime variables available to agent system prompts."""
+    values = await build_identity_variables(
+        pool,
+        current_user_id=current_user_id,
+        self_user_id=self_user_id,
+        conversation_id=conversation_id,
+        conversation_kind=conversation_kind,
+    )
+    fmt_desc = describe_schema(runtime_config.get("llm_user_schema"))
+    now_str = datetime.now(ZoneInfo(settings.timezone)).strftime("%Y-%m-%d %H:%M")
+    values.update(
+        {
+            "nickname": settings.bot_nickname or "Sophos",
+            "current_time": now_str,
+            "timezone": settings.timezone,
+            "message_format": fmt_desc,
+            "runtime_context": (
+                f"当前时间：{now_str} ({settings.timezone})\n{values['identity_context']}\n消息格式：{fmt_desc}"
+            ),
+        }
+    )
+    return values
 
 
 async def build_identity_block(

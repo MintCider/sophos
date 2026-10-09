@@ -18,7 +18,7 @@ from typing import Any
 import aiohttp
 import asyncpg
 
-from sophos import runtime_config
+from sophos import prompts
 from sophos.config import settings
 from sophos.llm.provider import LLMProvider
 
@@ -160,11 +160,11 @@ async def describe_image(
 
     # 构建 system prompt
     if prev_description:
-        system_text = runtime_config.get("vision_refine_prompt").format(prev_description=prev_description)
+        system_text = prompts.render("vision.refine", {"prev_description": prev_description}).text
         if correction_hint:
             system_text += f"\n用户指出：{correction_hint}"
     else:
-        system_text = runtime_config.get("vision_system_prompt")
+        system_text = prompts.get("vision.describe")
 
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": system_text},

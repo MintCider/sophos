@@ -15,37 +15,13 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from sophos import runtime_config
+from sophos import prompts, runtime_config
 from sophos.config import settings
 
 if TYPE_CHECKING:
     from sophos.pipeline import PipelineContext
 
 logger = logging.getLogger(__name__)
-
-# ── 硬编码格式指令（不可通过 runtime_config 修改）────────────
-
-_EVAL_FORMAT = (
-    "接下来你会收到一系列群聊对话。大多数消息与你无关，请保守判断。\n"
-    "只有当最新消息明确满足以下任一条件时才算 relevant：\n"
-    "1. 直接提到你的名字或称呼\n"
-    "2. 明确在回应你之前说的话（话题连贯且有指向性）\n"
-    "3. 你在人设中被要求关注的话题\n"
-    "不确定时一律选 irrelevant。\n"
-    "如果 relevant，再判断这条消息是否完整"
-    "（句子明显被截断或只说了半句 → more；问句、短句、完整表达 → done）。\n"
-    "只回复以下三个词之一：irrelevant / relevant_done / relevant_more"
-)
-
-_WAITING_FORMAT = (
-    "接下来你会收到一系列群聊对话。之前的消息被判定为与你有关，但对方还没说完。\n"
-    "现在有新消息到达，请重新判断：\n"
-    "- 如果最新消息其实与你无关 → irrelevant\n"
-    "- 如果与你有关且这条消息是完整的表达 → relevant_done\n"
-    "- 如果与你有关但这条消息明显没说完 → relevant_more\n"
-    "不确定时选 irrelevant。\n"
-    "只回复以下三个词之一：irrelevant / relevant_done / relevant_more"
-)
 
 # ── 类型 ──────────────────────────────────────────────────────
 
@@ -326,11 +302,8 @@ class TriggerEngine:
             return "irrelevant"
 
         # 拼接 prompt：persona + 格式指令
-        persona = str(runtime_config.get("trigger_eval_persona", ""))
-        nickname = settings.bot_nickname or "Sophos"
-        if persona:
-            persona = persona.replace("{nickname}", nickname)
-        fmt = _WAITING_FORMAT if waiting else _EVAL_FORMAT
+        persona = prompts.render("trigger.persona", {"nickname": settings.bot_nickname or "Sophos"}).text.strip()
+        fmt = prompts.get("trigger.waiting_format" if waiting else "trigger.eval_format")
         system_prompt = f"{persona}\n\n{fmt}" if persona else fmt
 
         messages: list[dict[str, Any]] = [
