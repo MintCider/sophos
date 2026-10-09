@@ -1,6 +1,6 @@
 import unittest
 
-from sophos.llm.context import _format_image_descriptions
+from sophos.llm.context import format_image_descriptions
 from sophos.message_store import MessageStore
 
 
@@ -19,7 +19,7 @@ class EnrichmentContextTests(unittest.TestCase):
             "raw_message": [{"type": "image", "data": {"url": "x"}}],
             "extra": {"images": [{"status": "failed", "error": "timeout"}]},
         }
-        self.assertEqual(_format_image_descriptions(row), "[图片解析失败]")
+        self.assertEqual(format_image_descriptions(row), "[图片解析失败]")
 
     def test_interrupted_image_without_extra_has_failure_placeholder(self) -> None:
         row = {
@@ -27,7 +27,11 @@ class EnrichmentContextTests(unittest.TestCase):
             "raw_message": [{"type": "image", "data": {"url": "x"}}],
             "extra": None,
         }
-        self.assertEqual(_format_image_descriptions(row), "[图片解析失败]")
+        self.assertEqual(format_image_descriptions(row), "[图片解析失败]")
+
+    def test_deferred_image_is_shown_as_recognizing(self) -> None:
+        row = {"enrichment_status": "completed", "extra": {"images_recognizing": True}}
+        self.assertEqual(format_image_descriptions(row), "[图片识别中]")
 
 
 if __name__ == "__main__":

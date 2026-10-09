@@ -44,6 +44,7 @@ from sophos.enrichment import get_enrichment_registry
 from sophos.identity_prompt import build_prompt_values
 from sophos.llm.context import (
     build_chat_context_snapshot,
+    format_image_descriptions,
     format_new_messages,
     format_timestamp,
     get_display_name,
@@ -214,15 +215,25 @@ async def _process_event_images(
         if message_id is not None:
             await ctx.store.set_enrichment_streaming(message_id)
 
-    try:
-        image_infos = await process_message_images(
+    recognition = asyncio.create_task(
+        process_message_images(
             ctx.segments,
             pool=pool,
             session=ctx.session,
             vision_provider=vision_provider,
             context_messages=context_messages,
             on_first_token=_mark_streaming,
+            attempts=settings.vision_attempts,
         )
+    )
+    done, _ = await asyncio.wait({recognition}, timeout=settings.vision_defer_seconds)
+    if not done and message_id is not None:
+        await ctx.store.defer_image_enrichment(message_id)
+        get_enrichment_registry().mark_ready(message_id)
+        logger.info("Image recognition for message_id=%s deferred to background", message_id)
+
+    try:
+        image_infos = await recognition
     except Exception as exc:
         logger.exception(
             "Image processing failed for message_id=%s",
@@ -376,6 +387,13 @@ def _sanitize_fallback_reply(text: str) -> str | None:
     return text
 
 
+def _is_recognizing(row: dict[str, Any]) -> bool:
+    extra = row.get("extra") or {}
+    if isinstance(extra, str):
+        extra = json.loads(extra)
+    return bool(extra.get("images_recognizing"))
+
+
 async def _notify_workflow_failure(ctx: PipelineContext) -> None:
     try:
         await ctx.message_service.send_message(
@@ -507,7 +525,28 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
         _refresh_scope_id,
     )
 
+    recognizing_ids = await ctx.store.get_recognizing_ids(conversation_id=ctx.conversation_id, upto_id=_cursor_id)
+
+    async def _recognized_updates() -> str | None:
+        """Descriptions of images that were shown as「识别中」and have finished since."""
+        if not recognizing_ids:
+            return None
+        rows = await ctx.store.get_by_ids(sorted(recognizing_ids))
+        lines = []
+        for row in rows:
+            if _is_recognizing(row):
+                continue
+            recognizing_ids.discard(row["id"])
+            lines.append(f"消息 {row['message_id']} 的图片：{format_image_descriptions(row)}")
+        return "[图片识别完成]\n" + "\n".join(lines) if lines else None
+
     async def _refresh_context() -> str | None:
+        updates = await _recognized_updates()
+        new_messages = await _new_messages()
+        blocks = [block for block in (updates, new_messages) if block]
+        return "\n\n".join(blocks) if blocks else None
+
+    async def _new_messages() -> str | None:
         nonlocal _cursor_id
         all_new_rows = await ctx.store.get_messages_after(
             conversation_id=ctx.conversation_id,
@@ -530,6 +569,7 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
             return None
 
         _cursor_id = max(r["id"] for r in new_rows)
+        recognizing_ids.update(r["id"] for r in new_rows if _is_recognizing(r))
 
         # Filter out messages from refresh-suppressed users
         if _suppressed_uids:

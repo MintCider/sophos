@@ -27,10 +27,6 @@ logger = logging.getLogger(__name__)
 FirstTokenCallback = Callable[[], Awaitable[None]]
 
 
-class VisionFirstTokenTimeoutError(TimeoutError):
-    """VLM 在首 token 时限内没有产生有效内容。"""
-
-
 class VisionGenerationTimeoutError(TimeoutError):
     """VLM 在总生成时限内没有完成响应。"""
 
@@ -181,59 +177,21 @@ async def describe_image(
         }
     )
 
-    first_token = asyncio.Event()
-
-    async def _handle_first_token() -> None:
-        if first_token.is_set():
-            return
-        first_token.set()
-        if on_first_token is not None:
-            await on_first_token()
-
-    request_started = asyncio.get_running_loop().time()
-    chat_task = asyncio.create_task(
-        provider.chat(
-            messages,
-            tools=None,
-            temperature=0.3,
-            max_tokens=settings.vision_max_tokens,
-            on_first_token=_handle_first_token,
-        ),
-    )
-    first_token_task = asyncio.create_task(first_token.wait())
-
     try:
-        done, _ = await asyncio.wait(
-            {chat_task, first_token_task},
-            timeout=settings.vision_ttft_timeout,
-            return_when=asyncio.FIRST_COMPLETED,
+        response = await asyncio.wait_for(
+            provider.chat(
+                messages,
+                tools=None,
+                temperature=0.3,
+                max_tokens=settings.vision_max_tokens,
+                on_first_token=on_first_token,
+            ),
+            timeout=settings.vision_generation_timeout,
         )
-        if not done:
-            raise VisionFirstTokenTimeoutError(
-                f"VLM first token timed out after {settings.vision_ttft_timeout:.1f}s",
-            )
-
-        if chat_task.done():
-            response = await chat_task
-        else:
-            remaining = settings.vision_generation_timeout - (
-                asyncio.get_running_loop().time() - request_started
-            )
-            if remaining <= 0:
-                raise VisionGenerationTimeoutError(
-                    f"VLM generation timed out after {settings.vision_generation_timeout:.1f}s",
-                )
-            try:
-                response = await asyncio.wait_for(chat_task, timeout=remaining)
-            except TimeoutError as exc:
-                raise VisionGenerationTimeoutError(
-                    f"VLM generation timed out after {settings.vision_generation_timeout:.1f}s",
-                ) from exc
-    finally:
-        first_token_task.cancel()
-        if not chat_task.done():
-            chat_task.cancel()
-        await asyncio.gather(first_token_task, chat_task, return_exceptions=True)
+    except TimeoutError as exc:
+        raise VisionGenerationTimeoutError(
+            f"VLM generation timed out after {settings.vision_generation_timeout:.1f}s",
+        ) from exc
 
     content = response["message"].get("content", "") or ""
     if not content.strip():
@@ -295,6 +253,7 @@ async def process_image_segment(
     vision_provider: LLMProvider | None,
     context_messages: list[dict[str, Any]] | None = None,
     on_first_token: FirstTokenCallback | None = None,
+    attempts: int = 1,
 ) -> dict[str, str] | None:
     """处理单张图片：下载 → 哈希 → 缓存查询 → 探索/利用。
 
@@ -314,20 +273,28 @@ async def process_image_segment(
     if vision_provider is not None and should_explore(entry):
         # GIF → 帧网格（哈希用原始数据，VLM 用网格图）
         vlm_data, vlm_mime = await maybe_gif_to_grid(image_data, mime_type)
-        try:
-            description = await describe_image(
-                vision_provider,
-                vlm_data,
-                vlm_mime,
-                context_messages=context_messages,
-                prev_description=entry.get("description", ""),
-                correction_hint=entry.get("correction_hint", "") or "",
-                on_first_token=on_first_token,
-            )
+        description = ""
+        error: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                description = await describe_image(
+                    vision_provider,
+                    vlm_data,
+                    vlm_mime,
+                    context_messages=context_messages,
+                    prev_description=entry.get("description", ""),
+                    correction_hint=entry.get("correction_hint", "") or "",
+                    on_first_token=on_first_token,
+                )
+                break
+            except Exception as exc:
+                error = exc
+                logger.warning("VLM call failed for hash=%s (attempt %d/%d): %s", hash_str, attempt, attempts, exc)
+        if description:
             await update_cache_after_explore(pool, hash_str, description)
             logger.info("VLM explored image hash=%s: %s", hash_str, description[:200])
-        except Exception as exc:
-            logger.warning("VLM call failed for hash=%s: %s", hash_str, exc, exc_info=True)
+        else:
+            exc = error or RuntimeError("VLM returned an empty description")
             description = entry.get("description", "")
             await bump_hit_count(pool, hash_str)
             if not description:
@@ -362,6 +329,7 @@ async def process_message_images(
     vision_provider: LLMProvider | None,
     context_messages: list[dict[str, Any]] | None = None,
     on_first_token: FirstTokenCallback | None = None,
+    attempts: int = 1,
 ) -> list[dict[str, str]]:
     """处理消息中所有图片段，返回 [{hash, description}, ...]。"""
     image_urls = [
@@ -378,6 +346,7 @@ async def process_message_images(
             vision_provider=vision_provider,
             context_messages=context_messages,
             on_first_token=on_first_token,
+            attempts=attempts,
         )
         for url in image_urls
     ]

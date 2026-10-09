@@ -110,7 +110,7 @@ def _build_multi_turn(
     messages: list[Message] = [{"role": "system", "content": system_prompt}]
 
     for row in rows:
-        img_text = _format_image_descriptions(row)
+        img_text = format_image_descriptions(row)
         if row.get("source") == "sophos":
             content = _strip_reply_prefix(row.get("plain_text", ""))
             if inline_bg:
@@ -148,7 +148,7 @@ def _build_flat(
     bot_name = settings.bot_nickname or "Sophos"
 
     for row in rows:
-        img_text = _format_image_descriptions(row)
+        img_text = format_image_descriptions(row)
         if row.get("source") == "sophos":
             bot_text = _strip_reply_prefix(row.get("plain_text", ""))
             reply_to = _extract_reply_to(row)
@@ -238,9 +238,13 @@ def get_display_name(row: dict[str, Any]) -> str:
 # ── 跨 context 背景格式化 ─────────────────────────────────
 
 
-def _format_image_descriptions(row: dict[str, Any]) -> str:
+def format_image_descriptions(row: dict[str, Any]) -> str:
     """从 extra.images 提取图片描述，格式化为 [图片(hash): desc]。"""
     extra = row.get("extra")
+    if isinstance(extra, str):
+        extra = json.loads(extra)
+    if extra and extra.get("images_recognizing"):
+        return "[图片识别中]"
     if not extra:
         if row.get("enrichment_status") == "failed":
             raw = row.get("raw_message") or []
@@ -250,8 +254,6 @@ def _format_image_descriptions(row: dict[str, Any]) -> str:
                 return "[图片解析失败]"
             return "[消息解析失败]"
         return ""
-    if isinstance(extra, str):
-        extra = json.loads(extra)
     images = extra.get("images")
     if not images:
         return ""
@@ -292,6 +294,10 @@ def _format_bg_for_system(bg_row: dict[str, Any]) -> str:
 def _maybe_append_inline_bg(content: str, row: dict[str, Any]) -> str:
     """inline 模式：如果消息带 cross_context 背景，附加到内容末尾。"""
     extra = row.get("extra")
+    if isinstance(extra, str):
+        extra = json.loads(extra)
+    if extra and extra.get("images_recognizing"):
+        return "[图片识别中]"
     if not extra:
         return content
     if isinstance(extra, str):
@@ -330,7 +336,7 @@ def format_new_messages(
 
     for row in rows:
         ts = format_timestamp(row)
-        img_text = _format_image_descriptions(row)
+        img_text = format_image_descriptions(row)
         if row.get("source") == "sophos":
             line = apply_schema(
                 runtime_config.get("llm_bot_schema"),

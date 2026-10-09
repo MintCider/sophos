@@ -196,6 +196,18 @@ class MessageStore:
             message_id,
         )
 
+    async def defer_image_enrichment(self, message_id: int) -> None:
+        """Release a slow image message into context while recognition continues."""
+        await self._pool.execute(
+            """
+            UPDATE messages
+            SET metadata = metadata || '{"images_recognizing": true}'::jsonb,
+                enrichment_status = 'completed'
+            WHERE id = $1 AND enrichment_status IN ('pending', 'streaming')
+            """,
+            message_id,
+        )
+
     async def finish_image_enrichment(self, message_id: int, image_infos: list[dict[str, str]]) -> None:
         failed = any(info.get("status") == "failed" for info in image_infos)
         status = "failed" if failed else "completed"
@@ -203,7 +215,7 @@ class MessageStore:
         await self._pool.execute(
             """
             UPDATE messages
-            SET metadata = metadata || jsonb_build_object('images', $2::jsonb),
+            SET metadata = (metadata - 'images_recognizing') || jsonb_build_object('images', $2::jsonb),
                 enrichment_status = $3,
                 enrichment_error = $4
             WHERE id = $1
@@ -215,14 +227,51 @@ class MessageStore:
         )
 
     async def fail_interrupted_enrichments(self) -> int:
-        result = await self._pool.execute(
+        async with self._pool.acquire() as conn, conn.transaction():
+            result = await conn.execute(
+                """
+                UPDATE messages SET enrichment_status = 'failed',
+                                    enrichment_error = '消息富化因服务重启而中断'
+                WHERE enrichment_status IN ('pending', 'streaming')
+                """
+            )
+            deferred = await conn.execute(
+                """
+                UPDATE messages
+                SET metadata = (metadata - 'images_recognizing')
+                        || '{"images": [{"status": "failed", "error": "图片识别因服务重启而中断"}]}'::jsonb,
+                    enrichment_status = 'failed',
+                    enrichment_error = '图片识别因服务重启而中断'
+                WHERE metadata ? 'images_recognizing'
+                """
+            )
+        return int(result.rsplit(" ", 1)[-1]) + int(deferred.rsplit(" ", 1)[-1])
+
+    async def get_recognizing_ids(self, *, conversation_id: int, upto_id: int) -> set[int]:
+        rows = await self._pool.fetch(
             """
-            UPDATE messages SET enrichment_status = 'failed',
-                                enrichment_error = '消息富化因服务重启而中断'
-            WHERE enrichment_status IN ('pending', 'streaming')
-            """
+            SELECT id FROM messages
+            WHERE conversation_id = $1 AND id <= $2 AND metadata ? 'images_recognizing'
+            """,
+            conversation_id,
+            upto_id,
         )
-        return int(result.rsplit(" ", 1)[-1])
+        return {row["id"] for row in rows}
+
+    async def get_by_ids(self, message_ids: list[int]) -> list[dict[str, Any]]:
+        rows = await self._pool.fetch(
+            f"""
+            SELECT {_MESSAGE_COLUMNS}
+            FROM messages m
+            LEFT JOIN user_identities i ON i.id = m.sender_identity_id
+            LEFT JOIN users u ON u.id = i.user_id
+            JOIN conversations c ON c.id = m.conversation_id
+            WHERE m.id = ANY($1::bigint[])
+            ORDER BY m.id
+            """,
+            message_ids,
+        )
+        return [dict(row) for row in rows]
 
     async def get_context(
         self,
