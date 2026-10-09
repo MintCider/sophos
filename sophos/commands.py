@@ -283,6 +283,55 @@ async def handle_llm_command(
                 "  .llm trigger off          — 关闭 trigger"
             )
 
+    elif sub == "image":
+        from sophos.tools.image_gen import (
+            bind_image_model,
+            format_image_binding,
+            load_image_config,
+            set_image_timeout,
+            unbind_image_model,
+        )
+
+        image_sub = parts[2] if len(parts) > 2 else ""
+        if image_sub == "":
+            reply = format_image_binding(await load_image_config(provider_mgr._pool))
+        elif image_sub == "switch":
+            if len(parts) < 4 or "/" not in parts[3]:
+                reply = "用法: .llm image switch <alias>/<model> [--type openai|gemini]"
+            else:
+                alias, _, model = parts[3].partition("/")
+                api_type = _extract_type_flag(parts[4:])
+                reply = await bind_image_model(
+                    provider_mgr._pool,
+                    alias,
+                    model,
+                    api_type=api_type,
+                )
+        elif image_sub == "off":
+            reply = await unbind_image_model(provider_mgr._pool)
+        elif image_sub == "timeout":
+            if len(parts) < 4:
+                cfg = await load_image_config(provider_mgr._pool)
+                reply = f"图像生成 timeout: {cfg['request_timeout']}s"
+            else:
+                try:
+                    seconds = int(parts[3])
+                except ValueError:
+                    reply = "用法: .llm image timeout <秒>"
+                else:
+                    try:
+                        reply = await set_image_timeout(provider_mgr._pool, seconds)
+                    except ValueError as e:
+                        reply = str(e)
+        else:
+            reply = (
+                "用法:\n"
+                "  .llm image              — 当前图像生成绑定\n"
+                "  .llm image switch <alias>/<model> [--type openai|gemini]\n"
+                "  .llm image timeout [秒]\n"
+                "  .llm image off          — 解除绑定"
+            )
+
     elif sub == "extra_body":
         # .llm extra_body [json|clear]  — 操作当前 default slot
         if len(parts) < 3:
@@ -318,7 +367,8 @@ async def handle_llm_command(
             "  .llm timeout [秒]  — 请求超时\n"
             "  .llm collector — collector 模型管理\n"
             "  .llm vision   — vision 模型管理\n"
-            "  .llm trigger  — trigger 模型管理"
+            "  .llm trigger  — trigger 模型管理\n"
+            "  .llm image    — 图像生成模型绑定"
         )
 
     await _reply(context, reply)

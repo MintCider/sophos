@@ -735,6 +735,10 @@ onMounted(loadProviders)
   background: linear-gradient(135deg, #10b981, #059669);
 }
 
+.slot-tag--image {
+  background: linear-gradient(135deg, #ec4899, #db2777);
+}
+
 .provider-meta {
   display: grid;
   grid-template-columns: 1fr auto;

@@ -5,7 +5,14 @@ import json
 import asyncpg
 from aiohttp import web
 
-from sophos.tools.image_gen import _DEFAULT_DESCRIPTION, _DEFAULT_REQUEST_TIMEOUT
+from sophos.tools.image_gen import (
+    _DEFAULT_DESCRIPTION,
+    _DEFAULT_REQUEST_TIMEOUT,
+    _IMAGE_API_TYPES,
+    load_image_config,
+    parse_request_timeout,
+    persist_image_config,
+)
 from sophos.tools.registry import UNSAFE_DISABLE_TOOLS, ToolRegistry
 
 routes = web.RouteTableDef()
@@ -32,23 +39,11 @@ _GROUP_ORDER: list[str] = [
 ]
 
 
-def _json_object(raw: object) -> dict:
-    if isinstance(raw, str):
-        try:
-            raw = json.loads(raw)
-        except json.JSONDecodeError:
-            return {}
-    return raw if isinstance(raw, dict) else {}
-
-
 def _coerce_request_timeout(value: object) -> int:
     try:
-        timeout = int(value) if value is not None else _DEFAULT_REQUEST_TIMEOUT
-    except (TypeError, ValueError):
-        raise web.HTTPBadRequest(reason="request_timeout 必须是整数秒") from None
-    if not 5 <= timeout <= 3600:
-        raise web.HTTPBadRequest(reason="request_timeout 范围必须是 5~3600 秒")
-    return timeout
+        return parse_request_timeout(value if value is not None else _DEFAULT_REQUEST_TIMEOUT)
+    except ValueError as exc:
+        raise web.HTTPBadRequest(reason=str(exc)) from exc
 
 
 @routes.get("/api/tools")
@@ -223,35 +218,19 @@ async def set_tool_enabled(request: web.Request) -> web.Response:
 async def get_image_generation_config(request: web.Request) -> web.Response:
     """获取图像生成工具配置。"""
     pool: asyncpg.Pool = request.app["pool"]
+    config = await load_image_config(pool)
 
-    row = await pool.fetchrow(
-        """
-        SELECT name, display_name, description, provider_alias, model_name,
-               api_type, send_as, config, enabled
-        FROM custom_tools
-        WHERE name = 'generate_image'
-        """
-    )
-
-    if row:
-        config = dict(row)
-        custom_config = _json_object(config.pop("config", None))
-        config["request_timeout"] = _coerce_request_timeout(custom_config.get("request_timeout"))
-    else:
-        config = {
-            "name": "generate_image",
-            "display_name": "图像生成",
-            "description": _DEFAULT_DESCRIPTION,
-            "provider_alias": None,
-            "model_name": None,
-            "api_type": "openai",
-            "send_as": "image_url",
-            "request_timeout": _DEFAULT_REQUEST_TIMEOUT,
-            "enabled": False,
-        }
-
-    providers = await pool.fetch("SELECT alias FROM llm_providers ORDER BY created_at")
-    config["available_providers"] = [r["alias"] for r in providers]
+    provider_rows = await pool.fetch("SELECT alias, models FROM llm_providers ORDER BY created_at")
+    available_providers: list[str] = []
+    provider_models: dict[str, list[str]] = {}
+    for row in provider_rows:
+        available_providers.append(row["alias"])
+        models = row["models"]
+        if isinstance(models, str):
+            models = json.loads(models)
+        provider_models[row["alias"]] = models or []
+    config["available_providers"] = available_providers
+    config["provider_models"] = provider_models
 
     return web.json_response({"config": config})
 
@@ -260,7 +239,6 @@ async def get_image_generation_config(request: web.Request) -> web.Response:
 async def update_image_generation_config(request: web.Request) -> web.Response:
     """更新图像生成工具配置。"""
     pool: asyncpg.Pool = request.app["pool"]
-    registry: ToolRegistry = request.app.get("tool_registry")  # type: ignore[assignment]
     payload = await request.json()
 
     provider_alias = payload.get("provider_alias") or None
@@ -271,7 +249,7 @@ async def update_image_generation_config(request: web.Request) -> web.Response:
     request_timeout = _coerce_request_timeout(payload.get("request_timeout"))
     enabled = bool(payload.get("enabled", False))
 
-    if api_type not in ("openai", "gemini"):
+    if api_type not in _IMAGE_API_TYPES:
         raise web.HTTPBadRequest(reason="api_type 必须是 openai 或 gemini")
 
     if provider_alias:
@@ -282,36 +260,17 @@ async def update_image_generation_config(request: web.Request) -> web.Response:
         if not exists:
             raise web.HTTPBadRequest(reason=f"供应商 '{provider_alias}' 不存在")
 
-    await pool.execute(
-        """
-        INSERT INTO custom_tools (
-            name, display_name, description, category, conversation_kinds, tool_type,
-            provider_alias, model_name, api_type, send_as, config, enabled
-        )
-        VALUES (
-            'generate_image', '图像生成', $1, 'output', '[]'::jsonb, 'image_generation',
-            $2, $3, $4, $5, $6::jsonb, $7
-        )
-        ON CONFLICT (name) DO UPDATE SET
-            description = $1, provider_alias = $2, model_name = $3,
-            api_type = $4, send_as = $5,
-            config = COALESCE(custom_tools.config, '{}'::jsonb) || $6::jsonb,
-            enabled = $7, updated_at = now()
-        """,
-        description,
-        provider_alias,
-        model_name,
-        api_type,
-        send_as,
-        json.dumps({"request_timeout": request_timeout}, ensure_ascii=False),
-        enabled,
+    await persist_image_config(
+        pool,
+        {
+            "provider_alias": provider_alias,
+            "model_name": model_name,
+            "api_type": api_type,
+            "send_as": send_as,
+            "description": description,
+            "request_timeout": request_timeout,
+            "enabled": enabled,
+        },
     )
-
-    if registry is not None:
-        registry.set_disabled("generate_image", not enabled)
-
-    from sophos.pipeline import _invalidate_tool_disabled_cache
-
-    _invalidate_tool_disabled_cache()
 
     return web.json_response({"message": "图像生成工具配置已更新"})

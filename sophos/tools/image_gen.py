@@ -27,6 +27,8 @@ _DEFAULT_SIZE = "auto"
 _DEFAULT_FORMAT = "png"
 _DEFAULT_QUALITY = "auto"
 _DEFAULT_REQUEST_TIMEOUT = 600
+_IMAGE_TOOL_NAME = "generate_image"
+_IMAGE_API_TYPES = frozenset({"openai", "gemini"})
 
 _SIZE_OPTIONS = [
     "auto",
@@ -87,16 +89,182 @@ def _normalize_config(raw: Any) -> dict[str, Any]:
     return raw if isinstance(raw, dict) else {}
 
 
-def _request_timeout_from_config(raw: Any) -> int:
-    config = _normalize_config(raw)
-    value = config.get("request_timeout", _DEFAULT_REQUEST_TIMEOUT)
+def parse_request_timeout(value: Any) -> int:
     try:
         timeout = int(value)
     except (TypeError, ValueError):
-        return _DEFAULT_REQUEST_TIMEOUT
+        raise ValueError("request_timeout 必须是整数秒") from None
     if not 5 <= timeout <= 3600:
-        return _DEFAULT_REQUEST_TIMEOUT
+        raise ValueError("request_timeout 范围必须是 5~3600 秒")
     return timeout
+
+
+def _request_timeout_from_config(raw: Any) -> int:
+    config = _normalize_config(raw)
+    try:
+        return parse_request_timeout(config.get("request_timeout", _DEFAULT_REQUEST_TIMEOUT))
+    except ValueError:
+        return _DEFAULT_REQUEST_TIMEOUT
+
+
+def default_image_config() -> dict[str, Any]:
+    return {
+        "name": _IMAGE_TOOL_NAME,
+        "display_name": "图像生成",
+        "description": _DEFAULT_DESCRIPTION,
+        "provider_alias": None,
+        "model_name": None,
+        "api_type": "openai",
+        "send_as": "image_url",
+        "request_timeout": _DEFAULT_REQUEST_TIMEOUT,
+        "enabled": False,
+    }
+
+
+def format_image_binding(config: dict[str, Any]) -> str:
+    alias = config.get("provider_alias")
+    model = config.get("model_name")
+    if not alias or not model:
+        return "图像生成: 未绑定模型"
+    api_type = config.get("api_type") or "openai"
+    type_str = f" ({api_type})" if api_type != "openai" else ""
+    enabled = "启用" if config.get("enabled") else "禁用"
+    timeout = config.get("request_timeout", _DEFAULT_REQUEST_TIMEOUT)
+    return (
+        f"图像生成: {alias} / {model}{type_str}\n"
+        f"  状态: {enabled}\n"
+        f"  超时: {timeout}s"
+    )
+
+
+def _config_from_row(row: Any) -> dict[str, Any]:
+    data = default_image_config()
+    data.update(dict(row))
+    data["request_timeout"] = _request_timeout_from_config(data.pop("config", None))
+    data["provider_alias"] = data.get("provider_alias") or None
+    data["model_name"] = data.get("model_name") or None
+    data["api_type"] = data.get("api_type") or "openai"
+    data["send_as"] = data.get("send_as") or "image_url"
+    data["enabled"] = bool(data.get("enabled"))
+    return data
+
+
+def _after_image_config_change(enabled: bool) -> None:
+    from sophos import pipeline
+
+    pipeline._invalidate_tool_disabled_cache()
+    if pipeline._tool_registry is not None:
+        pipeline._tool_registry.set_disabled(_IMAGE_TOOL_NAME, not enabled)
+
+
+async def load_image_config(pool: Any) -> dict[str, Any]:
+    row = await pool.fetchrow(
+        """
+        SELECT name, display_name, description, provider_alias, model_name,
+               api_type, send_as, config, enabled
+        FROM custom_tools
+        WHERE name = $1
+        """,
+        _IMAGE_TOOL_NAME,
+    )
+    if not row:
+        return default_image_config()
+    return _config_from_row(row)
+
+
+async def persist_image_config(pool: Any, config: dict[str, Any]) -> dict[str, Any]:
+    current = await load_image_config(pool)
+    merged = {**current, **config}
+    description = str(merged.get("description") or _DEFAULT_DESCRIPTION)
+    provider_alias = merged.get("provider_alias") or None
+    model_name = merged.get("model_name") or None
+    api_type = merged.get("api_type") or "openai"
+    send_as = merged.get("send_as") or "image_url"
+    request_timeout = _request_timeout_from_config({"request_timeout": merged.get("request_timeout")})
+    enabled = bool(merged.get("enabled", False))
+    await pool.execute(
+        """
+        INSERT INTO custom_tools (
+            name, display_name, description, category, conversation_kinds, tool_type,
+            provider_alias, model_name, api_type, send_as, config, enabled
+        )
+        VALUES (
+            'generate_image', '图像生成', $1, 'output', '[]'::jsonb, 'image_generation',
+            $2, $3, $4, $5, $6::jsonb, $7
+        )
+        ON CONFLICT (name) DO UPDATE SET
+            description = $1, provider_alias = $2, model_name = $3,
+            api_type = $4, send_as = $5,
+            config = COALESCE(custom_tools.config, '{}'::jsonb) || $6::jsonb,
+            enabled = $7, updated_at = now()
+        """,
+        description,
+        provider_alias,
+        model_name,
+        api_type,
+        send_as,
+        json.dumps({"request_timeout": request_timeout}, ensure_ascii=False),
+        enabled,
+    )
+    saved = {
+        **merged,
+        "description": description,
+        "provider_alias": provider_alias,
+        "model_name": model_name,
+        "api_type": api_type,
+        "send_as": send_as,
+        "request_timeout": request_timeout,
+        "enabled": enabled,
+    }
+    _after_image_config_change(enabled)
+    return saved
+
+
+async def bind_image_model(pool: Any, alias: str, model: str, *, api_type: str = "openai") -> str:
+    if api_type not in _IMAGE_API_TYPES:
+        return "type 必须是 openai / gemini"
+    row = await pool.fetchrow(
+        "SELECT alias, base_urls FROM llm_providers WHERE alias = $1",
+        alias,
+    )
+    if not row:
+        return f"provider '{alias}' 不存在"
+    if not resolve_base_url(row["base_urls"], api_type):
+        return f"provider '{alias}' 未配置 {api_type} Base URL"
+    await persist_image_config(
+        pool,
+        {
+            "provider_alias": alias,
+            "model_name": model,
+            "api_type": api_type,
+            "enabled": True,
+        },
+    )
+    suffix = f" (api_type={api_type})" if api_type != "openai" else ""
+    return f"已绑定图像生成到 {alias} / {model}{suffix}"
+
+
+async def unbind_image_model(pool: Any) -> str:
+    current = await load_image_config(pool)
+    if not current.get("provider_alias") and not current.get("model_name"):
+        if current.get("enabled"):
+            await persist_image_config(pool, {"enabled": False})
+        return "图像生成未绑定模型"
+    await persist_image_config(
+        pool,
+        {
+            "provider_alias": None,
+            "model_name": None,
+            "enabled": False,
+        },
+    )
+    return "已解除图像生成的模型绑定"
+
+
+async def set_image_timeout(pool: Any, seconds: int) -> str:
+    timeout = parse_request_timeout(seconds)
+    await persist_image_config(pool, {"request_timeout": timeout})
+    return f"图像生成 timeout 已更新: {timeout}s"
 
 
 def _session_from_context(context: dict[str, Any]) -> dict[str, Any]:
@@ -232,8 +400,9 @@ class ImageGenerationTool(Tool):
             """
             SELECT provider_alias, model_name, api_type, send_as, config
             FROM custom_tools
-            WHERE name = 'generate_image'
-            """
+            WHERE name = $1
+            """,
+            _IMAGE_TOOL_NAME,
         )
         if not row or not row["provider_alias"] or not row["model_name"]:
             logger.warning("generate_image called but tool is not configured")

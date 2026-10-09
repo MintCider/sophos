@@ -61,6 +61,7 @@ interface ImageConfig {
   request_timeout: number
   description: string
   available_providers: string[]
+  provider_models: Record<string, string[]>
 }
 
 const message = useMessage()
@@ -84,6 +85,7 @@ const imageConfig = reactive<ImageConfig>({
   request_timeout: 600,
   description: '',
   available_providers: [],
+  provider_models: {},
 })
 
 const apiTypeOptions = [
@@ -103,6 +105,22 @@ const toolCount = computed(() =>
 const providerOptions = computed(() =>
   imageConfig.available_providers.map((alias) => ({ label: alias, value: alias })),
 )
+
+const modelOptions = computed(() => {
+  const alias = imageConfig.provider_alias || ''
+  const models = imageConfig.provider_models[alias] ?? []
+  const options = models.map((model) => ({ label: model, value: model }))
+  if (imageConfig.model_name && !models.includes(imageConfig.model_name)) {
+    options.unshift({ label: imageConfig.model_name, value: imageConfig.model_name })
+  }
+  return options
+})
+
+function imageBinding(tool: ToolInfo): string {
+  const cfg = tool.custom_config
+  if (!cfg?.provider_alias || !cfg.model_name) return ''
+  return `${cfg.provider_alias} / ${cfg.model_name}`
+}
 
 async function loadTools() {
   loading.value = true
@@ -183,6 +201,7 @@ async function loadImageConfig() {
     imageConfig.request_timeout = cfg.request_timeout ?? 600
     imageConfig.description = cfg.description ?? ''
     imageConfig.available_providers = cfg.available_providers ?? []
+    imageConfig.provider_models = cfg.provider_models ?? {}
     imageConfigLoaded.value = true
   } catch (error: any) {
     message.error(error?.response?.data?.reason ?? '加载图像生成配置失败')
@@ -254,6 +273,21 @@ onMounted(loadTools)
                 <div class="tool-title">
                   <code class="tool-name">{{ tool.name }}</code>
                   <NTag
+                    v-if="tool.name === 'generate_image' && imageBinding(tool)"
+                    size="tiny"
+                    :bordered="false"
+                    type="success"
+                  >
+                    {{ imageBinding(tool) }}
+                  </NTag>
+                  <NTag
+                    v-else-if="tool.name === 'generate_image'"
+                    size="tiny"
+                    :bordered="false"
+                  >
+                    未绑定模型
+                  </NTag>
+                  <NTag
                     v-if="tool.has_custom_description"
                     size="tiny"
                     :bordered="false"
@@ -311,6 +345,9 @@ onMounted(loadTools)
               >
                 <div class="section-header">
                   <span>图像生成配置</span>
+                  <NText v-if="imageConfig.provider_alias && imageConfig.model_name" depth="3" class="section-hint">
+                    {{ imageConfig.provider_alias }} / {{ imageConfig.model_name }}
+                  </NText>
                 </div>
 
                 <div v-if="!imageConfigLoaded" class="panel-loading">加载中...</div>
@@ -338,9 +375,13 @@ onMounted(loadTools)
 
                     <label class="config-label">
                       <span>模型名称</span>
-                      <NInput
+                      <NSelect
                         v-model:value="imageConfig.model_name"
-                        placeholder="例如 dall-e-3 / gpt-image-1"
+                        :options="modelOptions"
+                        placeholder="选择或输入模型"
+                        filterable
+                        tag
+                        clearable
                       />
                     </label>
 

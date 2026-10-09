@@ -518,9 +518,18 @@ class ProviderManager:
             """,
             alias,
         )
-        if active_rows:
-            slots = ", ".join(row["key"] for row in active_rows)
-            return f"无法删除 provider '{alias}'，仍被以下 slot 使用: {slots}"
+        slots = [row["key"] for row in active_rows]
+        image_bound = await self._pool.fetchval(
+            """
+            SELECT 1 FROM custom_tools
+            WHERE name = 'generate_image' AND provider_alias = $1 AND model_name IS NOT NULL
+            """,
+            alias,
+        )
+        if image_bound:
+            slots.append("image")
+        if slots:
+            return f"无法删除 provider '{alias}'，仍被以下 slot 使用: {', '.join(slots)}"
         result = await self._pool.execute(
             "DELETE FROM llm_providers WHERE alias = $1",
             alias,
@@ -558,6 +567,21 @@ class ProviderManager:
                     "key": ar["key"],
                     "model": ar["model"],
                     "api_type": ar.get("api_type", "openai") or "openai",
+                }
+            )
+        image_row = await self._pool.fetchrow(
+            """
+            SELECT provider_alias, model_name, api_type
+            FROM custom_tools
+            WHERE name = 'generate_image'
+            """,
+        )
+        if image_row and image_row["provider_alias"] and image_row["model_name"]:
+            active_by_alias.setdefault(image_row["provider_alias"], []).append(
+                {
+                    "key": "image",
+                    "model": image_row["model_name"],
+                    "api_type": image_row.get("api_type", "openai") or "openai",
                 }
             )
 
