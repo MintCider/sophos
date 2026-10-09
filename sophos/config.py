@@ -67,7 +67,7 @@ class Settings(BaseSettings):
     # 上下文降级：开启后将多轮消息合并为单条 user message，兼容不支持连续 user message 的模型
     llm_flatten_context: bool = False
     # Tool calling 最大循环轮次
-    llm_max_tool_rounds: int = 10
+    llm_max_tool_rounds: int = 50
     # 用户消息格式模板（多轮和拍平模式都使用）
     # 可用占位符：{{time}} {{mid}} {{name}} {{uid}} {{message}}
     llm_user_schema: str = "[{{time}}] #{{mid}} {{name}}({{uid}})：{{message}}"
