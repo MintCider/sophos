@@ -441,6 +441,18 @@ def _sanitize_fallback_reply(text: str) -> str | None:
     return text
 
 
+async def _notify_workflow_failure(ctx: PipelineContext) -> None:
+    try:
+        await ctx.message_service.send_message(
+            SendMessageRequest(
+                conversation_id=ctx.conversation_id,
+                text="模型服务暂时无响应，请稍后再试。",
+            )
+        )
+    except Exception:
+        logger.exception("Failed to notify conversation after agent workflow failure")
+
+
 async def _handle_llm_trigger(ctx: PipelineContext) -> None:
     """Build context and execute the configured provider-neutral agent graph."""
     registry = _get_registry()
@@ -698,6 +710,7 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
         await engine.run(run)
     except Exception:
         logger.exception("Agent workflow failed")
+        await _notify_workflow_failure(ctx)
         return
     ctx.state["agent_workflow"] = run.to_state_dict()
     ctx.state["agent_transcript"] = transcript.to_list()

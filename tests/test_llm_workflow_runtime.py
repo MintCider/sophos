@@ -1,6 +1,7 @@
 import json
 import unittest
 from typing import Any
+from unittest.mock import AsyncMock, patch
 
 from sophos.agent import (
     AgentTool,
@@ -57,6 +58,19 @@ class FakeProvider(LLMProvider):
         return self.responses.pop(0)
 
 
+class TimeoutThenSuccessProvider(FakeProvider):
+    def __init__(self, responses: list[ChatResponse], failures: int) -> None:
+        super().__init__(responses)
+        self.failures = failures
+        self.attempts = 0
+
+    async def chat(self, *args, **kwargs) -> ChatResponse:
+        self.attempts += 1
+        if self.attempts <= self.failures:
+            raise TimeoutError("provider timed out")
+        return await super().chat(*args, **kwargs)
+
+
 def agent_tool(name: str, category: str) -> AgentTool:
     return AgentTool(
         name=name,
@@ -73,6 +87,31 @@ def agent_tool(name: str, category: str) -> AgentTool:
 
 
 class LLMWorkflowRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_provider_timeout_is_retried_three_times(self) -> None:
+        collector = TimeoutThenSuccessProvider(
+            [tool_response("complete_collection", {}, "handover-1")],
+            failures=3,
+        )
+        actor = FakeProvider([tool_response("send_message", {"text": "answer"}, "send-1")])
+
+        async def execute(name: str, params: dict[str, Any]) -> dict[str, Any]:
+            return {"status": "ok"}
+
+        context = LLMWorkflowContext(
+            messages=[{"role": "user", "content": "question"}],
+            tools=(agent_tool("send_message", "output"),),
+            provider_resolver=lambda slot: collector if slot == "collector" else actor,
+            tool_executor=execute,
+        )
+        run = WorkflowRun(collector_actor_workflow(), Transcript())
+
+        with patch("sophos.agent.llm_runtime.asyncio.sleep", new=AsyncMock()) as sleep:
+            await WorkflowEngine({"llm": LLMNodeExecutor(context)}).run(run)
+
+        self.assertEqual(run.status, "completed")
+        self.assertEqual(collector.attempts, 4)
+        self.assertEqual(sleep.await_count, 3)
+
     async def test_collector_history_is_visible_to_actor_and_tools_are_separated(self) -> None:
         collector = FakeProvider(
             [

@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
+
+import aiohttp
 
 from sophos.agent.engine import NodeOutcome, WorkflowRun, build_model_transition_tools
 from sophos.agent.transcript import NativeEnvelope, Transcript, new_event
@@ -76,13 +79,28 @@ class LLMNodeExecutor:
                 node.instructions,
                 system_prompt=self.context.system_prompts_by_slot.get(node.model.slot),
             )
-            response = await provider.chat(
-                request_messages,
-                tools=schemas,
-                temperature=node.model.temperature,
-                max_tokens=node.model.max_tokens,
-                request_options=request_options,
-            )
+            for retry_number in range(4):
+                try:
+                    response = await provider.chat(
+                        request_messages,
+                        tools=schemas,
+                        temperature=node.model.temperature,
+                        max_tokens=node.model.max_tokens,
+                        request_options=request_options,
+                    )
+                    break
+                except (TimeoutError, aiohttp.ClientConnectionError):
+                    if retry_number == 3:
+                        raise
+                    delay = 2**retry_number
+                    logger.warning(
+                        "LLM request failed in node %s; retrying %d/3 in %ds",
+                        node.node_id,
+                        retry_number + 1,
+                        delay,
+                        exc_info=True,
+                    )
+                    await asyncio.sleep(delay)
             assistant_message = response["message"]
             self.context.messages.append(assistant_message)
             _record_provider_response(run.transcript, node, response)
