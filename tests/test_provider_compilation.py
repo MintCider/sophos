@@ -338,6 +338,103 @@ class ProviderStreamingPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("additionalProperties", parameters["properties"]["filters"])
         self.assertFalse(tool["function"]["parameters"]["additionalProperties"])
 
+    def test_gemini_flattens_unsigned_tool_turns_and_keeps_signed_calls(self) -> None:
+        provider = GeminiProvider(
+            base_url="https://generativelanguage.googleapis.com",
+            api_key="test",
+            model="model",
+        )
+        messages = [
+            {"role": "system", "content": "stable"},
+            {"role": "user", "content": "hello"},
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "gemini-1",
+                        "type": "function",
+                        "function": {"name": "lookup", "arguments": '{"query":"a"}'},
+                        "thought_signature": "sig-1",
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "gemini-1",
+                "name": "lookup",
+                "content": '{"ok":true}',
+            },
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "collector-1",
+                        "type": "function",
+                        "function": {
+                            "name": "query_messages",
+                            "arguments": '{"limit":40}',
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "collector-1",
+                "name": "query_messages",
+                "content": '{"messages":"log"}',
+            },
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "gemini-2",
+                        "type": "function",
+                        "function": {"name": "send_message", "arguments": '{"text":"hi"}'},
+                        "thought_signature": "sig-2",
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "gemini-2",
+                "name": "send_message",
+                "content": '{"status":"ok"}',
+            },
+        ]
+
+        _, contents = provider._convert_messages(messages)
+
+        self.assertEqual(
+            [content["role"] for content in contents],
+            ["user", "model", "user", "model", "user", "model", "user"],
+        )
+        self.assertEqual(
+            contents[1]["parts"],
+            [
+                {
+                    "functionCall": {"name": "lookup", "args": {"query": "a"}},
+                    "thoughtSignature": "sig-1",
+                }
+            ],
+        )
+        self.assertEqual(contents[2]["parts"][0]["functionResponse"]["name"], "lookup")
+        self.assertEqual(contents[3]["parts"], [{"text": 'query_messages({"limit": 40})'}])
+        self.assertNotIn("functionCall", contents[3]["parts"][0])
+        self.assertEqual(contents[4]["parts"], [{"text": 'query_messages: {"messages":"log"}'}])
+        self.assertEqual(
+            contents[5]["parts"],
+            [
+                {
+                    "functionCall": {"name": "send_message", "args": {"text": "hi"}},
+                    "thoughtSignature": "sig-2",
+                }
+            ],
+        )
+        self.assertEqual(
+            [call.get("thought_signature") for call in messages[2]["tool_calls"]],
+            ["sig-1"],
+        )
+
     def test_native_cache_usage_is_preserved(self) -> None:
         response = GeminiProvider._parse_gemini_response(
             {

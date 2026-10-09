@@ -34,6 +34,63 @@ _MAX_RETRY_DELAY_SECONDS = 30.0
 _RETRYABLE_HTTP_STATUSES = frozenset({429, 500, 502, 503, 504})
 
 
+def _format_tool_arguments(raw: Any) -> str:
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return raw
+        return json.dumps(parsed, ensure_ascii=False)
+    return json.dumps(raw, ensure_ascii=False)
+
+
+def _flatten_tool_calls(message: Message, tool_calls: list[dict[str, Any]]) -> str:
+    chunks: list[str] = []
+    content = message.get("content")
+    if content:
+        chunks.append(str(content))
+    for call in tool_calls:
+        function = call.get("function") or {}
+        name = str(function.get("name") or "")
+        args = _format_tool_arguments(function.get("arguments") or "{}")
+        chunks.append(f"{name}({args})")
+    return "\n".join(chunks)
+
+
+def _flatten_tool_results(messages: list[Message]) -> str:
+    chunks: list[str] = []
+    for message in messages:
+        name = str(message.get("name") or "")
+        content = str(message.get("content") or "")
+        chunks.append(f"{name}: {content}" if name else content)
+    return "\n".join(chunk for chunk in chunks if chunk)
+
+
+def _function_response_part(message: Message) -> dict[str, Any]:
+    try:
+        result = json.loads(message.get("content", "{}"))
+    except json.JSONDecodeError:
+        result = {"result": message.get("content", "")}
+    if not isinstance(result, dict):
+        result = {"result": result}
+    return {
+        "functionResponse": {
+            "name": message.get("name", ""),
+            "response": result,
+        },
+    }
+
+
+def _can_attach_function_response(contents: list[dict[str, Any]]) -> bool:
+    if not contents:
+        return False
+    last = contents[-1]
+    parts = last.get("parts") or []
+    if last.get("role") == "user" and any("functionResponse" in part for part in parts):
+        return True
+    return last.get("role") == "model" and any("functionCall" in part for part in parts)
+
+
 class _GeminiAPIError(RuntimeError):
     def __init__(self, status: int, body: str, retry_after: str | None) -> None:
         super().__init__(f"Gemini API error {status}: {body}")
@@ -89,12 +146,14 @@ class GeminiProvider(LLMProvider):
         """
         system_instruction: dict[str, Any] | None = None
         contents: list[dict[str, Any]] = []
-
-        for msg in messages:
+        index = 0
+        while index < len(messages):
+            msg = messages[index]
             role = msg.get("role", "user")
 
             if role == "system":
                 system_instruction = {"parts": [{"text": msg.get("content", "")}]}
+                index += 1
                 continue
 
             if role == "user":
@@ -104,9 +163,25 @@ class GeminiProvider(LLMProvider):
                         "parts": [{"text": msg.get("content", "")}],
                     }
                 )
+                index += 1
                 continue
 
             if role == "assistant":
+                tool_calls = list(msg.get("tool_calls") or [])
+                if tool_calls and not all(call.get("thought_signature") for call in tool_calls):
+                    tool_messages: list[Message] = []
+                    index += 1
+                    while index < len(messages) and messages[index].get("role") == "tool":
+                        tool_messages.append(messages[index])
+                        index += 1
+                    flattened = _flatten_tool_calls(msg, tool_calls)
+                    if flattened:
+                        contents.append({"role": "model", "parts": [{"text": flattened}]})
+                    results = _flatten_tool_results(tool_messages)
+                    if results:
+                        contents.append({"role": "user", "parts": [{"text": results}]})
+                    continue
+
                 parts: list[dict[str, Any]] = []
                 text_sig = msg.get("_gemini_text_signature")
                 if msg.get("content"):
@@ -114,7 +189,7 @@ class GeminiProvider(LLMProvider):
                     if text_sig:
                         text_part["thoughtSignature"] = text_sig
                     parts.append(text_part)
-                for tc in msg.get("tool_calls", []):
+                for tc in tool_calls:
                     fn = tc.get("function", {})
                     try:
                         args = json.loads(fn.get("arguments", "{}"))
@@ -128,33 +203,28 @@ class GeminiProvider(LLMProvider):
                     parts.append(fc_part)
                 if parts:
                     contents.append({"role": "model", "parts": parts})
+                index += 1
                 continue
 
             if role == "tool":
-                # Gemini: tool results 用 role=user + functionResponse parts
-                # 连续多个 tool message 合并到同一个 content
-                try:
-                    result = json.loads(msg.get("content", "{}"))
-                except json.JSONDecodeError:
-                    result = {"result": msg.get("content", "")}
-                if not isinstance(result, dict):
-                    result = {"result": result}
-                fr_part = {
-                    "functionResponse": {
-                        "name": msg.get("name", ""),
-                        "response": result,
-                    },
-                }
-                # 合并到上一个 user content（如果上一个也是 functionResponse）
-                if (
-                    contents
-                    and contents[-1]["role"] == "user"
-                    and any("functionResponse" in p for p in contents[-1]["parts"])
-                ):
-                    contents[-1]["parts"].append(fr_part)
+                if _can_attach_function_response(contents):
+                    fr_part = _function_response_part(msg)
+                    if (
+                        contents
+                        and contents[-1]["role"] == "user"
+                        and any("functionResponse" in p for p in contents[-1]["parts"])
+                    ):
+                        contents[-1]["parts"].append(fr_part)
+                    else:
+                        contents.append({"role": "user", "parts": [fr_part]})
                 else:
-                    contents.append({"role": "user", "parts": [fr_part]})
+                    results = _flatten_tool_results([msg])
+                    if results:
+                        contents.append({"role": "user", "parts": [{"text": results}]})
+                index += 1
                 continue
+
+            index += 1
 
         return system_instruction, contents
 
