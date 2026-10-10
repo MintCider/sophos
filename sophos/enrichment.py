@@ -13,7 +13,7 @@ import logging
 from contextlib import suppress
 from typing import Any
 
-from sophos.config import settings
+from sophos import runtime_config
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +58,7 @@ class EnrichmentRegistry:
         logger.debug("Waiting for %d enrichment task(s) on %d message(s)", len(pending), len(message_ids))
         wait_timeout = timeout
         if wait_timeout is None:
-            wait_timeout = settings.vision_generation_timeout + 20.0
+            wait_timeout = runtime_config.get("vision_generation_timeout") + 20.0
         waiters = [asyncio.ensure_future(ready.wait()) for ready in pending]
         _done, still_pending = await asyncio.wait(waiters, timeout=wait_timeout)
         for waiter in still_pending:

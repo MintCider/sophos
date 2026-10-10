@@ -26,7 +26,8 @@ def collector_actor_workflow() -> WorkflowDefinition:
             NodeSpec(
                 node_id="collector",
                 kind="llm",
-                title="Collect information",
+                title="信息收集",
+                system_prompt="{{prompt.persona.collector}}",
                 instructions=(
                     "只调用读取工具收集回答当前请求所需的信息。"
                     "收集完成后调用 complete_collection。"
@@ -47,7 +48,8 @@ def collector_actor_workflow() -> WorkflowDefinition:
             NodeSpec(
                 node_id="actor",
                 kind="llm",
-                title="Decide and act",
+                title="回复",
+                system_prompt="{{prompt.persona.system}}",
                 instructions=(
                     "根据完整对话和读取工具历史完成请求。只使用当前开放的输出工具。"
                     "若缺少必要信息，调用 request_more_information 返回收集节点。"
@@ -79,7 +81,7 @@ def collector_actor_workflow() -> WorkflowDefinition:
             NodeSpec(
                 node_id="done",
                 kind="terminal",
-                title="Completed",
+                title="完成",
                 input_ports=(PortSpec("input"),),
             ),
         ),

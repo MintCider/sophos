@@ -10,7 +10,7 @@ from sophos.agent.workflow import WorkflowDefinition, WorkflowValidationError
 
 ACTIVE_WORKFLOW_KEY = "agent_workflow"
 SUPPORTED_NODE_KINDS = frozenset({"llm", "terminal"})
-SUPPORTED_MODEL_SLOTS = frozenset({"default", "collector", "trigger"})
+SUPPORTED_MODEL_SLOTS = frozenset({"default", "collector"})
 
 
 def load_active_workflow() -> WorkflowDefinition:
@@ -47,7 +47,16 @@ def validate_executable_workflow(workflow: WorkflowDefinition) -> None:
             f"active workflow contains unsupported node kinds: {', '.join(unsupported_kinds)}"
         )
 
+    from sophos import prompts
+
     for node in workflow.nodes:
+        if node.system_prompt:
+            try:
+                prompts.validate_template(node.system_prompt, prompts.NODE_VARIABLES)
+            except prompts.PromptError as exc:
+                raise WorkflowValidationError(f"{node.node_id}: {exc}") from exc
+        if node.model is not None and node.model.max_tool_rounds is not None and node.model.max_tool_rounds < 1:
+            raise WorkflowValidationError(f"max_tool_rounds must be positive: {node.node_id}")
         if node.model is not None and node.model.slot not in SUPPORTED_MODEL_SLOTS:
             raise WorkflowValidationError(
                 f"active workflow uses unsupported model slot {node.model.slot}: {node.node_id}"

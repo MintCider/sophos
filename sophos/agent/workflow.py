@@ -26,6 +26,7 @@ class ModelPolicy:
     slot: str = "default"
     temperature: float | None = None
     max_tokens: int | None = None
+    max_tool_rounds: int | None = None
     require_tool_call: bool = False
 
 
@@ -55,6 +56,7 @@ class NodeSpec:
     node_id: str
     kind: NodeKind
     title: str = ""
+    system_prompt: str = ""
     instructions: str = ""
     model: ModelPolicy | None = None
     tools: ToolPolicy = field(default_factory=ToolPolicy)
@@ -83,6 +85,7 @@ class WorkflowDefinition:
     entry_node: str
     nodes: tuple[NodeSpec, ...]
     edges: tuple[EdgeSpec, ...]
+    layout: dict[str, dict[str, float]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.validate()
@@ -150,6 +153,7 @@ class WorkflowDefinition:
                     node_id=str(raw_node["node_id"]),
                     kind=raw_node["kind"],
                     title=str(raw_node.get("title", "")),
+                    system_prompt=str(raw_node.get("system_prompt", "")),
                     instructions=str(raw_node.get("instructions", "")),
                     model=ModelPolicy(**model_raw) if model_raw else None,
                     tools=ToolPolicy(**(raw_node.get("tools") or {})),
@@ -165,5 +169,9 @@ class WorkflowDefinition:
             entry_node=str(value["entry_node"]),
             nodes=tuple(nodes),
             edges=tuple(EdgeSpec(**edge) for edge in value.get("edges") or []),
+            layout={
+                str(key): {"x": float(pos["x"]), "y": float(pos["y"])}
+                for key, pos in (value.get("layout") or {}).items()
+            },
         )
 

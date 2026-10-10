@@ -76,6 +76,11 @@ RUNTIME_VARIABLES: dict[str, str] = {
     "runtime_context": "时间、身份与消息格式的完整运行时块",
 }
 
+NODE_VARIABLES: dict[str, str] = {
+    **RUNTIME_VARIABLES,
+    "context_blocks": "档案、联想记忆与最近动态；未引用时自动追加在末尾",
+}
+
 _DEFAULT_SYSTEM = """\
 你是 {{nickname}}，一个活跃在群聊中的智能助手。
 
@@ -308,6 +313,30 @@ def validate(key: str, content: str) -> None:
         raise PromptError(f"不支持的变量：{', '.join(unknown)}")
 
 
+def validate_template(content: str, variables: dict[str, str]) -> None:
+    """Validate an inline template (e.g. a workflow node prompt) against its available variables."""
+    used, includes = references(content)
+    for include in sorted(includes):
+        if include not in _BUILTIN and include not in _custom:
+            raise PromptError(f"引用了不存在的 prompt：{include}")
+        used |= _expanded_variables(include, get(include), (include,))
+    unknown = sorted(used - set(variables))
+    if unknown:
+        raise PromptError(f"不支持的变量：{', '.join(unknown)}")
+
+
+def render_template(
+    content: str,
+    values: dict[str, str] | None = None,
+    *,
+    mark_missing: bool = False,
+) -> RenderedPrompt:
+    """Render an inline template that is not itself a registered prompt."""
+    rendered = render_content("", content, values, mark_missing=mark_missing)
+    versions = {key: version for key, version in rendered.versions.items() if key}
+    return RenderedPrompt(text=rendered.text, versions=versions, missing=rendered.missing)
+
+
 def render(key: str, values: dict[str, str] | None = None, *, mark_missing: bool = False) -> RenderedPrompt:
     """Render a stored prompt."""
     return render_content(key, get(key), values, mark_missing=mark_missing)
@@ -350,9 +379,9 @@ def render_content(
 
         return _TOKEN_RE.sub(replace, template)
 
-    text = expand(key, content, (key,))
+    text = expand(key, content, (key,) if key else ())
     if missing and not mark_missing:
-        logger.warning("Prompt %s rendered without values for: %s", key, ", ".join(sorted(missing)))
+        logger.warning("Prompt %s rendered without values for: %s", key or "<inline>", ", ".join(sorted(missing)))
     return RenderedPrompt(text=text, versions=versions, missing=frozenset(missing))
 
 

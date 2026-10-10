@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
 from sophos.agent.transcript import Transcript, new_event
 from sophos.agent.workflow import EdgeSpec, NodeSpec, WorkflowDefinition
+
+if TYPE_CHECKING:
+    from sophos.agent.runs import RunTracker
 
 RunStatus = Literal["running", "completed", "failed"]
 
@@ -36,6 +39,7 @@ class WorkflowRun:
     status: RunStatus = "running"
     step_count: int = 0
     edge_traversals: dict[str, int] = field(default_factory=dict)
+    conversation_id: int | None = None
 
     def __post_init__(self) -> None:
         if self.current_node is None:
@@ -73,12 +77,28 @@ class WorkflowEngine:
         *,
         edge_selector: EdgeSelector | None = None,
         max_steps: int = 32,
+        observer: RunTracker | None = None,
     ) -> None:
         self._executors = dict(executors)
         self._edge_selector = edge_selector
         self._max_steps = max_steps
+        self._observer = observer
 
     async def run(self, run: WorkflowRun) -> WorkflowRun:
+        observer = self._observer
+        if observer is None:
+            return await self._run(run)
+        observer.start(run.run_id, run.workflow.workflow_id, run.workflow.revision, run.conversation_id)
+        observer.event(run.run_id, "node_entered", run.current_node, {})
+        try:
+            await self._run(run)
+        except Exception as exc:
+            observer.finish(run.run_id, "failed", f"{type(exc).__name__}: {exc}")
+            raise
+        observer.finish(run.run_id, run.status)
+        return run
+
+    async def _run(self, run: WorkflowRun) -> WorkflowRun:
         while run.status == "running":
             if run.step_count >= self._max_steps:
                 run.status = "failed"
@@ -116,6 +136,14 @@ class WorkflowEngine:
             run.edge_traversals[edge.edge_id] = run.edge_traversals.get(edge.edge_id, 0) + 1
             previous_node = run.current_node
             run.current_node = edge.to_node
+            if self._observer is not None:
+                self._observer.event(
+                    run.run_id,
+                    "edge",
+                    previous_node,
+                    {"edge_id": edge.edge_id, "to_node": edge.to_node, "output_port": edge.from_port},
+                )
+                self._observer.event(run.run_id, "node_entered", edge.to_node, {})
             run.transcript.append(
                 new_event(
                     "transition_applied",

@@ -2,8 +2,7 @@ import asyncio
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from sophos import vision
-from sophos.config import settings
+from sophos import runtime_config, vision
 from sophos.enrichment import EnrichmentRegistry
 from sophos.llm.provider import ChatResponse, FirstTokenCallback, LLMProvider, Message
 from sophos.vision import VisionGenerationTimeoutError, describe_image, process_image_segment
@@ -47,7 +46,7 @@ class VisionTimeoutTests(unittest.IsolatedAsyncioTestCase):
         async def on_first_token() -> None:
             first_token_seen.set()
 
-        with patch.object(settings, "vision_generation_timeout", 0.2):
+        with patch.dict(runtime_config._cache, {"vision_generation_timeout": 0.2}):
             result = await describe_image(provider, b"image", on_first_token=on_first_token)
 
         self.assertEqual(result, "图片描述")
@@ -55,14 +54,14 @@ class VisionTimeoutTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_slow_first_token_is_allowed_within_generation_deadline(self) -> None:
         provider = _FakeVisionProvider(first_token_delay=0.05, completion_delay=0)
-        with patch.object(settings, "vision_generation_timeout", 0.5):
+        with patch.dict(runtime_config._cache, {"vision_generation_timeout": 0.5}):
             self.assertEqual(await describe_image(provider, b"image"), "图片描述")
 
     async def test_unfinished_request_fails_at_generation_deadline_and_cancels(self) -> None:
         provider = _FakeVisionProvider(first_token_delay=0, completion_delay=0.2)
 
         with (
-            patch.object(settings, "vision_generation_timeout", 0.02),
+            patch.dict(runtime_config._cache, {"vision_generation_timeout": 0.02}),
             self.assertRaises(VisionGenerationTimeoutError),
         ):
             await describe_image(provider, b"image")
@@ -140,8 +139,8 @@ class DeferredImageEnrichmentTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.object(pipeline, "process_message_images", slow_images),
             patch.object(pipeline, "get_enrichment_registry", return_value=registry),
-            patch.object(settings, "vision_defer_seconds", 0.01),
-            patch.object(settings, "vision_context_messages", 0),
+            patch.dict(runtime_config._cache, {"vision_defer_seconds": 0.01}),
+            patch.dict(runtime_config._cache, {"vision_context_messages": 0}),
         ):
             task = asyncio.create_task(pipeline._process_event_images(ctx))  # type: ignore[arg-type]
             registry.register(7, task)

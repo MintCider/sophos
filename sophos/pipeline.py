@@ -26,6 +26,8 @@ from sophos.agent import (
     transcript_from_messages,
 )
 from sophos.agent.config import load_active_workflow
+from sophos.agent.runs import get_run_tracker
+from sophos.agent.workflow import NodeSpec
 from sophos.commands import (
     CommandContext,
     handle_bot_command,
@@ -199,10 +201,10 @@ async def _process_event_images(
     pool = ctx.store.pool
 
     context_messages: list[dict[str, Any]] | None = None
-    if settings.vision_context_messages > 0:
+    if runtime_config.get("vision_context_messages") > 0:
         rows = await ctx.store.get_context(
             conversation_id=ctx.conversation_id,
-            limit=settings.vision_context_messages,
+            limit=runtime_config.get("vision_context_messages"),
         )
         if rows:
             context_messages = [
@@ -215,6 +217,8 @@ async def _process_event_images(
         if message_id is not None:
             await ctx.store.set_enrichment_streaming(message_id)
 
+    tracker = get_run_tracker()
+    tracker.stage("vision", ctx.conversation_id, {"status": "started", "message_id": message_id})
     recognition = asyncio.create_task(
         process_message_images(
             ctx.segments,
@@ -223,10 +227,10 @@ async def _process_event_images(
             vision_provider=vision_provider,
             context_messages=context_messages,
             on_first_token=_mark_streaming,
-            attempts=settings.vision_attempts,
+            attempts=runtime_config.get("vision_attempts"),
         )
     )
-    done, _ = await asyncio.wait({recognition}, timeout=settings.vision_defer_seconds)
+    done, _ = await asyncio.wait({recognition}, timeout=runtime_config.get("vision_defer_seconds"))
     if not done and message_id is not None:
         await ctx.store.defer_image_enrichment(message_id)
         get_enrichment_registry().mark_ready(message_id)
@@ -243,6 +247,10 @@ async def _process_event_images(
 
     if not image_infos:
         image_infos = [{"status": "failed", "error": "图片消息中没有可处理的图片地址"}]
+    failed = any(info.get("status") == "failed" for info in image_infos)
+    tracker.stage(
+        "vision", ctx.conversation_id, {"status": "failed" if failed else "completed", "message_id": message_id}
+    )
     if message_id is not None:
         await ctx.store.finish_image_enrichment(message_id, image_infos)
         logger.debug(
@@ -419,17 +427,10 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
         conversation_id=ctx.conversation_id,
         conversation_kind=ctx.message.conversation.kind.value,
     )
-    rendered_system = prompts.render("persona.system", prompt_values)
-    rendered_collector = prompts.render("persona.collector", prompt_values)
-    ctx.state["prompt_versions"] = {**rendered_system.versions, **rendered_collector.versions}
-    system_prompts = {
-        "default": rendered_system.text,
-        "collector": rendered_collector.text,
-    }
+    context_blocks: list[str] = []
 
     def append_system_block(block: str) -> None:
-        for key in system_prompts:
-            system_prompts[key] += f"\n---\n{block}"
+        context_blocks.append(block)
 
     # ── 记忆注入 ──
     memory_store = ctx.state.get("memory_store")
@@ -499,18 +500,25 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
     messages, _cursor_id = await build_chat_context_snapshot(
         ctx.store,
         conversation_id=ctx.conversation_id,
-        system_prompt=system_prompts["default"],
+        system_prompt="",
     )
-    # build_chat_context_snapshot may append cross-conversation background to the
-    # default prompt. Preserve the same dynamic suffix in the collector prompt.
-    rendered_default = str(messages[0].get("content") or "") if messages else ""
-    default_prefix = system_prompts["default"]
-    dynamic_suffix = (
-        rendered_default[len(default_prefix) :]
-        if rendered_default.startswith(default_prefix)
-        else ""
-    )
-    system_prompts["collector"] += dynamic_suffix
+    # build_chat_context_snapshot may append cross-conversation background to the system slot.
+    if messages and messages[0].get("role") == "system" and messages[0].get("content"):
+        context_blocks.append(str(messages[0]["content"]).strip().removeprefix("---").strip())
+    prompt_values["context_blocks"] = "\n---\n".join(context_blocks)
+    prompt_versions: dict[str, int | None] = {}
+
+    def render_node_prompt(node: NodeSpec) -> str | None:
+        if not node.system_prompt:
+            return None
+        rendered = prompts.render_template(node.system_prompt, prompt_values)
+        prompt_versions.update(rendered.versions)
+        text = rendered.text
+        if "{{context_blocks}}" not in node.system_prompt and prompt_values["context_blocks"]:
+            text = f"{text}\n---\n{prompt_values['context_blocks']}"
+        return text
+
+    ctx.state["prompt_versions"] = prompt_versions
 
     # ── 上下文刷新闭包（tool loop 间隙注入新消息）──
     # Pre-compute refresh-suppressed user set for filtering
@@ -661,10 +669,12 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
         conversation_id=ctx.conversation_id,
         context_refresher=_refresh_context,
         max_rounds_per_node=runtime_config.get("llm_max_tool_rounds"),
-        system_prompts_by_slot=system_prompts,
+        system_prompt_renderer=render_node_prompt,
     )
-    run = WorkflowRun(workflow=workflow, transcript=transcript)
-    engine = WorkflowEngine({"llm": LLMNodeExecutor(llm_context)})
+    run = WorkflowRun(workflow=workflow, transcript=transcript, conversation_id=ctx.conversation_id)
+    tracker = get_run_tracker()
+    llm_context.on_step = lambda kind, node_id, data: tracker.event(run.run_id, kind, node_id, data)
+    engine = WorkflowEngine({"llm": LLMNodeExecutor(llm_context)}, observer=tracker)
 
     try:
         await engine.run(run)

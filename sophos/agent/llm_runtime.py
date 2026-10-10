@@ -44,7 +44,8 @@ class LLMWorkflowContext:
     context_refresher: ContextRefresher | None = None
     max_rounds_per_node: int = 10
     completion_tools: frozenset[str] = field(default_factory=lambda: frozenset({"send_message"}))
-    system_prompts_by_slot: dict[str, str] = field(default_factory=dict)
+    system_prompt_renderer: Callable[[NodeSpec], str | None] | None = None
+    on_step: Callable[[str, str, dict[str, Any]], None] | None = None
 
 
 class LLMNodeExecutionError(RuntimeError):
@@ -73,11 +74,14 @@ class LLMNodeExecutor:
             cache=_cache_plan(node, run, self.context.conversation_id),
         )
 
-        for round_number in range(1, self.context.max_rounds_per_node + 1):
+        max_rounds = node.model.max_tool_rounds or self.context.max_rounds_per_node
+        renderer = self.context.system_prompt_renderer
+        system_prompt = renderer(node) if renderer is not None else None
+        for round_number in range(1, max_rounds + 1):
             request_messages = _with_node_instructions(
                 self.context.messages,
                 node.instructions,
-                system_prompt=self.context.system_prompts_by_slot.get(node.model.slot),
+                system_prompt=system_prompt,
             )
             for retry_number in range(4):
                 try:
@@ -104,6 +108,13 @@ class LLMNodeExecutor:
             assistant_message = response["message"]
             self.context.messages.append(assistant_message)
             _record_provider_response(run.transcript, node, response)
+            if self.context.on_step is not None:
+                usage = response.get("usage") or {}
+                self.context.on_step(
+                    "llm_response",
+                    node.node_id,
+                    {"round": round_number, "output_tokens": usage.get("completion_tokens")},
+                )
 
             tool_calls = assistant_message.get("tool_calls") or []
             if not tool_calls:
@@ -133,6 +144,8 @@ class LLMNodeExecutor:
                         node_id=node.node_id,
                     )
                 )
+                if self.context.on_step is not None:
+                    self.context.on_step("tool_call", node.node_id, {"name": tool_name})
 
                 if parse_error:
                     result: Any = {"error": "工具参数不是合法 JSON，请使用单个 JSON 对象重试"}
@@ -177,7 +190,7 @@ class LLMNodeExecutor:
                 return requested_transition
 
         raise LLMNodeExecutionError(
-            f"node {node.node_id} exceeded max_rounds={self.context.max_rounds_per_node}"
+            f"node {node.node_id} exceeded max_rounds={max_rounds}"
         )
 
     async def _implicit_outcome(

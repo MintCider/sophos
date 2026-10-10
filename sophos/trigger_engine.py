@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from sophos import prompts, runtime_config
+from sophos.agent.runs import get_run_tracker
 from sophos.config import settings
 
 if TYPE_CHECKING:
@@ -100,16 +101,19 @@ class TriggerEngine:
         return self._locks[key]
 
     def _get_bucket(self, key: ContextKey) -> TokenBucket:
-        if key not in self._buckets:
-            cap = runtime_config.get("trigger_bucket_capacity", 10)
-            refill = runtime_config.get("trigger_bucket_refill", 6.0)
-            self._buckets[key] = TokenBucket(
-                tokens=float(cap),
-                max_tokens=float(cap),
-                refill_interval=float(refill),
+        cap = float(runtime_config.get("trigger_bucket_capacity", 10))
+        refill = float(runtime_config.get("trigger_bucket_refill", 6.0))
+        bucket = self._buckets.get(key)
+        if bucket is None:
+            bucket = self._buckets[key] = TokenBucket(
+                tokens=cap,
+                max_tokens=cap,
+                refill_interval=refill,
                 last_refill=time.monotonic(),
             )
-        return self._buckets[key]
+        bucket.max_tokens = cap
+        bucket.refill_interval = refill
+        return bucket
 
     # ── 入口 ──────────────────────────────────────────────────
 
@@ -327,10 +331,13 @@ class TriggerEngine:
         logger.debug("Trigger eval raw response for %s: %r", key, content)
 
         if "relevant_done" in content or "done" in content:
-            return "relevant_done"
-        if "relevant_more" in content or "more" in content:
-            return "relevant_more"
-        return "irrelevant"
+            result = "relevant_done"
+        elif "relevant_more" in content or "more" in content:
+            result = "relevant_more"
+        else:
+            result = "irrelevant"
+        get_run_tracker().stage("trigger", ctx.conversation_id, {"result": result, "waiting": waiting})
+        return result
 
 
 # ── 单例 ──────────────────────────────────────────────────────

@@ -18,7 +18,7 @@ from typing import Any
 import aiohttp
 import asyncpg
 
-from sophos import prompts
+from sophos import prompts, runtime_config
 from sophos.config import settings
 from sophos.llm.provider import LLMProvider
 
@@ -183,14 +183,14 @@ async def describe_image(
                 messages,
                 tools=None,
                 temperature=0.3,
-                max_tokens=settings.vision_max_tokens,
+                max_tokens=runtime_config.get("vision_max_tokens"),
                 on_first_token=on_first_token,
             ),
-            timeout=settings.vision_generation_timeout,
+            timeout=runtime_config.get("vision_generation_timeout"),
         )
     except TimeoutError as exc:
         raise VisionGenerationTimeoutError(
-            f"VLM generation timed out after {settings.vision_generation_timeout:.1f}s",
+            f"VLM generation timed out after {runtime_config.get("vision_generation_timeout"):.1f}s",
         ) from exc
 
     content = response["message"].get("content", "") or ""

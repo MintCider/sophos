@@ -137,7 +137,7 @@ class LLMWorkflowRuntimeTests(unittest.IsolatedAsyncioTestCase):
             provider_resolver=lambda slot: collector if slot == "collector" else actor,
             tool_executor=execute,
             conversation_id=7,
-            system_prompts_by_slot={"collector": "collector prompt"},
+            system_prompt_renderer=lambda node: "collector prompt" if node.node_id == "collector" else None,
         )
         run = WorkflowRun(collector_actor_workflow(), Transcript())
         await WorkflowEngine({"llm": LLMNodeExecutor(context)}).run(run)
@@ -270,6 +270,33 @@ class LLMWorkflowRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(run.status, "completed")
         self.assertEqual(executed, ["send_message"])
+
+
+class EngineObserverTests(unittest.IsolatedAsyncioTestCase):
+    async def test_engine_reports_node_entries_and_edges(self) -> None:
+        from sophos.agent.runs import RunTracker
+
+        collector = FakeProvider([tool_response("complete_collection", {}, "c1")])
+        actor = FakeProvider([tool_response("send_message", {"text": "hi"}, "s1")])
+
+        async def execute(name: str, params: dict[str, Any]) -> dict[str, Any]:
+            return {"status": "ok"}
+
+        context = LLMWorkflowContext(
+            messages=[{"role": "system", "content": ""}, {"role": "user", "content": "q"}],
+            tools=(agent_tool("send_message", "output"),),
+            provider_resolver=lambda slot: collector if slot == "collector" else actor,
+            tool_executor=execute,
+        )
+        tracker = RunTracker()
+        run = WorkflowRun(collector_actor_workflow(), Transcript(), conversation_id=5)
+        await WorkflowEngine({"llm": LLMNodeExecutor(context)}, observer=tracker).run(run)
+
+        record = tracker.get(run.run_id)
+        self.assertEqual(record.status, "completed")
+        self.assertEqual(record.conversation_id, 5)
+        entered = [e["node_id"] for e in record.events if e["kind"] == "node_entered"]
+        self.assertEqual(entered, ["collector", "actor", "done"])
 
 
 if __name__ == "__main__":

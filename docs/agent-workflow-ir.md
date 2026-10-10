@@ -6,13 +6,20 @@ Sophos 的消息处理不再由固定的 tool loop 表达，而是由版本化�
 
 `WorkflowDefinition` 包含稳定的 `workflow_id`、`revision`、入口节点、节点和边。节点通过具名输入/输出端口连接；模型触发的输出端口会被编译成严格控制工具，宿主触发的端口用于表达 `send_message` 成功等确定事件。边允许形成环，并用 `max_traversals` 限制单条边的循环次数；运行器另有全局 `max_steps` 上限。
 
-本版本可激活 `llm` 和 `terminal` 节点，支持 `default`、`collector`、`trigger` 模型槽。IR 已预留 `router`、`policy`、`human_approval`、`subworkflow`，但在对应 executor 实现前不能激活，API 会明确拒绝。
+本版本可激活 `llm` 和 `terminal` 节点，图节点可用 `default`、`collector` 模型槽。IR 已预留 `router`、`policy`、`human_approval`、`subworkflow`，但在对应 executor 实现前不能激活，API 会明确拒绝。
+
+节点的 `system_prompt` 是模板，通常写成 `{{prompt.persona.system}}` 引用 Prompt 注册表，也可以手写并混用变量；`{{context_blocks}}` 放置档案、联想记忆与最近动态，未引用时自动追加在末尾。`model` 可覆盖 `max_tokens`、`temperature` 与 `max_tool_rounds`。`layout` 保存编辑器中的节点坐标，不影响执行。
+
+图片识别与触发判断在图之前运行，编辑器把它们显示为前置阶段卡片，设置项保存在 `bot_config`。
 
 工作流配置接口：
 
 - `GET /api/workflows/active`：读取当前实际使用的图，并标明 `preset` 或 `configured`。
 - `PUT /api/workflows/active`：提交 `{ "workflow": <WorkflowDefinition> }`，完整校验后热激活。
 - `DELETE /api/workflows/active`：删除覆盖配置，恢复内置图。
+- `GET /api/workflows/catalog`：模型槽绑定、前置阶段设置、可用变量与工具。
+- `PUT /api/workflows/settings`、`PUT /api/workflows/slots/{slot}`：修改前置阶段设置、热切换模型槽。
+- `GET /api/workflows/runs/stream`：SSE 推送运行开始、节点进入、边、工具调用与结束事件，用于实时高亮。
 
 配置保存在现有 `bot_config.agent_workflow` 中，不需要新增数据库表或迁移。每次新消息运行读取当时的完整 revision；正在运行的请求继续持有其不可变定义。
 

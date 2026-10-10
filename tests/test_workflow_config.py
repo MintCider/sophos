@@ -53,14 +53,48 @@ class WorkflowConfigTests(unittest.IsolatedAsyncioTestCase):
 
     def test_workflow_api_routes_are_registered(self) -> None:
         registered = {(route.method, route.path) for route in routes}
-        self.assertEqual(
-            registered,
+        self.assertTrue(
             {
                 ("GET", "/api/workflows/active"),
                 ("PUT", "/api/workflows/active"),
                 ("DELETE", "/api/workflows/active"),
-            },
+                ("GET", "/api/workflows/catalog"),
+                ("PUT", "/api/workflows/settings"),
+                ("PUT", "/api/workflows/slots/{slot}"),
+                ("GET", "/api/workflows/runs/stream"),
+            }.issubset(registered)
         )
+
+    def test_node_prompt_template_is_validated(self) -> None:
+        workflow = collector_actor_workflow().to_dict()
+        workflow["nodes"][0]["system_prompt"] = "{{prev_description}}"
+        with self.assertRaisesRegex(WorkflowValidationError, "collector: 不支持的变量"):
+            validate_executable_workflow(WorkflowDefinition.from_dict(workflow))
+
+    def test_layout_and_node_overrides_round_trip(self) -> None:
+        workflow = collector_actor_workflow().to_dict()
+        workflow["layout"] = {"collector": {"x": 10, "y": 20}}
+        workflow["nodes"][1]["model"]["max_tokens"] = 2048
+        workflow["nodes"][1]["model"]["max_tool_rounds"] = 5
+        parsed = WorkflowDefinition.from_dict(workflow)
+        self.assertEqual(parsed.layout, {"collector": {"x": 10.0, "y": 20.0}})
+        self.assertEqual(parsed.node("actor").model.max_tool_rounds, 5)
+        self.assertEqual(parsed.to_dict()["nodes"][1]["model"]["max_tokens"], 2048)
+
+
+class RunTrackerTests(unittest.TestCase):
+    def test_tracker_records_steps_and_notifies_subscribers(self) -> None:
+        from sophos.agent.runs import RunTracker
+
+        tracker = RunTracker()
+        queue = tracker.subscribe()
+        tracker.start("r1", "wf", "1", 48)
+        tracker.event("r1", "node_entered", "collector", {})
+        tracker.finish("r1", "completed")
+        record = tracker.get("r1")
+        self.assertEqual(record.current_node, "collector")
+        self.assertEqual(record.status, "completed")
+        self.assertEqual([queue.get_nowait()["type"] for _ in range(3)], ["run_started", "run_event", "run_finished"])
 
 
 if __name__ == "__main__":

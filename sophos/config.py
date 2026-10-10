@@ -112,20 +112,10 @@ class Settings(BaseSettings):
     embedding_request_timeout: int = 30
 
     # ── Vision 全局行为参数（始终从 .env 读取）────────────────
-    # 喂给 VLM 的最近聊天消息数
-    vision_context_messages: int = 5
     # ε-greedy 衰减参数
     vision_epsilon_init: float = 1.0
     vision_epsilon_min: float = 0.0
     vision_epsilon_decay: float = 0.7
-    # VLM 最大生成 token 数
-    vision_max_tokens: int = 1024
-    # 图片识别超过该时长后先以「识别中」交给 LLM，识别在后台继续
-    vision_defer_seconds: float = 30.0
-    # 单次 VLM 请求的总时间上限
-    vision_generation_timeout: float = 60.0
-    # 单张图片的 VLM 尝试次数（含首次）
-    vision_attempts: int = 2
     # imagehash average_hash 的 hash_size 参数
     vision_hash_size: int = 15
 
