@@ -45,6 +45,9 @@ _DEFAULTS: dict[str, Any] = {
     "trigger_eval_context_limit": 20,
     "trigger_eval_max_tokens": 64,
     "trigger_eval_temperature": 0.0,
+    "trigger_eval_image_wait": 8.0,
+    "trigger_memory_limit": 3,
+    "trigger_memory_min_score": 0.6,
     "trigger_bucket_capacity": 10,
     "trigger_bucket_refill": 6.0,
     # Tavily 联网搜索

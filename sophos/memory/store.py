@@ -262,6 +262,28 @@ class MemoryStore:
 
         return fused
 
+    async def search_similar(
+        self,
+        query_vec: list[float],
+        *,
+        limit: int,
+        min_score: float,
+    ) -> list[dict[str, Any]]:
+        """纯向量检索，只返回相似度不低于 min_score 的记忆。不计入命中统计。"""
+        vec_str = "[" + ",".join(str(v) for v in query_vec) + "]"
+        rows = await self._pool.fetch(
+            """
+            SELECT id, content, created_at, 1 - (embedding <=> $1::vector) AS score
+            FROM memories
+            WHERE embedding IS NOT NULL
+            ORDER BY embedding <=> $1::vector
+            LIMIT $2
+            """,
+            vec_str,
+            limit,
+        )
+        return [dict(row) for row in rows if row["score"] >= min_score]
+
     @staticmethod
     def _rrf_merge(
         kw_rows: list[asyncpg.Record],

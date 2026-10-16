@@ -110,24 +110,38 @@ _DEFAULT_COLLECTOR = """\
 - check_image_queue：查询异步图像生成任务状态。
 - complete_collection：现有消息和工具结果已足够交给后续执行节点时调用。"""
 
+_DEFAULT_TRIGGER_PERSONA = """\
+你是 {{nickname}}。
+
+以下是你的个人档案和群聊档案：
+
+{{profile_self}}
+
+{{profile_context}}"""
+
 _DEFAULT_TRIGGER_EVAL_FORMAT = """\
-接下来你会收到一系列群聊对话。大多数消息与你无关，请保守判断。
-只有当最新消息明确满足以下任一条件时才算 relevant：
+当待判断的新消息明确满足以下任一条件时算 relevant：
 1. 直接提到你的名字或称呼
 2. 明确在回应你之前说的话（话题连贯且有指向性）
 3. 你在人设中被要求关注的话题
 不确定时一律选 irrelevant。
-如果 relevant，再判断这条消息是否完整（句子明显被截断或只说了半句 → more；问句、短句、完整表达 → done）。
+如果 relevant，再判断这条消息是否完整（句子明显不完整或用户只说了半句 → more；问句、短句、完整表达 → done）。
 只回复以下三个词之一：irrelevant / relevant_done / relevant_more"""
 
 _DEFAULT_TRIGGER_WAITING_FORMAT = """\
-接下来你会收到一系列群聊对话。之前的消息被判定为与你有关，但对方还没说完。
-现在有新消息到达，请重新判断：
-- 如果最新消息其实与你无关 → irrelevant
-- 如果与你有关且这条消息是完整的表达 → relevant_done
-- 如果与你有关但这条消息明显没说完 → relevant_more
+之前的消息被判定为与你有关，但对方还没说完，现在又有新消息到达，请重新判断：
+- 如果待判断的新消息其实与你无关 → irrelevant
+- 如果与你有关且已经是完整的表达 → relevant_done
+- 如果与你有关但明显还没说完 → relevant_more
 不确定时选 irrelevant。
 只回复以下三个词之一：irrelevant / relevant_done / relevant_more"""
+
+TRIGGER_VARIABLES: dict[str, str] = {
+    "nickname": RUNTIME_VARIABLES["nickname"],
+    "profile_self": "自我档案",
+    "profile_context": "当前群聊档案",
+    "memories": "与待判断消息相关的长期记忆（按相似度阈值检索，可能为空）",
+}
 
 _DEFAULT_VISION_DESCRIBE = (
     "以下是出现在群聊中的一张图片。"
@@ -174,7 +188,8 @@ BUILTIN_PROMPTS: tuple[PromptSpec, ...] = (
         title="触发评估人设",
         group="trigger",
         description="轻量模型判断是否回复时使用的人设，拼接在输出格式约束之前。",
-        variables={"nickname": RUNTIME_VARIABLES["nickname"]},
+        default=_DEFAULT_TRIGGER_PERSONA,
+        variables=TRIGGER_VARIABLES,
     ),
     PromptSpec(
         key="trigger.eval_format",

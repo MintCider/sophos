@@ -238,8 +238,11 @@ def get_display_name(row: dict[str, Any]) -> str:
 # ── 跨 context 背景格式化 ─────────────────────────────────
 
 
-def format_image_descriptions(row: dict[str, Any]) -> str:
-    """从 extra.images 提取图片描述，格式化为 [图片(hash): desc]。"""
+def format_image_descriptions(row: dict[str, Any], *, brief: int | None = None) -> str:
+    """从 extra.images 提取图片描述，格式化为 [图片(hash): desc]。
+
+    brief：给定时省略 hash，描述截断到该长度（trigger 等精简视图用）。
+    """
     extra = row.get("extra")
     if isinstance(extra, str):
         extra = json.loads(extra)
@@ -264,6 +267,12 @@ def format_image_descriptions(row: dict[str, Any]) -> str:
             continue
         h = img.get("hash", "")
         desc = img.get("description", "")
+        if brief is not None:
+            desc = " ".join(desc.split())
+            if len(desc) > brief:
+                desc = desc[:brief] + "…"
+            parts.append(f"[图片: {desc}]" if desc else "[图片]")
+            continue
         if desc:
             parts.append(f"[图片({h}): {desc}]")
         else:

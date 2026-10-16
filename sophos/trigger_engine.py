@@ -11,13 +11,14 @@ from __future__ import annotations
 import asyncio
 import enum
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from sophos import prompts, runtime_config
+from sophos import prompts, runtime_config, trigger_context
 from sophos.agent.runs import get_run_tracker
-from sophos.config import settings
+from sophos.enrichment import get_enrichment_registry
 
 if TYPE_CHECKING:
     from sophos.pipeline import PipelineContext
@@ -75,6 +76,7 @@ class ContextState:
     state: TriggerState = TriggerState.IDLE
     new_message_event: asyncio.Event = field(default_factory=asyncio.Event)
     last_eval_time: float = 0.0
+    last_eval_id: int = 0  # 上次评估时可见的最大消息 id
     pending_delay: asyncio.Task[None] | None = None
 
 
@@ -200,14 +202,18 @@ class TriggerEngine:
         """LLM 触发器状态机循环。持锁直到回到 IDLE。"""
         cs = self._get_state(key)
         is_reeval = False
+        # 整个循环共用同一个起点：重评时「没说完的那句」和续写一起放进待判断
+        since_id = cs.last_eval_id
 
         try:
             while True:
+                # 评估期间到达的新消息会保留 set 状态，进入 WAITING 后立即重评
+                cs.new_message_event.clear()
                 cs.state = TriggerState.EVALUATING
                 self._global_qps_last = time.monotonic()
                 cs.last_eval_time = time.monotonic()
 
-                result = await self._evaluate(ctx, key, waiting=is_reeval)
+                result = await self._evaluate(ctx, key, since_id=since_id, waiting=is_reeval)
                 logger.debug("LLM trigger eval for %s: %s (reeval=%s)", key, result, is_reeval)
 
                 if result == "irrelevant":
@@ -237,7 +243,6 @@ class TriggerEngine:
 
                 # relevant_more → WAITING
                 cs.state = TriggerState.WAITING
-                cs.new_message_event.clear()
                 timeout = float(runtime_config.get("trigger_wait_timeout", 30.0))
                 logger.debug("Entering WAITING for %s (timeout=%.1fs)", key, timeout)
 
@@ -271,7 +276,6 @@ class TriggerEngine:
                 elapsed = time.monotonic() - cs.last_eval_time
                 if elapsed < min_interval:
                     await asyncio.sleep(min_interval - elapsed)
-                cs.new_message_event.clear()
                 is_reeval = True
                 # 循环回到 EVALUATING
 
@@ -279,7 +283,23 @@ class TriggerEngine:
             logger.exception("LLM trigger loop error for %s", key)
             cs.state = TriggerState.IDLE
 
-    async def _evaluate(self, ctx: PipelineContext, key: ContextKey, *, waiting: bool = False) -> str:
+    @staticmethod
+    async def _embedding_provider(ctx: PipelineContext) -> Any:
+        """embedding 迁移期间向量维度不一致，跳过检索。"""
+        provider = ctx.provider_mgr.get_embedding_provider()
+        if provider is None:
+            return None
+        status = await ctx.store.pool.fetchval("SELECT migration_status FROM embedding_config WHERE id = 1")
+        return None if status == "running" else provider
+
+    async def _evaluate(
+        self,
+        ctx: PipelineContext,
+        key: ContextKey,
+        *,
+        since_id: int,
+        waiting: bool = False,
+    ) -> str:
         """调用 trigger provider 评估是否回复。
 
         返回: "irrelevant" | "relevant_done" | "relevant_more"
@@ -288,31 +308,36 @@ class TriggerEngine:
         if provider is None:
             return "irrelevant"
 
-        limit = int(runtime_config.get("trigger_eval_context_limit", 20))
-        rows = await ctx.store.get_context(
-            conversation_id=ctx.conversation_id,
-            limit=limit,
-        )
+        cs = self._get_state(key)
+        rows = await trigger_context.load_rows(ctx.store, ctx.conversation_id)
+        pending = trigger_context.pending_rows(rows, since_id=since_id, self_user_id=ctx.self_user_id)
+        # 待判断消息带图时等识别结果；更早的图不等
+        wait = float(runtime_config.get("trigger_eval_image_wait", 8.0))
+        if pending and wait > 0:
+            ids = [int(r["id"]) for r in pending]
+            if await get_enrichment_registry().wait_for(ids, timeout=wait):
+                rows = await trigger_context.load_rows(ctx.store, ctx.conversation_id)
 
-        # 构建评估消息
-        lines: list[str] = []
-        for r in rows:
-            text = r.get("plain_text", "")
-            if text:
-                name = r.get("card") or r.get("nickname") or str(r.get("user_id", ""))
-                lines.append(f"{name}: {text}")
-
-        if not lines:
+        tc = trigger_context.build_trigger_context(rows, self_user_id=ctx.self_user_id, since_id=since_id)
+        if tc is None:
             return "irrelevant"
+        cs.last_eval_id = tc.latest_id
 
-        # 拼接 prompt：persona + 格式指令
-        persona = prompts.render("trigger.persona", {"nickname": settings.bot_nickname or "Sophos"}).text.strip()
+        # system：persona（含档案 / 记忆变量）+ 判断规则与输出格式
+        values = await trigger_context.persona_values(
+            ctx.state.get("memory_store"),
+            await self._embedding_provider(ctx),
+            conversation_id=ctx.conversation_id,
+            query=tc.query,
+        )
+        persona = prompts.render("trigger.persona", values).text.strip()
         fmt = prompts.get("trigger.waiting_format" if waiting else "trigger.eval_format")
-        system_prompt = f"{persona}\n\n{fmt}" if persona else fmt
+        system_prompt = f"{persona}\n\n---\n\n{fmt}" if persona else fmt
+        logger.debug("Trigger eval prompt for %s:\n%s\n=====\n%s", key, system_prompt, tc.text)
 
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": "\n".join(lines)},
+            {"role": "user", "content": tc.text},
         ]
 
         max_tokens = int(runtime_config.get("trigger_eval_max_tokens", 64))
@@ -329,15 +354,20 @@ class TriggerEngine:
 
         content = (response["message"].get("content") or "").strip().lower()
         logger.debug("Trigger eval raw response for %s: %r", key, content)
-
-        if "relevant_done" in content or "done" in content:
-            result = "relevant_done"
-        elif "relevant_more" in content or "more" in content:
-            result = "relevant_more"
-        else:
-            result = "irrelevant"
+        result = _parse_result(content)
         get_run_tracker().stage("trigger", ctx.conversation_id, {"result": result, "waiting": waiting})
         return result
+
+
+_RE_RESULT = re.compile(r"(?<![a-z_])(irrelevant|relevant_done|relevant_more)(?![a-z_])")
+
+
+def _parse_result(content: str) -> str:
+    """只认完整的结果词；出现多个不同结果词时视为无效。"""
+    found = set(_RE_RESULT.findall(content))
+    if len(found) == 1:
+        return found.pop()
+    return "irrelevant"
 
 
 # ── 单例 ──────────────────────────────────────────────────────

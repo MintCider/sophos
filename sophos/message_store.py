@@ -273,6 +273,39 @@ class MessageStore:
         )
         return [dict(row) for row in rows]
 
+    async def get_recent(self, *, conversation_id: int, limit: int) -> list[dict[str, Any]]:
+        """最近消息（升序），不受 pending 边界限制，识别中的消息也会返回。"""
+        rows = await self._pool.fetch(
+            f"""
+            SELECT {_MESSAGE_COLUMNS}
+            FROM messages m
+            LEFT JOIN user_identities i ON i.id = m.sender_identity_id
+            LEFT JOIN users u ON u.id = i.user_id
+            JOIN conversations c ON c.id = m.conversation_id
+            WHERE m.conversation_id = $1
+            ORDER BY m.id DESC LIMIT $2
+            """,
+            conversation_id,
+            limit,
+        )
+        return [dict(row) for row in reversed(rows)]
+
+    async def get_last_outbound(self, *, conversation_id: int) -> dict[str, Any] | None:
+        """当前会话中 Sophos 最近一次发出的消息。"""
+        row = await self._pool.fetchrow(
+            f"""
+            SELECT {_MESSAGE_COLUMNS}
+            FROM messages m
+            LEFT JOIN user_identities i ON i.id = m.sender_identity_id
+            LEFT JOIN users u ON u.id = i.user_id
+            JOIN conversations c ON c.id = m.conversation_id
+            WHERE m.conversation_id = $1 AND m.source = 'sophos'
+            ORDER BY m.id DESC LIMIT 1
+            """,
+            conversation_id,
+        )
+        return dict(row) if row else None
+
     async def get_context(
         self,
         *,
