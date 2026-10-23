@@ -18,7 +18,7 @@ from typing import Any
 import aiohttp
 import asyncpg
 
-from sophos import prompts, runtime_config
+from sophos import observability, prompts, runtime_config
 from sophos.config import settings
 from sophos.llm.provider import LLMProvider
 
@@ -179,8 +179,10 @@ async def describe_image(
 
     try:
         response = await asyncio.wait_for(
-            provider.chat(
+            observability.chat(
+                provider,
                 messages,
+                slot="vision",
                 tools=None,
                 temperature=0.3,
                 max_tokens=runtime_config.get("vision_max_tokens"),

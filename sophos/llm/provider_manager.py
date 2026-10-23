@@ -230,6 +230,7 @@ class ProviderManager:
                 extra_body = json.loads(extra_body)
             emb_urls = _normalize_base_urls(row.get("base_urls"))
             self._embedding_provider = EmbeddingProvider(
+                provider_alias=row["alias"],
                 base_url=emb_urls.get("openai", ""),
                 api_key=row["api_key"],
                 model=row["model"],
@@ -286,7 +287,9 @@ class ProviderManager:
             )
 
         endpoint = settings.embedding_endpoint or "/embeddings"
+        provider_alias = await self._pool.fetchval("SELECT alias FROM llm_providers WHERE id = $1", provider_id)
         self._embedding_provider = EmbeddingProvider(
+            provider_alias=provider_alias,
             base_url=settings.embedding_base_url,
             api_key=settings.embedding_api_key,
             model=settings.embedding_model,
@@ -294,7 +297,7 @@ class ProviderManager:
             extra_body=extra_body,
             request_timeout=settings.embedding_request_timeout,
         )
-        self._embedding_alias = f"embedding-{settings.embedding_model}"
+        self._embedding_alias = provider_alias
         self._embedding_model = settings.embedding_model
 
         # 检测维度并写入 DB
@@ -1014,6 +1017,7 @@ class ProviderManager:
         # 创建临时 provider 检测维度
         emb_base_url = _normalize_base_urls(row.get("base_urls")).get("openai", "")
         tmp = EmbeddingProvider(
+            provider_alias=row["alias"],
             base_url=emb_base_url,
             api_key=row["api_key"],
             model=model,
@@ -1109,6 +1113,9 @@ class ProviderManager:
             timeout = active_row.get("request_timeout") or 30
 
         new_provider = EmbeddingProvider(
+            provider_alias=await self._pool.fetchval(
+                "SELECT alias FROM llm_providers WHERE id = $1", cfg["pending_provider_id"],
+            ),
             base_url=_normalize_base_urls(prov_row.get("base_urls")).get("openai", ""),
             api_key=prov_row["api_key"],
             model=cfg["pending_model"],
@@ -1275,6 +1282,7 @@ class ProviderManager:
             )
             endpoint = cfg["endpoint"] if cfg and cfg["endpoint"] else "/embeddings"
         self._embedding_provider = EmbeddingProvider(
+            provider_alias=self._embedding_alias,
             base_url=reb_base_urls.get("openai", ""),
             api_key=row["api_key"],
             model=row["model"],
@@ -1313,6 +1321,7 @@ class ProviderManager:
             policy = ProviderPolicy.from_value(row.get("request_policy"))
             self._provider = OpenAICompatProvider(**kwargs, request_policy=policy.openai)
         self._current_alias = row["alias"]
+        self._provider.usage_alias = row["alias"]
         self._current_model = row["model"]
         self._current_api_type = api_type
 
@@ -1343,6 +1352,7 @@ class ProviderManager:
             policy = ProviderPolicy.from_value(row.get("request_policy"))
             self._collector_provider = OpenAICompatProvider(**kwargs, request_policy=policy.openai)
         self._collector_alias = row["alias"]
+        self._collector_provider.usage_alias = row["alias"]
         self._collector_model = row["model"]
         self._collector_api_type = api_type
 
@@ -1401,6 +1411,7 @@ class ProviderManager:
         else:
             self._provider = OpenAICompatProvider(**kwargs)
         self._current_alias = "default"
+        self._provider.usage_alias = "default"
         self._current_model = settings.llm_model
         self._current_api_type = settings.llm_api_type
 
@@ -1436,6 +1447,7 @@ class ProviderManager:
             policy = ProviderPolicy.from_value(row.get("request_policy"))
             self._vision_provider = OpenAICompatProvider(**kwargs, request_policy=policy.openai)
         self._vision_alias = row["alias"]
+        self._vision_provider.usage_alias = row["alias"]
         self._vision_model = row["model"]
         self._vision_api_type = api_type
 
@@ -1504,6 +1516,7 @@ class ProviderManager:
         else:
             self._vision_provider = OpenAICompatProvider(**kwargs)
         self._vision_alias = f"vision-{settings.vision_model}"
+        self._vision_provider.usage_alias = self._vision_alias
         self._vision_model = settings.vision_model
         self._vision_api_type = settings.vision_api_type
 
@@ -1539,6 +1552,7 @@ class ProviderManager:
             policy = ProviderPolicy.from_value(row.get("request_policy"))
             self._trigger_provider = OpenAICompatProvider(**kwargs, request_policy=policy.openai)
         self._trigger_alias = row["alias"]
+        self._trigger_provider.usage_alias = row["alias"]
         self._trigger_model = row["model"]
         self._trigger_api_type = api_type
 
@@ -1605,6 +1619,7 @@ class ProviderManager:
         else:
             self._trigger_provider = OpenAICompatProvider(**kwargs)
         self._trigger_alias = f"trigger-{settings.trigger_model}"
+        self._trigger_provider.usage_alias = self._trigger_alias
         self._trigger_model = settings.trigger_model
         self._trigger_api_type = settings.trigger_api_type
 

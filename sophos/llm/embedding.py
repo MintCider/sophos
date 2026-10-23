@@ -9,6 +9,8 @@ from typing import Any
 
 import aiohttp
 
+from sophos import observability
+
 logger = logging.getLogger(__name__)
 
 
@@ -24,10 +26,12 @@ class EmbeddingProvider:
         endpoint: str = "/embeddings",
         extra_body: dict[str, Any] | None = None,
         request_timeout: int = 30,
+        provider_alias: str = "",
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._model = model
+        self.usage_alias = provider_alias
         self._endpoint = endpoint
         self._extra_body = extra_body or {}
         self._timeout = aiohttp.ClientTimeout(total=request_timeout)
@@ -65,21 +69,13 @@ class EmbeddingProvider:
         payload: dict[str, Any] = {"model": self._model, "input": texts}
         if self._extra_body:
             payload.update(self._extra_body)
-        session = self._get_session()
-        url = f"{self._base_url}{self._endpoint}"
-        async with session.post(url, json=payload) as resp:
-            if resp.status != 200:
-                body = await resp.text()
-                raise RuntimeError(f"Embedding API error ({resp.status}): {body[:300]}")
-            data = await resp.json()
+        data = await self._request(payload)
         # 按 index 排序（API 不保证顺序）
         items = sorted(data["data"], key=lambda x: x["index"])
         return [item["embedding"] for item in items]
 
     async def _embed_multimodal(self, texts: list[str]) -> list[list[float]]:
         """火山引擎 multimodal 端点：逐条请求，响应格式 data.embedding。"""
-        session = self._get_session()
-        url = f"{self._base_url}{self._endpoint}"
         results: list[list[float]] = []
         for t in texts:
             payload: dict[str, Any] = {
@@ -88,11 +84,7 @@ class EmbeddingProvider:
             }
             if self._extra_body:
                 payload.update(self._extra_body)
-            async with session.post(url, json=payload) as resp:
-                if resp.status != 200:
-                    body = await resp.text()
-                    raise RuntimeError(f"Embedding API error ({resp.status}): {body[:300]}")
-                data = await resp.json()
+            data = await self._request(payload)
             # multimodal 响应：data 是对象 {"embedding": [...]} 而非数组
             raw = data["data"]
             if isinstance(raw, list):
@@ -100,6 +92,14 @@ class EmbeddingProvider:
             else:
                 results.append(raw["embedding"])
         return results
+
+    async def _request(self, payload: dict[str, Any]) -> dict[str, Any]:
+        async with observability.model_call(slot="embedding", provider=self.usage_alias, model=self._model) as call:
+            async with self._get_session().post(f"{self._base_url}{self._endpoint}", json=payload) as resp:
+                resp.raise_for_status()
+                data = await resp.json()
+            call.usage = observability.api_usage(data, "openai", embedding=True)
+            return data
 
     async def embed_single(self, text: str) -> list[float]:
         """嵌入单条文本。"""

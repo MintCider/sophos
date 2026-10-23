@@ -6,6 +6,7 @@ from sophos.api.routes.logs import routes as log_routes
 from sophos.api.routes.permissions import routes as permission_routes
 from sophos.api.routes.prompts import routes as prompt_routes
 from sophos.api.routes.providers import routes as provider_routes
+from sophos.api.routes.stats import routes as stats_routes
 from sophos.api.routes.tools import routes as tools_routes
 from sophos.api.routes.workflows import routes as workflow_routes
 
@@ -17,6 +18,7 @@ def setup_routes(app, cors):
     app.router.add_routes(permission_routes)
     app.router.add_routes(prompt_routes)
     app.router.add_routes(provider_routes)
+    app.router.add_routes(stats_routes)
     app.router.add_routes(tools_routes)
     app.router.add_routes(workflow_routes)
     for route in list(app.router.routes()):

@@ -15,6 +15,7 @@ from uuid import uuid4
 
 import aiohttp
 
+from sophos import observability
 from sophos.llm.provider_manager import resolve_base_url
 from sophos.messaging import MessageService
 from sophos.platform import Capability, SendMessageRequest
@@ -454,9 +455,10 @@ class ImageGenerationTool(Tool):
             prompt[:60],
         )
 
-        asyncio.create_task(
-            _generate_and_send(
+        with observability.scope(conversation_id=context.get("conversation_id"), response=None, trigger_event_id=None):
+            asyncio.create_task(_generate_and_send(
                 task_id=task_id,
+                provider_alias=provider_alias,
                 base_url=base_url,
                 api_key=api_key,
                 model_name=model_name,
@@ -468,9 +470,7 @@ class ImageGenerationTool(Tool):
                 fmt=fmt,
                 quality=quality,
                 context=context,
-            ),
-            name=task_id,
-        )
+            ), name=task_id)
 
         return {
             "status": "generating",
@@ -490,6 +490,8 @@ class ImageGenerationTool(Tool):
         fmt: str = _DEFAULT_FORMAT,
         quality: str = _DEFAULT_QUALITY,
         request_timeout: int = _DEFAULT_REQUEST_TIMEOUT,
+        *,
+        provider_alias: str = "",
     ) -> tuple[str | None, str | None]:
         url = f"{base_url.rstrip('/')}/images/generations"
         payload: dict[str, Any] = {
@@ -506,6 +508,7 @@ class ImageGenerationTool(Tool):
         }
         logger.debug("generate_image: POST %s (model=%s)", url, model)
         async with (
+            observability.model_call(slot="image", provider=provider_alias, model=model, api_type="openai") as call,
             aiohttp.ClientSession() as session,
             session.post(
                 url,
@@ -514,13 +517,14 @@ class ImageGenerationTool(Tool):
                 timeout=aiohttp.ClientTimeout(total=request_timeout),
             ) as resp,
         ):
-            if resp.status != 200:
-                text = await resp.text()
-                raise RuntimeError(f"OpenAI images API failed ({resp.status}): {text[:300]}")
+            resp.raise_for_status()
             data = await resp.json()
+            call.usage = observability.api_usage(data, "openai")
 
-        item = (data.get("data") or [{}])[0]
-        return item.get("url"), item.get("b64_json")
+            item = (data.get("data") or [{}])[0]
+            if not item.get("url") and not item.get("b64_json"):
+                raise RuntimeError("OpenAI images API returned no image data")
+            return item.get("url"), item.get("b64_json")
 
     async def _call_gemini(
         self,
@@ -532,6 +536,8 @@ class ImageGenerationTool(Tool):
         fmt: str = _DEFAULT_FORMAT,
         quality: str = _DEFAULT_QUALITY,
         request_timeout: int = _DEFAULT_REQUEST_TIMEOUT,
+        *,
+        provider_alias: str = "",
     ) -> tuple[str | None, str | None]:
         url = f"{base_url.rstrip('/')}/models/{model}:generateImages?key={api_key}"
         config: dict[str, Any] = {"numberOfImages": 1}
@@ -548,6 +554,7 @@ class ImageGenerationTool(Tool):
         headers = {"Content-Type": "application/json"}
         logger.debug("generate_image: POST %s (model=%s)", url.split("?")[0], model)
         async with (
+            observability.model_call(slot="image", provider=provider_alias, model=model, api_type="gemini") as call,
             aiohttp.ClientSession() as session,
             session.post(
                 url,
@@ -557,15 +564,17 @@ class ImageGenerationTool(Tool):
             ) as resp,
         ):
             if resp.status != 200:
-                text = await resp.text()
-                raise RuntimeError(f"Gemini generateImages API failed ({resp.status}): {text[:300]}")
+                raise RuntimeError(f"Gemini generateImages API failed (HTTP {resp.status})")
             data = await resp.json()
+            call.usage = observability.api_usage(data, "gemini")
 
-        images = data.get("generatedImages", data.get("images", []))
-        if not images:
-            raise RuntimeError("Gemini API returned no images")
-        image_b64 = images[0].get("image", {}).get("imageBytes")
-        return None, image_b64
+            images = data.get("generatedImages", data.get("images", []))
+            if not images:
+                raise RuntimeError("Gemini API returned no images")
+            image_b64 = images[0].get("image", {}).get("imageBytes")
+            if not image_b64:
+                raise RuntimeError("Gemini API returned no image bytes")
+            return None, image_b64
 
 
 class CheckImageQueueTool(Tool):
@@ -612,6 +621,7 @@ async def _generate_and_send(
     fmt: str,
     quality: str,
     context: dict[str, Any],
+    provider_alias: str = "",
 ) -> None:
     """后台 task：调 API → 发图 → VLM 描述 → 存入 extra。"""
     tool = ImageGenerationTool()
@@ -627,6 +637,7 @@ async def _generate_and_send(
                 fmt,
                 quality,
                 request_timeout,
+                provider_alias=provider_alias,
             )
         else:
             image_url, image_b64 = await tool._call_openai(
@@ -638,6 +649,7 @@ async def _generate_and_send(
                 fmt,
                 quality,
                 request_timeout,
+                provider_alias=provider_alias,
             )
     except Exception as e:
         logger.exception(

@@ -235,6 +235,8 @@ class LLMProvider(ABC):
     所有 provider 实现（OpenAI 兼容、Anthropic 等）都继承此类。
     """
 
+    usage_alias: str = ""
+
     @abstractmethod
     async def chat(
         self,

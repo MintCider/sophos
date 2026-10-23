@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 import aiohttp
 from aiohttp import web
 
-from sophos import permission, prompts, runtime_config
+from sophos import observability, permission, prompts, runtime_config
 from sophos.adapter_router import AdapterRouter
 from sophos.api import create_app
 from sophos.cleanup import run_cleanup_loop
@@ -50,8 +50,9 @@ async def handle_event(
     ctx = PipelineContext.from_event(message, adapter, message_service, store, provider_mgr, session)
     if memory_store is not None:
         ctx.state["memory_store"] = memory_store
-    await _ingest.run(ctx)
-    await _response.run(ctx)
+    with observability.scope(conversation_id=ctx.conversation_id):
+        await _ingest.run(ctx)
+        await _response.run(ctx)
 
 
 async def ws_loop(
@@ -138,6 +139,7 @@ async def start() -> None:
 
     # 初始化数据库（建表 + 连接池）
     pool = await init_db()
+    await observability.init(pool)
     store = MessageStore(pool)
     platform_store = PlatformStore(pool)
     router = AdapterRouter()
@@ -164,6 +166,7 @@ async def start() -> None:
         provider_mgr=provider_mgr,
         memory_store=memory_store,
         tool_registry=_get_registry(),
+        adapter_router=router,
     )
     runner = web.AppRunner(app)
     await runner.setup()

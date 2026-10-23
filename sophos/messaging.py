@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from sophos import observability
 from sophos.adapter_router import AdapterRouter
 from sophos.message_store import MessageStore
 from sophos.platform import (
@@ -50,7 +51,13 @@ class MessageService:
         if not segments:
             raise ValueError("message content cannot be empty")
 
-        delivered = await adapter.send_message(AdapterSendRequest(conversation=conversation, segments=segments))
+        try:
+            delivered = await adapter.send_message(AdapterSendRequest(conversation=conversation, segments=segments))
+        except Exception as exc:
+            with observability.scope(conversation_id=request.conversation_id):
+                await observability.record_error("send_message", exc)
+            raise
+        observability.message_sent(conversation.conversation_id)
         internal_id = await self.store.save_outbound_message(
             adapter_binding_id=adapter.binding_id,
             conversation_id=conversation.conversation_id,

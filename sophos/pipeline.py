@@ -16,7 +16,7 @@ from typing import Any
 import aiohttp
 import asyncpg
 
-from sophos import prompts, runtime_config, trigger
+from sophos import observability, prompts, runtime_config, trigger
 from sophos.agent import (
     AgentTool,
     LLMNodeExecutor,
@@ -181,7 +181,8 @@ class Pipeline:
             logger.debug("Pipeline: entering stage '%s'", stage.name)
             try:
                 await stage.execute(ctx, lambda: _run_at(index + 1))
-            except Exception:
+            except Exception as exc:
+                await observability.record_error(f"pipeline:{stage.name}", exc)
                 logger.exception("Stage '%s' failed", stage.name)
 
         await _run_at(0)
@@ -672,13 +673,17 @@ async def _handle_llm_trigger(ctx: PipelineContext) -> None:
         system_prompt_renderer=render_node_prompt,
     )
     run = WorkflowRun(workflow=workflow, transcript=transcript, conversation_id=ctx.conversation_id)
+    observability.workflow_started(run.run_id)
     tracker = get_run_tracker()
     llm_context.on_step = lambda kind, node_id, data: tracker.event(run.run_id, kind, node_id, data)
     engine = WorkflowEngine({"llm": LLMNodeExecutor(llm_context)}, observer=tracker)
 
     try:
         await engine.run(run)
-    except Exception:
+    except Exception as exc:
+        with observability.scope(run_id=run.run_id):
+            await observability.record_error("workflow", exc)
+        observability.workflow_failed()
         logger.exception("Agent workflow failed")
         await _notify_workflow_failure(ctx)
         return

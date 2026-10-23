@@ -48,7 +48,7 @@ class DatabaseSchemaTests(unittest.TestCase):
         )
 
     def test_schema_has_platform_neutral_identity_and_conversation_keys(self) -> None:
-        self.assertEqual(SCHEMA_VERSION, 3)
+        self.assertEqual(SCHEMA_VERSION, 5)
         self.assertIn("platform, identity_namespace, external_user_id", _CREATE_USER_IDENTITIES_TABLE)
         self.assertIn("parent_conversation_id", _CREATE_CONVERSATIONS_TABLE)
         self.assertIn("'direct', 'group', 'channel', 'thread'", _CREATE_CONVERSATIONS_TABLE)

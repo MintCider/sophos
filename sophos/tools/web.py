@@ -1,11 +1,12 @@
 """联网工具 — Tavily 搜索/提取 + 图片查看。"""
 
 import logging
+import math
 from typing import Any
 
 import aiohttp
 
-from sophos import runtime_config
+from sophos import observability, runtime_config
 from sophos.tools.base import Tool
 
 logger = logging.getLogger(__name__)
@@ -13,6 +14,33 @@ logger = logging.getLogger(__name__)
 _TAVILY_SEARCH_URL = "https://api.tavily.com/search"
 _TAVILY_EXTRACT_URL = "https://api.tavily.com/extract"
 _IMAGE_MAX_BYTES = 10 * 1024 * 1024  # 10 MB
+
+
+async def _tavily_request(tool: str, url: str, payload: dict, context: dict) -> dict:
+    values = {"conversation_id": context["conversation_id"]} if "conversation_id" in context else {}
+    with observability.scope(**values):
+        async with observability.tool_call(tool, provider="tavily") as call:
+            async with (
+                aiohttp.ClientSession() as session,
+                session.post(
+                    url, json={**payload, "include_usage": True}, timeout=aiohttp.ClientTimeout(total=30),
+                ) as resp,
+            ):
+                if resp.status != 200:
+                    call.error = f"HTTP {resp.status}"
+                    return {"error": f"Tavily {tool} failed ({resp.status})"}
+                data = await resp.json()
+            credit_usage = (data.get("usage") or {}).get("credits")
+            if (
+                isinstance(credit_usage, (int, float)) and not isinstance(credit_usage, bool)
+                and math.isfinite(credit_usage) and credit_usage >= 0
+            ):
+                call.credits = float(credit_usage)
+            if data.get("failed_results"):
+                call.error = f"{len(data['failed_results'])} 个页面提取失败"
+            if data.get("error"):
+                call.error = "Tavily 返回错误"
+            return data
 
 
 class WebSearchTool(Tool):
@@ -59,14 +87,9 @@ class WebSearchTool(Tool):
             "max_results": runtime_config.get("tavily_max_results"),
             "include_answer": runtime_config.get("tavily_include_answer"),
         }
-        async with (
-            aiohttp.ClientSession() as session,
-            session.post(_TAVILY_SEARCH_URL, json=payload, timeout=aiohttp.ClientTimeout(total=30)) as resp,
-        ):
-            if resp.status != 200:
-                text = await resp.text()
-                return {"error": f"Tavily search failed ({resp.status}): {text[:200]}"}
-            data = await resp.json()
+        data = await _tavily_request(self.name, _TAVILY_SEARCH_URL, payload, context)
+        if data.get("error"):
+            return {"error": data["error"]}
         results = [
             {"title": r.get("title", ""), "url": r.get("url", ""), "content": r.get("content", "")}
             for r in data.get("results", [])
@@ -112,14 +135,9 @@ class WebFetchTool(Tool):
             return {"error": "tavily_api_key 未配置"}
         urls = params["urls"][:5]
         payload = {"api_key": api_key, "urls": urls}
-        async with (
-            aiohttp.ClientSession() as session,
-            session.post(_TAVILY_EXTRACT_URL, json=payload, timeout=aiohttp.ClientTimeout(total=30)) as resp,
-        ):
-            if resp.status != 200:
-                text = await resp.text()
-                return {"error": f"Tavily extract failed ({resp.status}): {text[:200]}"}
-            data = await resp.json()
+        data = await _tavily_request(self.name, _TAVILY_EXTRACT_URL, payload, context)
+        if data.get("error"):
+            return {"error": data["error"]}
         results = [{"url": r.get("url", ""), "content": r.get("raw_content", "")} for r in data.get("results", [])]
         failed = data.get("failed_results", [])
         out: dict[str, Any] = {"results": results}

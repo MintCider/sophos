@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from sophos import prompts, runtime_config, trigger_context
+from sophos import observability, prompts, runtime_config, trigger_context
 from sophos.agent.runs import get_run_tracker
 from sophos.enrichment import get_enrichment_registry
 
@@ -78,6 +78,7 @@ class ContextState:
     last_eval_time: float = 0.0
     last_eval_id: int = 0  # 上次评估时可见的最大消息 id
     pending_delay: asyncio.Task[None] | None = None
+    evaluation_event_id: int | None = None
 
 
 # ── 引擎 ──────────────────────────────────────────────────────
@@ -139,14 +140,16 @@ class TriggerEngine:
     async def _schedule_delayed(self, ctx: PipelineContext, key: ContextKey) -> None:
         """简易触发后安排延迟响应。同一 context 去重。"""
         cs = self._get_state(key)
+        event_id = await observability.trigger_event(ctx.conversation_id, "simple", ctx.state.get("message_row_id"))
         if cs.pending_delay is not None and not cs.pending_delay.done():
+            await observability.update_trigger(event_id, status="coalesced")
             logger.debug("Delayed trigger already pending for %s, skipping", key)
             return
 
-        cs.pending_delay = asyncio.create_task(self._delayed_respond(ctx, key))
+        cs.pending_delay = asyncio.create_task(self._delayed_respond(ctx, key, event_id))
         logger.debug("Scheduled delayed trigger for %s", key)
 
-    async def _delayed_respond(self, ctx: PipelineContext, key: ContextKey) -> None:
+    async def _delayed_respond(self, ctx: PipelineContext, key: ContextKey, event_id: int | None = None) -> None:
         """等待 trigger_delay 秒后消耗 quota 并触发主 LLM。"""
         delay = float(runtime_config.get("trigger_delay", 2.0))
         await asyncio.sleep(delay)
@@ -155,20 +158,34 @@ class TriggerEngine:
         cs = self._get_state(key)
         cs.pending_delay = None
 
-        bucket = self._get_bucket(key)
-        if not bucket.try_consume():
-            logger.debug("Rate limited (delayed), dropping for %s", key)
-            return
-
         logger.debug("Delayed trigger firing for %s after %.1fs", key, delay)
+        await self._respond(ctx, key, event_id)
+
+    async def _respond(self, ctx: PipelineContext, key: ContextKey, event_id: int | None) -> None:
+        if not self._get_bucket(key).try_consume():
+            await observability.update_trigger(event_id, status="rate_limited")
+            return
         lock = self._get_lock(key)
         if lock.locked():
-            logger.debug("Session lock held for %s, dropping delayed trigger", key)
+            await observability.update_trigger(event_id, status="locked")
             return
         async with lock:
             from sophos.pipeline import _handle_llm_trigger
 
-            await _handle_llm_trigger(ctx)
+            trace = observability.ResponseTrace()
+            with observability.scope(conversation_id=ctx.conversation_id, trigger_event_id=event_id, response=trace):
+                await observability.update_trigger(event_id, status="responding")
+                try:
+                    await _handle_llm_trigger(ctx)
+                except (Exception, asyncio.CancelledError) as exc:
+                    trace.failed = True
+                    await observability.record_error("workflow", exc)
+                    raise
+                finally:
+                    status = "failed" if trace.failed else "replied" if trace.sent_count else "no_reply"
+                    await observability.update_trigger(
+                        event_id, status=status, sent_count=trace.sent_count, run_id=trace.run_id,
+                    )
 
     # ── LLM 触发器 ────────────────────────────────────────────
 
@@ -222,22 +239,9 @@ class TriggerEngine:
 
                 if result == "relevant_done":
                     cs.state = TriggerState.TRIGGERED
-                    bucket = self._get_bucket(key)
-                    if not bucket.try_consume():
-                        logger.debug("Rate limited (LLM trigger), dropping for %s", key)
-                        cs.state = TriggerState.IDLE
-                        return
                     logger.debug("LLM trigger firing main LLM for %s", key)
                     cs.state = TriggerState.RESPONDING
-                    lock = self._get_lock(key)
-                    if lock.locked():
-                        logger.debug("Session lock held for %s, dropping LLM trigger", key)
-                        cs.state = TriggerState.IDLE
-                        return
-                    async with lock:
-                        from sophos.pipeline import _handle_llm_trigger
-
-                        await _handle_llm_trigger(ctx)
+                    await self._respond(ctx, key, cs.evaluation_event_id)
                     cs.state = TriggerState.IDLE
                     return
 
@@ -252,20 +256,12 @@ class TriggerEngine:
                     # 超时无新消息 → 触发
                     logger.debug("WAITING timeout for %s, triggering", key)
                     cs.state = TriggerState.TRIGGERED
-                    bucket = self._get_bucket(key)
-                    if not bucket.try_consume():
-                        cs.state = TriggerState.IDLE
-                        return
+                    await observability.update_trigger(cs.evaluation_event_id, status="waiting_timeout")
+                    event_id = await observability.trigger_event(
+                        ctx.conversation_id, "timeout", cs.last_eval_id or None,
+                    )
                     cs.state = TriggerState.RESPONDING
-                    lock = self._get_lock(key)
-                    if lock.locked():
-                        logger.debug("Session lock held for %s, dropping timeout trigger", key)
-                        cs.state = TriggerState.IDLE
-                        return
-                    async with lock:
-                        from sophos.pipeline import _handle_llm_trigger
-
-                        await _handle_llm_trigger(ctx)
+                    await self._respond(ctx, key, event_id)
                     cs.state = TriggerState.IDLE
                     return
 
@@ -277,10 +273,16 @@ class TriggerEngine:
                 if elapsed < min_interval:
                     await asyncio.sleep(min_interval - elapsed)
                 is_reeval = True
+                await observability.update_trigger(cs.evaluation_event_id, status="reevaluated")
                 # 循环回到 EVALUATING
 
-        except Exception:
+        except asyncio.CancelledError:
+            await observability.update_trigger(cs.evaluation_event_id, status="interrupted")
+            raise
+        except Exception as exc:
+            await observability.record_error("trigger_loop", exc)
             logger.exception("LLM trigger loop error for %s", key)
+        finally:
             cs.state = TriggerState.IDLE
 
     @staticmethod
@@ -309,6 +311,7 @@ class TriggerEngine:
             return "irrelevant"
 
         cs = self._get_state(key)
+        cs.evaluation_event_id = None
         rows = await trigger_context.load_rows(ctx.store, ctx.conversation_id)
         pending = trigger_context.pending_rows(rows, since_id=since_id, self_user_id=ctx.self_user_id)
         # 待判断消息带图时等识别结果；更早的图不等
@@ -342,19 +345,36 @@ class TriggerEngine:
 
         max_tokens = int(runtime_config.get("trigger_eval_max_tokens", 64))
         temperature = float(runtime_config.get("trigger_eval_temperature", 0.0))
+        event_id = await observability.trigger_event(
+            ctx.conversation_id, "llm", tc.latest_id, waiting=waiting,
+        )
+        cs.evaluation_event_id = event_id
+        started = time.monotonic()
         try:
-            response = await provider.chat(
+            response = await observability.chat(
+                provider,
                 messages,
+                slot="trigger",
                 temperature=temperature,
                 max_tokens=max_tokens,
             )
         except Exception:
+            await observability.update_trigger(
+                event_id, status="failed", duration_ms=round((time.monotonic() - started) * 1000),
+            )
             logger.warning("Trigger eval failed for %s", key, exc_info=True)
             return "irrelevant"
 
         content = (response["message"].get("content") or "").strip().lower()
         logger.debug("Trigger eval raw response for %s: %r", key, content)
         result = _parse_result(content)
+        status = {"irrelevant": "ignored", "relevant_more": "waiting", "relevant_done": "pending"}[result]
+        if not _RE_RESULT.search(content) or len(set(_RE_RESULT.findall(content))) != 1:
+            status = "invalid"
+        await observability.update_trigger(
+            event_id, result=result, raw_result=content[:512], status=status,
+            duration_ms=round((time.monotonic() - started) * 1000),
+        )
         get_run_tracker().stage("trigger", ctx.conversation_id, {"result": result, "waiting": waiting})
         return result
 

@@ -11,6 +11,7 @@ from typing import Any
 
 import aiohttp
 
+from sophos import observability
 from sophos.agent.engine import NodeOutcome, WorkflowRun, build_model_transition_tools
 from sophos.agent.transcript import NativeEnvelope, Transcript, new_event
 from sophos.agent.workflow import NodeSpec, ToolPolicy
@@ -59,6 +60,10 @@ class LLMNodeExecutor:
         self.context = context
 
     async def __call__(self, node: NodeSpec, run: WorkflowRun) -> NodeOutcome:
+        with observability.scope(conversation_id=self.context.conversation_id, run_id=run.run_id):
+            return await self._execute(node, run)
+
+    async def _execute(self, node: NodeSpec, run: WorkflowRun) -> NodeOutcome:
         if node.model is None:
             raise LLMNodeExecutionError(f"LLM node has no model policy: {node.node_id}")
 
@@ -85,8 +90,10 @@ class LLMNodeExecutor:
             )
             for retry_number in range(4):
                 try:
-                    response = await provider.chat(
+                    response = await observability.chat(
+                        provider,
                         request_messages,
+                        slot="actor" if node.model.slot == "default" else node.model.slot,
                         tools=schemas,
                         temperature=node.model.temperature,
                         max_tokens=node.model.max_tokens,
@@ -161,6 +168,7 @@ class LLMNodeExecutor:
                     try:
                         result = await self.context.tool_executor(tool_name, params)
                     except Exception as exc:
+                        await observability.record_error(f"tool:{tool_name}", exc)
                         logger.exception("Tool %s execution failed in node %s", tool_name, node.node_id)
                         result = {"error": f"工具 {tool_name} 执行失败: {exc}"}
                     if tool_name in self.context.completion_tools and _is_success(result):

@@ -17,6 +17,9 @@ class AdapterRouter:
         self._by_binding[adapter.binding_id] = adapter
         self._by_account[adapter.account_id] = adapter
 
+    def connected_accounts(self) -> list[int]:
+        return list(self._by_account)
+
     def unregister(self, adapter: MessagingAdapter) -> None:
         if self._by_binding.get(adapter.binding_id) is adapter:
             self._by_binding.pop(adapter.binding_id, None)
@@ -43,4 +46,3 @@ class AdapterRouter:
             raise CapabilityUnavailableError(
                 f"adapter binding {adapter.binding_id} does not support {capability.value}"
             )
-

@@ -54,7 +54,7 @@ def get_pool() -> asyncpg.Pool:
 
 # ── Schema DDL ──────────────────────────────────────────────
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 5
 
 _CREATE_SCHEMA_META_TABLE = """\
 CREATE TABLE schema_meta (
@@ -417,6 +417,80 @@ CREATE TABLE prompt_versions (
 );
 """
 
+_CREATE_TOOL_USAGE_TABLE = """\
+CREATE TABLE tool_usage (
+    id                  BIGSERIAL PRIMARY KEY,
+    conversation_id     BIGINT REFERENCES conversations(id) ON DELETE SET NULL,
+    run_id              TEXT,
+    tool                TEXT NOT NULL,
+    provider            TEXT NOT NULL,
+    credits             DOUBLE PRECISION CHECK (credits >= 0 AND credits < 'Infinity'::float8),
+    duration_ms         INTEGER NOT NULL,
+    success             BOOLEAN NOT NULL,
+    error               TEXT,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+"""
+
+_TOOL_USAGE_INDEXES = [
+    "CREATE INDEX idx_tool_usage_time ON tool_usage (created_at DESC, id DESC);",
+    "CREATE INDEX idx_tool_usage_conversation_time ON tool_usage (conversation_id, created_at DESC, id DESC);",
+]
+
+_CREATE_STATS_TABLES = """\
+CREATE TABLE llm_usage (
+    id                  BIGSERIAL PRIMARY KEY,
+    conversation_id     BIGINT REFERENCES conversations(id) ON DELETE SET NULL,
+    run_id              TEXT,
+    slot                TEXT NOT NULL,
+    provider            TEXT NOT NULL,
+    model               TEXT NOT NULL,
+    input_tokens        BIGINT,
+    output_tokens       BIGINT,
+    cached_tokens       BIGINT,
+    cache_write_tokens  BIGINT,
+    reasoning_tokens    BIGINT,
+    total_tokens        BIGINT,
+    duration_ms         INTEGER NOT NULL,
+    success             BOOLEAN NOT NULL,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE trigger_events (
+    id                  BIGSERIAL PRIMARY KEY,
+    conversation_id     BIGINT REFERENCES conversations(id) ON DELETE SET NULL,
+    message_id          BIGINT REFERENCES messages(id) ON DELETE SET NULL,
+    source              TEXT NOT NULL,
+    result              TEXT,
+    raw_result          TEXT,
+    status              TEXT NOT NULL DEFAULT 'pending',
+    waiting             BOOLEAN NOT NULL DEFAULT FALSE,
+    duration_ms         INTEGER,
+    run_id              TEXT,
+    sent_count          INTEGER NOT NULL DEFAULT 0,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE runtime_errors (
+    id                  BIGSERIAL PRIMARY KEY,
+    conversation_id     BIGINT REFERENCES conversations(id) ON DELETE SET NULL,
+    run_id              TEXT,
+    stage               TEXT NOT NULL,
+    error               TEXT NOT NULL,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+"""
+
+_STATS_INDEXES = [
+    f"CREATE INDEX idx_{table}_time ON {table} (created_at DESC, id DESC);"
+    for table in ("llm_usage", "trigger_events", "runtime_errors")
+] + [
+    f"CREATE INDEX idx_{table}_conversation_time ON {table} (conversation_id, created_at DESC, id DESC);"
+    for table in ("llm_usage", "trigger_events", "runtime_errors")
+] + [
+    "CREATE INDEX idx_trigger_events_message ON trigger_events (message_id) WHERE message_id IS NOT NULL;",
+    "CREATE INDEX idx_messages_stats_time ON messages (occurred_at DESC, conversation_id);",
+]
+
 _CREATE_INDEXES = [
     """\
     CREATE INDEX idx_prompt_versions_key
@@ -492,7 +566,7 @@ _CREATE_INDEXES = [
     CREATE INDEX idx_perm_grant_scope
     ON perm_grant (scope_type, scope_id);
     """,
-]
+] + _STATS_INDEXES + _TOOL_USAGE_INDEXES
 
 
 async def _init_schema(pool: asyncpg.Pool) -> None:
@@ -548,6 +622,8 @@ async def _init_schema(pool: asyncpg.Pool) -> None:
                 _CREATE_TOOL_DESCRIPTION_OVERRIDES_TABLE,
                 _CREATE_CUSTOM_PROMPTS_TABLE,
                 _CREATE_PROMPT_VERSIONS_TABLE,
+                _CREATE_STATS_TABLES,
+                _CREATE_TOOL_USAGE_TABLE,
             ):
                 await conn.execute(ddl)
             for ddl in _CREATE_INDEXES:

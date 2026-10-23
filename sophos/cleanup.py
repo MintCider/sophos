@@ -248,6 +248,8 @@ async def run_cleanup_loop(pool: asyncpg.Pool) -> None:
                 )
                 await cleanup_messages(pool, msg_max)
                 await cleanup_memories(pool, mem_max)
+                for table in ("llm_usage", "trigger_events", "runtime_errors", "tool_usage"):
+                    await pool.execute(f"DELETE FROM {table} WHERE created_at < now() - interval '90 days'")
             except Exception:
                 logger.exception("cleanup error")
             await asyncio.sleep(interval)

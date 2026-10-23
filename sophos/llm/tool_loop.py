@@ -12,6 +12,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from sophos import observability
 from sophos.llm.provider import ChatResponse, LLMProvider, Message
 
 logger = logging.getLogger(__name__)
@@ -29,6 +30,7 @@ async def run_tool_loop(
     tool_executor: Callable[[str, dict[str, Any]], Awaitable[Any]],
     *,
     max_rounds: int = 10,
+    slot: str = "actor",
     temperature: float | None = None,
     max_tokens: int | None = None,
     context_refresher: Callable[[], Awaitable[str | None]] | None = None,
@@ -55,8 +57,10 @@ async def run_tool_loop(
 
     for round_num in range(1, max_rounds + 1):
         try:
-            response: ChatResponse = await provider.chat(
+            response: ChatResponse = await observability.chat(
+                provider,
                 messages,
+                slot=slot,
                 tools=tools,
                 temperature=temperature,
                 max_tokens=max_tokens,
@@ -65,8 +69,10 @@ async def run_tool_loop(
             logger.warning("LLM API error in tool loop round %d, attempting recovery: %s", round_num, e)
             # 第一步：全同重试（处理超时等瞬时错误）
             try:
-                response = await provider.chat(
+                response = await observability.chat(
+                    provider,
                     messages,
+                    slot=slot,
                     tools=tools,
                     temperature=temperature,
                     max_tokens=max_tokens,
@@ -79,7 +85,9 @@ async def run_tool_loop(
                 if messages and messages[-1].get("role") == "assistant" and messages[-1].get("tool_calls"):
                     messages.pop()
                 try:
-                    response = await provider.chat(messages, temperature=temperature, max_tokens=max_tokens)
+                    response = await observability.chat(
+                        provider, messages, slot=slot, temperature=temperature, max_tokens=max_tokens,
+                    )
                     messages.append(response["message"])
                 except Exception:
                     logger.exception("Recovery call also failed")
@@ -170,7 +178,7 @@ async def run_tool_loop(
 
     # 达到最大轮次，做最后一次不带 tools 的调用让模型总结
     logger.warning("Tool loop hit max rounds (%d), forcing final response", max_rounds)
-    response = await provider.chat(messages, temperature=temperature, max_tokens=max_tokens)
+    response = await observability.chat(provider, messages, slot=slot, temperature=temperature, max_tokens=max_tokens)
     messages.append(response["message"])
     total_tc = sum(len(m.get("tool_calls") or []) for m in messages if m.get("role") == "assistant")
     if total_tc > 0:
