@@ -6,7 +6,7 @@ from typing import Any
 
 from aiohttp import web
 
-from sophos import prompts, runtime_config
+from sophos import prompts, runtime_config, trigger
 from sophos.agent.config import (
     ACTIVE_WORKFLOW_KEY,
     SUPPORTED_MODEL_SLOTS,
@@ -30,6 +30,7 @@ STAGE_SETTINGS: dict[str, list[dict[str, Any]]] = {
         {"key": "vision_context_messages", "label": "参考聊天条数", "type": "int", "min": 0, "max": 50},
     ],
     "trigger": [
+        {"key": "random_trigger_percent", "label": "随机触发概率（%）", "type": "float", "min": 0, "max": 100},
         {"key": "trigger_eval_max_tokens", "label": "最大输出 token", "type": "int", "min": 16, "max": 16384},
         {"key": "trigger_eval_temperature", "label": "温度", "type": "float", "min": 0, "max": 2},
         {"key": "trigger_eval_context_limit", "label": "评估上下文条数", "type": "int", "min": 1, "max": 200},
@@ -55,10 +56,13 @@ STAGE_PROMPTS = {
 }
 
 
-def _settings_payload() -> dict[str, list[dict[str, Any]]]:
+async def _settings_payload(pool) -> dict[str, list[dict[str, Any]]]:
     defaults = runtime_config.get_defaults()
+    cfg = await trigger.load(pool)
     return {
         stage: [
+            {**item, "value": round(cfg.base_rate * 100, 6), "default": 5}
+            if item["key"] == "random_trigger_percent" else
             {**item, "value": runtime_config.get(item["key"]), "default": defaults.get(item["key"])} for item in items
         ]
         for stage, items in STAGE_SETTINGS.items()
@@ -121,7 +125,7 @@ async def get_catalog(request: web.Request) -> web.Response:
         {
             "node_slots": sorted(SUPPORTED_MODEL_SLOTS),
             "slots": _slots_payload(provider_mgr),
-            "settings": _settings_payload(),
+            "settings": await _settings_payload(request.app["pool"]),
             "stage_prompts": STAGE_PROMPTS,
             "stage_slots": STAGE_SLOTS,
             "prompt_keys": [spec.key for spec in prompts.specs()],
@@ -152,8 +156,11 @@ async def put_settings(request: web.Request) -> web.Response:
             raise web.HTTPBadRequest(reason=f"{spec['label']} 范围 {spec['min']}~{spec['max']}")
         parsed[key] = value
     for key, value in parsed.items():
-        await runtime_config.set_value(key, value)
-    return web.json_response({"settings": _settings_payload()})
+        if key == "random_trigger_percent":
+            await trigger.set_base_rate(request.app["pool"], value / 100)
+        else:
+            await runtime_config.set_value(key, value)
+    return web.json_response({"settings": await _settings_payload(request.app["pool"])})
 
 
 @routes.put("/api/workflows/slots/{slot}")

@@ -663,7 +663,7 @@ onBeforeUnmount(() => {
                 size="small"
                 :min="item.min"
                 :max="item.max"
-                :step="item.type === 'int' ? 1 : 0.5"
+                :step="item.key === 'random_trigger_percent' ? 1 : item.type === 'int' ? 1 : 0.5"
                 :precision="item.type === 'int' ? 0 : undefined"
               />
             </label>
