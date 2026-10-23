@@ -44,7 +44,9 @@ class LLMWorkflowContext:
     conversation_id: int | None = None
     context_refresher: ContextRefresher | None = None
     max_rounds_per_node: int = 10
-    completion_tools: frozenset[str] = field(default_factory=lambda: frozenset({"send_message"}))
+    completion_tools: frozenset[str] = field(
+        default_factory=lambda: frozenset({"send_message", "finish_without_reply"}),
+    )
     system_prompt_renderer: Callable[[NodeSpec], str | None] | None = None
     on_step: Callable[[str, str, dict[str, Any]], None] | None = None
 
@@ -139,6 +141,10 @@ class LLMNodeExecutor:
 
             requested_transition: NodeOutcome | None = None
             completion_succeeded = False
+            completion_tool = None
+            silent_requested = "finish_without_reply" in allowed_action_names and any(
+                call.get("function", {}).get("name") == "finish_without_reply" for call in tool_calls
+            )
             for index, tool_call in enumerate(tool_calls):
                 function = tool_call.get("function", {})
                 tool_name = str(function.get("name", ""))
@@ -154,7 +160,9 @@ class LLMNodeExecutor:
                 if self.context.on_step is not None:
                     self.context.on_step("tool_call", node.node_id, {"name": tool_name})
 
-                if parse_error:
+                if silent_requested and tool_name != "finish_without_reply":
+                    result = {"error": "本轮选择静默结束，其它工具调用已取消"}
+                elif parse_error:
                     result: Any = {"error": "工具参数不是合法 JSON，请使用单个 JSON 对象重试"}
                 elif tool_name in transition_names:
                     if requested_transition is not None:
@@ -173,6 +181,7 @@ class LLMNodeExecutor:
                         result = {"error": f"工具 {tool_name} 执行失败: {exc}"}
                     if tool_name in self.context.completion_tools and _is_success(result):
                         completion_succeeded = True
+                        completion_tool = tool_name
 
                 result_text = json.dumps(result, ensure_ascii=False, default=str)
                 self.context.messages.append(
@@ -193,7 +202,7 @@ class LLMNodeExecutor:
 
             await self._refresh_context(run.transcript, node.node_id)
             if completion_succeeded:
-                return NodeOutcome("completed", {"completion_tool": "send_message"})
+                return NodeOutcome("completed", {"completion_tool": completion_tool})
             if requested_transition is not None:
                 return requested_transition
 

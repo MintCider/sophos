@@ -87,6 +87,42 @@ def agent_tool(name: str, category: str) -> AgentTool:
 
 
 class LLMWorkflowRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_silent_finish_cancels_parallel_send(self):
+        collector = FakeProvider([tool_response("complete_collection", {}, "collect")])
+        finish = tool_response("finish_without_reply", {}, "finish")
+        finish["message"]["tool_calls"].insert(
+            0, tool_response("send_message", {"text": "不发言"}, "send")["message"]["tool_calls"][0],
+        )
+        finish["message"]["content"] = "保持沉默"
+        actor = FakeProvider([finish])
+        execute = AsyncMock(return_value={"status": "completed", "sent": False})
+        context = LLMWorkflowContext(
+            messages=[{"role": "user", "content": "群聊"}],
+            tools=(agent_tool("send_message", "output"), agent_tool("finish_without_reply", "output")),
+            provider_resolver=lambda slot: collector if slot == "collector" else actor,
+            tool_executor=execute,
+        )
+        run = WorkflowRun(collector_actor_workflow(), Transcript())
+        await WorkflowEngine({"llm": LLMNodeExecutor(context)}).run(run)
+        self.assertEqual(run.status, "completed")
+        execute.assert_awaited_once_with("finish_without_reply", {})
+        self.assertNotIn("finish_without_reply", str(collector.calls[0]["tools"]))
+
+    async def test_plain_text_is_sent_unless_silence_is_explicit(self):
+        collector = FakeProvider([tool_response("complete_collection", {}, "collect")])
+        actor = FakeProvider([{"message": {"role": "assistant", "content": "普通回复"}}])
+        execute = AsyncMock(return_value={"status": "ok"})
+        context = LLMWorkflowContext(
+            messages=[{"role": "user", "content": "群聊"}],
+            tools=(agent_tool("send_message", "output"), agent_tool("finish_without_reply", "output")),
+            provider_resolver=lambda slot: collector if slot == "collector" else actor,
+            tool_executor=execute,
+        )
+        run = WorkflowRun(collector_actor_workflow(), Transcript())
+        await WorkflowEngine({"llm": LLMNodeExecutor(context)}).run(run)
+        self.assertEqual(run.status, "completed")
+        execute.assert_awaited_once_with("send_message", {"text": "普通回复"})
+
     async def test_provider_timeout_is_retried_three_times(self) -> None:
         collector = TimeoutThenSuccessProvider(
             [tool_response("complete_collection", {}, "handover-1")],

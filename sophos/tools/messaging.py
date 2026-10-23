@@ -17,6 +17,17 @@ from sophos.platform import Capability, SendMessageRequest
 from sophos.tools.base import Tool
 
 
+class FinishWithoutReplyTool(Tool):
+    category = "output"
+    group = "messaging"
+    name = "finish_without_reply"
+    description = "结束当前工作流，不发送任何消息。无需回复或决定保持沉默时调用；不要把不回复的理由发到会话中。"
+    parameters = {"type": "object", "properties": {}}
+
+    async def execute(self, params: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+        return {"status": "completed", "sent": False}
+
+
 class SendMessageTool(Tool):
     category = "output"
     group = "messaging"
@@ -278,6 +289,7 @@ class ModerateMemberTool(Tool):
 
 ALL_MESSAGING_TOOLS: list[Tool] = [
     SendMessageTool(),
+    FinishWithoutReplyTool(),
     RecallMessageTool(),
     QueryMessagesTool(),
     GetUserTool(),
