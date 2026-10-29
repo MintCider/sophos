@@ -25,7 +25,7 @@ Sophos 的消息处理不再由固定的 tool loop 表达，而是由版本化�
 
 ## Collector / Actor 语义
 
-collector 使用独立的 `collector` 槽，与 `default` 具有相同的 provider 生命周期、常规生成上限和热切换能力，只暴露 `category=input` 的读取工具和 `complete_collection`。工具调用和结果本身就是 handover 内容。actor 使用 `default` 槽，读取完整原始历史，只暴露 `category=output` 工具和 `request_more_information`。actor 缺少信息时返回 collector；只有 `send_message` 成功后宿主才沿 `completed` 端口结束。
+collector 使用独立的 `collector` 槽，与 `default` 具有相同的 provider 生命周期、常规生成上限和热切换能力，只暴露 `category=input` 的读取工具和 `complete_collection`。工具调用和结果本身就是 handover 内容。actor 使用 `default` 槽，读取聊天上下文和经过隔离的节点历史，只暴露 `category=output` 工具和 `request_more_information`。actor 缺少信息时返回 collector；`send_message` 或 `finish_without_reply` 成功后宿主沿 `completed` 端口结束。未显式调用工具时，actor 的普通文本仍自动发送。
 
 collector 与 default 都是工作流需要显式配置的一级模型槽；collector 未配置时不会借用 default。`trigger` 槽仅供触发判定使用。`web_search` 当前作为读取工具只在 collector 开放；未来可以通过节点 `ToolPolicy` 调整，无需改运行器。
 
@@ -33,7 +33,14 @@ collector 与 default 都是工作流需要显式配置的一级模型槽；coll
 
 `Transcript` 是只追加事件流，保存 message、provider response、tool call、tool result 和图转换。portable canonical payload 是跨 API 的真相来源；`NativeEnvelope` 同时保留 provider、API surface、model 和原生元数据。Gemini 的 thought signature 等必须 round-trip 的字段仍保留在 canonical message/tool call 扩展字段中。
 
-节点切换不会压缩 collector 输出。actor 收到同一条完整消息历史，包括 assistant tool call 与逐项 tool result。节点指令只注入本次 provider 请求的 system 视图，不被追加到共享历史。
+每次 provider 请求按节点生成历史副本，原始消息和 transcript 不被交接过滤修改：
+
+- 初始聊天记录、后续新消息保持共享；本节点自己的 assistant 文本、推理字段和原生签名保留，返回该节点继续执行时也能恢复。
+- 来自其它节点的 assistant 普通文本和推理不进入请求。只传递标准工具调用字段（id、type、function.name、function.arguments）及其配对结果，移除 provider 专有字段和签名。即使两个节点使用同一 provider，也按节点隔离。
+- 无参数的工作流转换（如 `complete_collection`）及其结果不跨节点传递；带参数定义的转换保留标准调用和结果，因此 `request_more_information.requirements` 仍能交给 collector。同一轮混合读取和交接调用时，仅过滤控制记录，读取结果和失败信息保留。
+- 不对工具结果重新总结，不注入额外身份说明；节点 prompt 和指令不因交接而改写。原有节点指令仍只注入本次 provider 请求的 system 视图。
+
+Gemini 编译器沿用已有的无签名工具历史兼容路径；外来调用不会借用其它节点的 thought signature。完整 provider 响应仍可在原始 transcript 中审计。
 
 ## Provider 编译与 strict tools
 

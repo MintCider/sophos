@@ -1,5 +1,6 @@
 import json
 import unittest
+from copy import deepcopy
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -12,6 +13,9 @@ from sophos.agent import (
     WorkflowRun,
     collector_actor_workflow,
 )
+from sophos.llm.anthropic import AnthropicProvider
+from sophos.llm.gemini import GeminiProvider
+from sophos.llm.openai_compat import OpenAICompatProvider
 from sophos.llm.provider import ChatResponse, LLMProvider, Message, ProviderRequestOptions
 
 
@@ -149,10 +153,21 @@ class LLMWorkflowRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sleep.await_count, 3)
 
     async def test_collector_history_is_visible_to_actor_and_tools_are_separated(self) -> None:
+        read = tool_response("query_messages", {}, "read-1")
+        read["message"].update({
+            "content": "准备查询，建议不要回复",
+            "reasoning_content": "collector private reasoning",
+            "_gemini_text_signature": "collector-text-signature",
+            "provider_specific_fields": {"thinking": "private"},
+        })
+        read["message"]["tool_calls"][0]["thought_signature"] = "collector-tool-signature"
+        handover = tool_response("complete_collection", {}, "handover-1")
+        handover["message"]["content"] = "收集完毕，请保持沉默"
+        original_read = deepcopy(read)
         collector = FakeProvider(
             [
-                tool_response("query_messages", {}, "read-1"),
-                tool_response("complete_collection", {}, "handover-1"),
+                read,
+                handover,
             ]
         )
         actor = FakeProvider([tool_response("send_message", {"text": "answer"}, "send-1")])
@@ -167,6 +182,7 @@ class LLMWorkflowRuntimeTests(unittest.IsolatedAsyncioTestCase):
         context = LLMWorkflowContext(
             messages=[
                 {"role": "system", "content": "base prompt"},
+                {"role": "assistant", "content": "earlier public reply"},
                 {"role": "user", "content": "question"},
             ],
             tools=(agent_tool("query_messages", "input"), agent_tool("send_message", "output")),
@@ -189,28 +205,51 @@ class LLMWorkflowRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(collector.calls[0]["messages"][0]["content"].startswith("collector prompt"))
         self.assertTrue(actor.calls[0]["messages"][0]["content"].startswith("base prompt"))
         actor_history = actor.calls[0]["messages"]
-        self.assertTrue(
-            any(message.get("name") == "query_messages" for message in actor_history)
-        )
+        self.assertEqual(actor_history[1:], [
+            {"role": "assistant", "content": "earlier public reply"},
+            {"role": "user", "content": "question"},
+            tool_response("query_messages", {}, "read-1")["message"],
+            {"role": "tool", "tool_call_id": "read-1", "name": "query_messages",
+             "content": json.dumps({"messages": "collected fact"})},
+        ])
+        # Private messages survive for the originating node and the raw audit trail.
+        self.assertIn(original_read["message"], collector.calls[1]["messages"])
+        self.assertIn(original_read["message"], context.messages)
+        self.assertEqual(read, original_read)
+        recorded = [e.payload["message"] for e in run.transcript.events if e.kind == "provider_response"]
+        self.assertIn(original_read["message"], recorded)
+        self.assertIn(handover["message"], recorded)
+        # Provider adaptation accepts the canonical cross-node call/result pair.
+        openai = OpenAICompatProvider(base_url="https://example.test", api_key="test", model="test")
+        self.assertEqual(openai._build_payload(actor_history, None, None, None, None)["messages"][-1]["content"],
+                         json.dumps({"messages": "collected fact"}))
+        _, anthropic_messages = AnthropicProvider._convert_messages(actor_history)
+        self.assertEqual(anthropic_messages[-2]["content"][0]["type"], "tool_use")
+        self.assertEqual(anthropic_messages[-1]["content"][0]["tool_use_id"], "read-1")
+        _, gemini_messages = GeminiProvider._convert_messages(actor_history)
+        self.assertIn("query_messages", json.dumps(gemini_messages))
+        self.assertIn("collected fact", json.dumps(gemini_messages))
+        self.assertNotIn("thoughtSignature", json.dumps(gemini_messages))
         options = actor.calls[0]["request_options"]
         self.assertEqual(options.tool_choice, "required")
         self.assertEqual(options.cache.key, "collector-actor:1:actor")
 
     async def test_actor_can_return_to_collector_and_failed_send_does_not_complete(self) -> None:
+        first_collection = tool_response("complete_collection", {}, "handover-1")
+        first_collection["message"]["reasoning_content"] = "collector private reasoning"
         collector = FakeProvider(
             [
-                tool_response("complete_collection", {}, "handover-1"),
+                first_collection,
                 tool_response("query_messages", {}, "read-2"),
                 tool_response("complete_collection", {}, "handover-2"),
             ]
         )
+        follow_up = tool_response("request_more_information", {"requirements": ["older messages"]}, "back-1")
+        follow_up["message"].update({"content": "actor private draft", "reasoning_content": "actor reasoning"})
+        follow_up["message"]["tool_calls"][0]["thought_signature"] = "actor signature"
         actor = FakeProvider(
             [
-                tool_response(
-                    "request_more_information",
-                    {"requirements": ["older messages"]},
-                    "back-1",
-                ),
+                follow_up,
                 tool_response("send_message", {"text": "first"}, "send-failed"),
                 tool_response("send_message", {"text": "second"}, "send-ok"),
             ]
@@ -240,10 +279,60 @@ class LLMWorkflowRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(run.edge_traversals["more_information_requested"], 1)
         second_collection = collector.calls[1]["messages"]
         self.assertTrue(any(message.get("name") == "request_more_information" for message in second_collection))
+        serialized = json.dumps(second_collection)
+        self.assertIn("older messages", serialized)
+        self.assertNotIn("actor private draft", serialized)
+        self.assertNotIn("actor reasoning", serialized)
+        self.assertNotIn("actor signature", serialized)
+        self.assertIn(first_collection["message"], second_collection)
+        self.assertIn(follow_up["message"], actor.calls[1]["messages"])
+        self.assertNotIn("collector private reasoning", json.dumps(actor.calls[1]["messages"]))
+        # Actor's own failed send still has its matching result on the next round.
+        self.assertTrue(any(m.get("tool_call_id") == "send-failed" for m in actor.calls[2]["messages"]))
         event_kinds = [event.kind for event in run.transcript.events]
         self.assertIn("provider_response", event_kinds)
         self.assertIn("tool_call", event_kinds)
         self.assertIn("tool_result", event_kinds)
+
+    async def test_mixed_tool_batch_keeps_pairs_errors_and_refreshed_context(self) -> None:
+        collected = tool_response("query_messages", {"page": 1}, "read-1")
+        collected["message"]["content"] = "private collection summary"
+        second_read = tool_response("query_messages", {"page": 2}, "")["message"]["tool_calls"][0]
+        second_read["function"]["native_reasoning"] = "private function metadata"
+        collected["message"]["tool_calls"].extend([
+            tool_response("complete_collection", {}, "handoff")["message"]["tool_calls"][0],
+            second_read,
+        ])
+        original = deepcopy(collected)
+        # Isolation is by node, even when both nodes use exactly the same provider.
+        provider = FakeProvider([collected, tool_response("send_message", {"text": "answer"}, "send")])
+        execute = AsyncMock(side_effect=[
+            {"fact": "first page"}, {"error": "second page unavailable"}, {"status": "ok"},
+        ])
+        context = LLMWorkflowContext(
+            messages=[{"role": "user", "content": "question"}],
+            tools=(agent_tool("query_messages", "input"), agent_tool("send_message", "output")),
+            provider_resolver=lambda slot: provider,
+            tool_executor=execute,
+            context_refresher=AsyncMock(side_effect=["new user message", None]),
+        )
+        run = WorkflowRun(collector_actor_workflow(), Transcript())
+        await WorkflowEngine({"llm": LLMNodeExecutor(context)}).run(run)
+        history = provider.calls[1]["messages"]
+        calls = next(m["tool_calls"] for m in history if m.get("tool_calls"))
+        results = [m for m in history if m.get("role") == "tool"]
+        self.assertEqual([c["function"]["name"] for c in calls], ["query_messages"] * 2)
+        self.assertEqual([c["id"] for c in calls], [r["tool_call_id"] for r in results])
+        self.assertTrue(all(c["id"] for c in calls))
+        self.assertIn("second page unavailable", results[1]["content"])
+        self.assertEqual(history[-1], {"role": "user", "content": "new user message"})
+        self.assertNotIn("private", json.dumps(history))
+        self.assertNotIn("handoff", json.dumps(history))
+        self.assertEqual(collected, original)
+        # Mutating a provider's request view must not alter raw history or audit events.
+        calls[0]["function"]["arguments"] = "changed"
+        self.assertEqual(context.messages[1]["tool_calls"][0]["function"]["arguments"], '{"page": 1}')
+        self.assertEqual(run.transcript.events[0].payload["message"], original["message"])
 
     async def test_actor_sends_plain_text_when_model_skips_tools(self) -> None:
         collector = FakeProvider([tool_response("complete_collection", {}, "handover-1")])
@@ -306,6 +395,8 @@ class LLMWorkflowRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(run.status, "completed")
         self.assertEqual(executed, ["send_message"])
+        self.assertNotIn("enough context", json.dumps(actor.calls[0]["messages"]))
+        self.assertIn({"role": "assistant", "content": "enough context"}, context.messages)
 
 
 class EngineObserverTests(unittest.IsolatedAsyncioTestCase):

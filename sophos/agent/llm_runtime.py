@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 from collections.abc import Awaitable, Callable
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -14,7 +15,7 @@ import aiohttp
 from sophos import observability
 from sophos.agent.engine import NodeOutcome, WorkflowRun, build_model_transition_tools
 from sophos.agent.transcript import NativeEnvelope, Transcript, new_event
-from sophos.agent.workflow import NodeSpec, ToolPolicy
+from sophos.agent.workflow import NodeSpec, ToolPolicy, WorkflowDefinition
 from sophos.llm.provider import CachePlan, LLMProvider, Message, ProviderRequestOptions
 
 logger = logging.getLogger(__name__)
@@ -35,7 +36,7 @@ class AgentTool:
 
 @dataclass(slots=True)
 class LLMWorkflowContext:
-    """Mutable request context shared by every LLM node in one graph run."""
+    """Raw history with node ownership; each request gets an isolated projection."""
 
     messages: list[Message]
     tools: tuple[AgentTool, ...]
@@ -49,6 +50,56 @@ class LLMWorkflowContext:
     )
     system_prompt_renderer: Callable[[NodeSpec], str | None] | None = None
     on_step: Callable[[str, str, dict[str, Any]], None] | None = None
+    _message_nodes: dict[int, str] = field(default_factory=dict, init=False, repr=False)
+
+    def append_node_message(self, message: Message, node_id: str) -> None:
+        # History is append-only; provenance stays out of provider-visible messages.
+        self._message_nodes[len(self.messages)] = node_id
+        self.messages.append(message)
+
+    def messages_for_node(self, node_id: str, workflow: WorkflowDefinition) -> list[Message]:
+        # Argument-free transitions (e.g. complete_collection) are internal control
+        # records. Data-bearing transitions must survive to carry follow-up requests.
+        control_tools = {
+            node.node_id: {
+                tool["function"]["name"] for tool in build_model_transition_tools(workflow, node.node_id)
+                if not tool["function"]["parameters"].get("properties")
+            }
+            for node in workflow.nodes
+        }
+        projected: list[Message] = []
+        visible_call_ids: set[str] = set()
+        for index, message in enumerate(self.messages):
+            owner = self._message_nodes.get(index)
+            if owner is None or owner == node_id:
+                # Seed chat, new user messages and this node's own reasoning stay intact.
+                projected.append(deepcopy(message))
+                continue
+            if message.get("role") == "assistant":
+                calls = [
+                    {
+                        "id": call["id"],
+                        "type": "function",
+                        "function": {
+                            "name": call.get("function", {}).get("name", ""),
+                            "arguments": deepcopy(call.get("function", {}).get("arguments", "{}")),
+                        },
+                    }
+                    for call in message.get("tool_calls") or []
+                    if call.get("function", {}).get("name", "") not in control_tools.get(owner, set())
+                ]
+                visible_call_ids = {call["id"] for call in calls}
+                if calls:
+                    # Whitelist protocol fields: no prose, reasoning or native signatures.
+                    projected.append({"role": "assistant", "tool_calls": calls})
+            elif message.get("role") == "tool" and message.get("tool_call_id") in visible_call_ids:
+                projected.append({
+                    "role": "tool",
+                    "tool_call_id": message["tool_call_id"],
+                    "name": message["name"],
+                    "content": message.get("content"),
+                })
+        return projected
 
 
 class LLMNodeExecutionError(RuntimeError):
@@ -86,7 +137,7 @@ class LLMNodeExecutor:
         system_prompt = renderer(node) if renderer is not None else None
         for round_number in range(1, max_rounds + 1):
             request_messages = _with_node_instructions(
-                self.context.messages,
+                self.context.messages_for_node(node.node_id, run.workflow),
                 node.instructions,
                 system_prompt=system_prompt,
             )
@@ -114,8 +165,11 @@ class LLMNodeExecutor:
                         exc_info=True,
                     )
                     await asyncio.sleep(delay)
-            assistant_message = response["message"]
-            self.context.messages.append(assistant_message)
+            assistant_message = deepcopy(response["message"])
+            for index, call in enumerate(assistant_message.get("tool_calls") or []):
+                if not call.get("id"):
+                    call["id"] = f"{node.node_id}_{run.step_count}_{round_number}_{index}"
+            self.context.append_node_message(assistant_message, node.node_id)
             _record_provider_response(run.transcript, node, response)
             if self.context.on_step is not None:
                 usage = response.get("usage") or {}
@@ -184,13 +238,14 @@ class LLMNodeExecutor:
                         completion_tool = tool_name
 
                 result_text = json.dumps(result, ensure_ascii=False, default=str)
-                self.context.messages.append(
+                self.context.append_node_message(
                     {
                         "role": "tool",
                         "tool_call_id": call_id,
                         "name": tool_name,
                         "content": result_text,
-                    }
+                    },
+                    node.node_id,
                 )
                 run.transcript.append(
                     new_event(
