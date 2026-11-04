@@ -104,7 +104,7 @@ async def create_provider(request: web.Request) -> web.Response:
 
 @routes.put("/api/providers/{alias}")
 async def update_provider(request: web.Request) -> web.Response:
-    """更新 provider 的 base URLs 和请求策略。"""
+    """更新 provider 的 base URLs、API Key 和请求策略。"""
     provider_mgr: ProviderManager = request.app["provider_mgr"]
     alias = request.match_info["alias"]
     payload = await request.json()
@@ -120,6 +120,7 @@ async def update_provider(request: web.Request) -> web.Response:
     result = await provider_mgr.update_provider(
         alias,
         base_urls=base_urls,
+        api_key=payload.get("api_key") or None,
         request_policy=request_policy,
     )
     status = 404 if "不存在" in result else 200

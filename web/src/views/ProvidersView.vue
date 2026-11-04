@@ -68,6 +68,7 @@ const modelSearch = reactive<Record<string, string>>({})
 
 const editDrafts = reactive<Record<string, Partial<Record<ApiType, string>>>>({})
 const requestPolicyDrafts = reactive<Record<string, string>>({})
+const apiKeyDrafts = reactive<Record<string, string>>({})
 
 const addForm = reactive<{
   alias: string
@@ -123,6 +124,7 @@ function isEditing(alias: string) {
 }
 
 function beginEdit(provider: ProviderItem) {
+  apiKeyDrafts[provider.alias] = ''
   editingAliases.value.add(provider.alias)
   editDrafts[provider.alias] = {
     openai: provider.base_urls.openai ?? '',
@@ -137,6 +139,7 @@ function cancelEdit(alias: string) {
   editingAliases.value.delete(alias)
   delete editDrafts[alias]
   delete requestPolicyDrafts[alias]
+  delete apiKeyDrafts[alias]
 }
 
 function openAddDrawer() {
@@ -273,8 +276,10 @@ async function saveProvider(alias: string) {
     const { data } = await api.put(`/providers/${encodeURIComponent(alias)}`, {
       base_urls: baseUrls,
       request_policy: requestPolicy,
+      api_key: apiKeyDrafts[alias]?.trim() || undefined,
     })
     message.success(data.message)
+    delete revealedKeys[alias]
     cancelEdit(alias)
     await loadProviders()
   } catch (error: any) {
@@ -373,7 +378,14 @@ onMounted(loadProviders)
         <div class="provider-meta">
           <div class="provider-meta-item">
             <span class="provider-meta-label">API Key</span>
-            <button class="provider-key-button" type="button" @click="toggleReveal(provider.alias)">
+            <NInput
+              v-if="isEditing(provider.alias)"
+              v-model:value="apiKeyDrafts[provider.alias]"
+              type="password"
+              show-password-on="click"
+              placeholder="输入新 Key，留空保持不变"
+            />
+            <button v-else class="provider-key-button" type="button" @click="toggleReveal(provider.alias)">
               <span>{{ provider.alias in revealedKeys ? revealedKeys[provider.alias] : provider.api_key_masked }}</span>
               <component :is="provider.alias in revealedKeys ? EyeOff : Eye" :size="16" />
             </button>

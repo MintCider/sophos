@@ -480,9 +480,10 @@ class ProviderManager:
         alias: str,
         *,
         base_urls: dict[str, str] | None = None,
+        api_key: str | None = None,
         request_policy: dict[str, Any] | None = None,
     ) -> str:
-        """Update provider URLs and request policy, then hot-reload active chat slots."""
+        """Update provider settings, then hot-reload active chat slots."""
         row = await self._pool.fetchrow(
             "SELECT id FROM llm_providers WHERE alias = $1",
             alias,
@@ -504,6 +505,12 @@ class ProviderManager:
             await self._pool.execute(
                 "UPDATE llm_providers SET request_policy = $1::jsonb WHERE alias = $2",
                 json.dumps(normalized_policy, ensure_ascii=False),
+                alias,
+            )
+        if api_key is not None:
+            await self._pool.execute(
+                "UPDATE llm_providers SET api_key = $1 WHERE alias = $2",
+                api_key,
                 alias,
             )
         await self._reload_active_chat_slots(alias)
